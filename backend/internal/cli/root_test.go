@@ -279,25 +279,22 @@ func TestStatusStoppedJSON(t *testing.T) {
 	}
 }
 
-func TestStopRemovesStaleRunFile(t *testing.T) {
+func TestStopPreservesRunFileWhenPIDAndHealthUnreachable(t *testing.T) {
 	cfg := setConfigEnv(t)
-	if err := runfile.Write(cfg.runFile, runfile.Info{PID: 999999, Port: 3001, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: 999999, Port: closedPort(t), StartedAt: time.Unix(100, 0).UTC()}); err != nil {
 		t.Fatal(err)
 	}
 
-	out, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return false }}, "stop", "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, `"state": "stopped"`) {
-		t.Fatalf("stop did not report stopped:\n%s", out)
+	_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return false }}, "stop", "--json")
+	if err == nil || !strings.Contains(err.Error(), "refusing to remove run-file") {
+		t.Fatalf("stop = %v, want safe refusal when PID and HTTP are inaccessible", err)
 	}
 	info, err := runfile.Read(cfg.runFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info != nil {
-		t.Fatalf("stale run-file was not removed: %#v", info)
+	if info == nil || info.PID != 999999 {
+		t.Fatalf("unverified host run-file must be preserved, got %#v", info)
 	}
 }
 
@@ -323,26 +320,23 @@ func TestStopDoesNotShutdownUnverifiedReusedPID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, _, err := executeCLI(t, Deps{
+	_, _, err := executeCLI(t, Deps{
 		ProcessAlive: func(pid int) bool { return pid == 4242 },
 	}, "stop", "--json")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("stop must refuse unverified daemon identity")
 	}
 	select {
 	case <-shutdownCalled:
 		t.Fatal("stop requested shutdown from a process whose health probe did not prove AO daemon ownership")
 	default:
 	}
-	if !strings.Contains(out, `"state": "stopped"`) {
-		t.Fatalf("stop did not report stopped:\n%s", out)
-	}
 	info, err := runfile.Read(cfg.runFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info != nil {
-		t.Fatalf("unverified run-file was not removed: %#v", info)
+	if info == nil || info.PID != 4242 {
+		t.Fatalf("unverified run-file must be preserved, got %#v", info)
 	}
 }
 
@@ -526,5 +520,43 @@ func jsonResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+
+// A process-isolated Worker can reach loopback on some hosts; that does not
+// authorize `ao stop` or deletion of the host's run-file.
+func TestStopRefusesVerifiedDaemonWhenPIDInvisible(t *testing.T) {
+	cfg := setConfigEnv(t)
+	const hostPID = 424242
+	var shutdown atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			_, _ = fmt.Fprintf(w, `{"status":"ok","service":%q,"pid":%d}`, daemonmeta.ServiceName, hostPID)
+		case "/readyz":
+			_, _ = fmt.Fprintf(w, `{"status":"ready","service":%q,"pid":%d}`, daemonmeta.ServiceName, hostPID)
+		case "/shutdown":
+			shutdown.Store(true)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: hostPID, Port: serverPort(t, srv.URL), StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return false }}, "stop", "--json")
+	if err == nil || !strings.Contains(err.Error(), "refusing shutdown") {
+		t.Fatalf("stop = %v, want refusal for invisible host PID", err)
+	}
+	if shutdown.Load() {
+		t.Fatal("isolated client unexpectedly requested daemon shutdown")
+	}
+	info, err := runfile.Read(cfg.runFile)
+	if err != nil { t.Fatal(err) }
+	if info == nil || info.PID != hostPID {
+		t.Fatalf("live daemon run-file must remain intact, got %#v", info)
 	}
 }
