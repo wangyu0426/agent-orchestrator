@@ -58,10 +58,10 @@ func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daem
 	case stateStopped:
 		return st, nil
 	case stateStale:
-		if err := runfile.Remove(cfg.RunFilePath); err != nil {
-			return daemonStatus{}, err
-		}
-		return daemonStatus{State: stateStopped, RunFile: cfg.RunFilePath, DataDir: cfg.DataDir}, nil
+		// Neither a missing local PID nor a mismatched health response proves
+		// that the daemon is dead. In an isolated namespace, deleting this file
+		// could erase the handshake of a live host daemon.
+		return daemonStatus{}, fmt.Errorf("daemon identity is stale or unverified; refusing to remove run-file %s", cfg.RunFilePath)
 	}
 	if !st.owned {
 		if st.Error != "" {
@@ -70,10 +70,16 @@ func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daem
 		return daemonStatus{}, fmt.Errorf("daemon pid %d is alive but ownership could not be verified", st.PID)
 	}
 
+	// Shutdown and run-file cleanup require host-visible process ownership.
+	// A worker can reach the loopback API while running in another PID
+	// namespace; that must not grant it authority to stop the host daemon.
+	if !c.deps.ProcessAlive(st.PID) {
+		return daemonStatus{}, fmt.Errorf("daemon pid %d is not visible locally; refusing shutdown from an isolated process namespace", st.PID)
+	}
 	if err := c.requestShutdown(ctx, st.Port); err != nil {
 		return daemonStatus{}, fmt.Errorf("request daemon shutdown: %w", err)
 	}
-	return c.waitForStopped(ctx, st.PID, cfg.RunFilePath, cfg.DataDir, opts.timeout)
+	return c.waitForStopped(ctx, st.PID, cfg.RunFilePath, cfg.DataDir, opts.timeout, true)
 }
 
 func (c *commandContext) requestShutdown(ctx context.Context, port int) error {
@@ -95,7 +101,7 @@ func (c *commandContext) requestShutdown(ctx context.Context, port int) error {
 	return nil
 }
 
-func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePath, dataDir string, timeout time.Duration) (daemonStatus, error) {
+func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePath, dataDir string, timeout time.Duration, pidVisibleAtStart bool) (daemonStatus, error) {
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
@@ -112,7 +118,10 @@ func (c *commandContext) waitForStopped(ctx context.Context, pid int, runFilePat
 			return daemonStatus{}, err
 		}
 		alive := c.deps.ProcessAlive(pid)
-		if !alive {
+		// Only a PID previously seen in this namespace can be treated as
+		// confirmed exited when it later disappears. Otherwise the process
+		// may still be running in another namespace: keep its run-file.
+		if pidVisibleAtStart && !alive {
 			// Only remove the run-file if it still belongs to the process we
 			// stopped. A concurrent `ao start` may have already written a new
 			// run-file for a different daemon; removing that would corrupt its
