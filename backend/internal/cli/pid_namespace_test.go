@@ -37,7 +37,7 @@ func TestDaemonStatusAndCallsWhenHostPIDInvisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &commandContext{deps: (Deps{
-		HTTPClient: srv.Client(),
+		HTTPClient:   srv.Client(),
 		ProcessAlive: func(int) bool { return false },
 	}).withDefaults()}
 
@@ -55,9 +55,9 @@ func TestDaemonStatusAndCallsWhenHostPIDInvisible(t *testing.T) {
 // wrong service or PID. This also protects against PID reuse / port takeover.
 func TestInvisibleDaemonPIDRequiresMatchingHealthIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name    string
 		service string
-		pid int
+		pid     int
 	}{
 		{name: "wrong service", service: "not-orchestrator", pid: 424242},
 		{name: "wrong pid", service: daemonmeta.ServiceName, pid: 424243},
@@ -82,7 +82,7 @@ func TestInvisibleDaemonPIDRequiresMatchingHealthIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			c := &commandContext{deps: (Deps{
-				HTTPClient: srv.Client(),
+				HTTPClient:   srv.Client(),
 				ProcessAlive: func(int) bool { return false },
 			}).withDefaults()}
 			st, err := c.inspectDaemon(context.Background())
