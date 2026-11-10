@@ -176,7 +176,13 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		return daemonUnavailableError{message: "Orchestrator daemon is not running — start it with `ao start`", cause: errDaemonNotRunning}
 	}
 	if !c.deps.ProcessAlive(info.PID) {
-		return daemonUnavailableError{message: fmt.Sprintf("Orchestrator daemon is not running (stale run-file at %s) — start it with `ao start`", cfg.RunFilePath), cause: errDaemonNotRunning}
+		// A sandbox may not be able to see the host PID even while sharing its
+		// loopback network. Only trust the run-file when /healthz identifies the
+		// same Orchestrator daemon and PID; never blindly skip the liveness gate.
+		health, probeErr := c.readProbe(ctx, info.Port, "healthz")
+		if probeErr != nil || verifyProbeOwner(health, info.PID, "healthz") != nil || health.Status != "ok" {
+			return daemonUnavailableError{message: fmt.Sprintf("Orchestrator daemon is not running (stale run-file at %s) — start it with `ao start`", cfg.RunFilePath), cause: errDaemonNotRunning}
+		}
 	}
 
 	var reader io.Reader = http.NoBody

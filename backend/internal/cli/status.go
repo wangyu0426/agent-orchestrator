@@ -99,14 +99,17 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 	st.StartedAt = &startedAt
 	st.Uptime = formatUptime(c.deps.Now().Sub(info.StartedAt))
 
-	if !c.deps.ProcessAlive(info.PID) {
-		st.State = stateStale
-		st.Error = "run-file points to a dead process"
-		return st, nil
-	}
-
+	// A worker may share the daemon's loopback network but run in a different
+	// PID namespace. Failure to see the host PID is not proof that it died:
+	// verify the daemon's identity through /healthz before calling it stale.
+	pidVisible := c.deps.ProcessAlive(info.PID)
 	health, err := c.readProbe(ctx, info.Port, "healthz")
 	if err != nil {
+		if !pidVisible {
+			st.State = stateStale
+			st.Error = "run-file points to a dead or unreachable process"
+			return st, nil
+		}
 		st.State = stateUnhealthy
 		st.Error = err.Error()
 		return st, nil
