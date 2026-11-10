@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -156,11 +158,25 @@ func TestWaitForStoppedKeepsInvisibleLiveHostRunFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(200, 0).UTC()
+	// Simulate a successful shutdown ACK while the daemon has not removed
+	// its run-file. This must not be mistaken for confirmed process exit.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/shutdown" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
 	c := &commandContext{deps: (Deps{
+		HTTPClient: srv.Client(),
 		ProcessAlive: func(int) bool { return false },
 		Now: func() time.Time { return now },
 		Sleep: func(d time.Duration) { now = now.Add(d) },
 	}).withDefaults()}
+	if err := c.requestShutdown(context.Background(), serverPort(t, srv.URL)); err != nil {
+		t.Fatal(err)
+	}
 	st, err := c.waitForStopped(context.Background(), hostPID, path, dir, time.Second, false)
 	if err == nil || st.State == stateStopped {
 		t.Fatalf("wait = %+v, %v; must not report stopped while owner cannot be verified", st, err)
