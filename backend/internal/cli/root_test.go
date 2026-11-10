@@ -523,7 +523,6 @@ func jsonResponse(status int, body string) *http.Response {
 	}
 }
 
-
 // A process-isolated Worker can reach loopback on some hosts; that does not
 // authorize `ao stop` or deletion of the host's run-file.
 func TestStopRefusesVerifiedDaemonWhenPIDInvisible(t *testing.T) {
@@ -555,7 +554,9 @@ func TestStopRefusesVerifiedDaemonWhenPIDInvisible(t *testing.T) {
 		t.Fatal("isolated client unexpectedly requested daemon shutdown")
 	}
 	info, err := runfile.Read(cfg.runFile)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info == nil || info.PID != hostPID {
 		t.Fatalf("live daemon run-file must remain intact, got %#v", info)
 	}
