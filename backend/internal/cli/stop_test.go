@@ -147,7 +147,6 @@ func TestWaitForStoppedReportsStoppedWhenRunFileGoneButProcessLingers(t *testing
 	}
 }
 
-
 // An isolated worker must not treat its inability to see the host PID as
 // evidence the daemon has finished shutdown while the run-file remains.
 func TestWaitForStoppedKeepsInvisibleLiveHostRunFile(t *testing.T) {
@@ -169,10 +168,10 @@ func TestWaitForStoppedKeepsInvisibleLiveHostRunFile(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &commandContext{deps: (Deps{
-		HTTPClient: srv.Client(),
+		HTTPClient:   srv.Client(),
 		ProcessAlive: func(int) bool { return false },
-		Now: func() time.Time { return now },
-		Sleep: func(d time.Duration) { now = now.Add(d) },
+		Now:          func() time.Time { return now },
+		Sleep:        func(d time.Duration) { now = now.Add(d) },
 	}).withDefaults()}
 	if err := c.requestShutdown(context.Background(), serverPort(t, srv.URL)); err != nil {
 		t.Fatal(err)
@@ -182,7 +181,9 @@ func TestWaitForStoppedKeepsInvisibleLiveHostRunFile(t *testing.T) {
 		t.Fatalf("wait = %+v, %v; must not report stopped while owner cannot be verified", st, err)
 	}
 	info, err := runfile.Read(path)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info == nil || info.PID != hostPID {
 		t.Fatalf("live host run-file must remain intact, got %#v", info)
 	}
