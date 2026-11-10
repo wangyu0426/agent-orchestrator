@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
 
@@ -320,6 +321,7 @@ func (l *agentLauncher) invocation(spec LaunchSpec) ports.ReviewInvocation {
 	prompt, systemPrompt := reviewTexts(spec)
 	return ports.ReviewInvocation{
 		ReviewerID:      reviewerHandleID(spec.WorkerID),
+		ReviewSessionID: spec.ReviewSessionID,
 		RunID:           spec.RunID,
 		WorkerSessionID: spec.WorkerID,
 		AgentSessionID:  spec.AgentSessionID,
@@ -383,7 +385,33 @@ func (l *agentLauncher) prepareInvocation(ctx context.Context, spec LaunchSpec) 
 	inv.SystemPromptFile = systemPath
 	inv.TaskPromptFile = taskPath
 	inv.TaskPromptRoot = promptRoot
+	if usesReviewResultGateway(spec.Harness) && spec.PRURL != "" && spec.TargetSHA != "" && spec.ReviewSessionID != "" {
+		tasks := spec.ReviewQueue
+		if len(tasks) == 0 {
+			tasks = []ports.ReviewTask{{RunID: spec.RunID, PRURL: spec.PRURL, TargetSHA: spec.TargetSHA}}
+		}
+		manifestTasks := make([]reviewgateway.Task, 0, len(tasks))
+		for _, task := range tasks {
+			manifestTasks = append(manifestTasks, reviewgateway.Task{
+				RunID: task.RunID, PRURL: task.PRURL, TargetSHA: task.TargetSHA, TaskPromptFile: taskPath,
+			})
+		}
+		resultEnv, manifestPointer, err := reviewgateway.PrepareActiveEnvironment(l.dataDir, reviewgateway.Manifest{
+			ReviewerID: inv.ReviewerID, ReviewSessionID: inv.ReviewSessionID,
+			WorkerSessionID: inv.WorkerSessionID, WorkspacePath: inv.WorkspacePath,
+			TaskPromptRoot: promptRoot, Tasks: manifestTasks,
+		})
+		if err != nil {
+			return ports.ReviewInvocation{}, fmt.Errorf("prepare reviewer result gateway: %w", err)
+		}
+		inv.ReviewManifestPointer = manifestPointer
+		inv.ReviewResultPendingDir = resultEnv.ResultPendingDir
+	}
 	return inv, nil
+}
+
+func usesReviewResultGateway(harness domain.ReviewerHarness) bool {
+	return harness == domain.ReviewerCodex || harness == domain.ReviewerPi
 }
 
 func (l *agentLauncher) prepareIdleInvocation(spec LaunchSpec) (ports.ReviewInvocation, error) {
@@ -397,19 +425,29 @@ func (l *agentLauncher) prepareIdleInvocation(spec LaunchSpec) (ports.ReviewInvo
 	if err := os.WriteFile(systemPath, []byte(systemPrompt), 0o600); err != nil {
 		return ports.ReviewInvocation{}, fmt.Errorf("write reviewer system prompt: %w", err)
 	}
+	var resultPendingDir string
+	if usesReviewResultGateway(spec.Harness) {
+		resultEnv, err := reviewgateway.PrepareResultEnvironment(l.dataDir, reviewerHandleID(spec.WorkerID))
+		if err != nil {
+			return ports.ReviewInvocation{}, fmt.Errorf("prepare reviewer result mailbox: %w", err)
+		}
+		resultPendingDir = resultEnv.ResultPendingDir
+	}
 	prompt := fmt.Sprintf("Reviewer terminal restored for worker session %s.\n\n%s\n\nWait for Orchestrator to send the next review task file path before submitting a new review.", spec.WorkerID, previousReviewHistoryText(spec.PreviousRuns))
 	return ports.ReviewInvocation{
-		ReviewerID:       reviewerHandleID(spec.WorkerID),
-		WorkerSessionID:  spec.WorkerID,
-		AgentSessionID:   spec.AgentSessionID,
-		Config:           spec.AgentConfig,
-		WorkspacePath:    spec.WorkspacePath,
-		DataDir:          l.dataDir,
-		RunFilePath:      l.runFile,
-		Prompt:           prompt,
-		SystemPrompt:     "",
-		SystemPromptFile: systemPath,
-		TaskPromptRoot:   promptRoot,
+		ReviewerID:             reviewerHandleID(spec.WorkerID),
+		ReviewSessionID:        spec.ReviewSessionID,
+		WorkerSessionID:        spec.WorkerID,
+		AgentSessionID:         spec.AgentSessionID,
+		Config:                 spec.AgentConfig,
+		WorkspacePath:          spec.WorkspacePath,
+		DataDir:                l.dataDir,
+		RunFilePath:            l.runFile,
+		Prompt:                 prompt,
+		SystemPrompt:           "",
+		SystemPromptFile:       systemPath,
+		TaskPromptRoot:         promptRoot,
+		ReviewResultPendingDir: resultPendingDir,
 	}, nil
 }
 
@@ -496,7 +534,7 @@ func (l *agentLauncher) startReviewerChat(ctx context.Context, spec LaunchSpec, 
 	if spec.DeferInitialMessage {
 		prompt = ""
 	}
-	start := ReviewerChatStart{BatchID: spec.BatchID, ReviewID: spec.ReviewSessionID, WorkerID: spec.WorkerID, ProjectID: spec.ProjectID, Harness: profile.ReviewChatHarness(), Model: spec.AgentConfig.Model, Effort: spec.AgentConfig.Effort, DataDir: l.dataDir, WorkspacePath: spec.WorkspacePath, Env: l.runtimeEnv(ctx, spec, nil, nil), Prompt: prompt, SystemPrompt: string(systemPrompt), ProviderConversationID: providerID}
+	start := ReviewerChatStart{BatchID: spec.BatchID, ReviewID: spec.ReviewSessionID, WorkerID: spec.WorkerID, ProjectID: spec.ProjectID, Harness: profile.ReviewChatHarness(), Model: spec.AgentConfig.Model, Effort: spec.AgentConfig.Effort, DataDir: l.dataDir, WorkspacePath: spec.WorkspacePath, Env: l.runtimeEnv(ctx, spec, nil, nil, inv), Prompt: prompt, SystemPrompt: string(systemPrompt), ProviderConversationID: providerID}
 	if restore {
 		providerID, err = l.chat.RestoreReviewChat(ctx, start)
 	} else {
@@ -561,7 +599,7 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 	if workingDirectory == "" {
 		workingDirectory = spec.WorkspacePath
 	}
-	env := l.runtimeEnv(ctx, spec, cmd.Argv, cmd.Env)
+	env := l.runtimeEnv(ctx, spec, cmd.Argv, cmd.Env, inv)
 	argv := cmd.Argv
 	if strings.TrimSpace(spec.LaunchID) != "" {
 		executable, resolveErr := l.executable()
@@ -660,11 +698,17 @@ func outputContainsAny(output string, patterns []string) bool {
 	return false
 }
 
-func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []string, base map[string]string) map[string]string {
+func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []string, base map[string]string, inv ports.ReviewInvocation) map[string]string {
 	env := agentlaunch.MergeEnv(spec.ProjectEnv, base)
 	delete(env, sessionmanager.EnvSessionID)
 	env["AO_REVIEW_SESSION_ID"] = spec.ReviewSessionID
 	env["AO_REVIEW_WORKER_SESSION_ID"] = string(spec.WorkerID)
+	if inv.ReviewManifestPointer != "" {
+		env[reviewgateway.EnvManifestPointer] = inv.ReviewManifestPointer
+	}
+	if inv.ReviewResultPendingDir != "" {
+		env[reviewgateway.EnvResultPendingDir] = inv.ReviewResultPendingDir
+	}
 	env["AO_REVIEW_HARNESS"] = string(spec.Harness)
 	if strings.TrimSpace(spec.LaunchID) != "" {
 		env[sessionmanager.EnvRuntimeLaunchID] = spec.LaunchID

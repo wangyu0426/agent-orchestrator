@@ -10,7 +10,9 @@ const manifestPointer = mustEnv("AO_PI_REVIEW_MANIFEST_POINTER");
 const maxOutput = 100_000;
 
 type ReviewTask = { runId: string; prUrl: string; targetSha: string };
-type ReviewManifest = { version: number; workerSessionId: string; tasks: ReviewTask[] };
+type ReviewManifest = { version: number; reviewerId: string; reviewSessionId: string; workerSessionId: string; tasks: ReviewTask[] };
+const postedReviewIds = new Map<string, string>();
+const failedReviewPosts = new Set<string>();
 
 function mustEnv(name: string): string {
 	return resolve(mustValue(name));
@@ -64,7 +66,7 @@ async function activeManifest(): Promise<ReviewManifest> {
 	const manifestRoot = await realpath(join(dirname(pointerPath), "manifests"));
 	if (!pathWithin(manifestRoot, manifestPath)) throw new Error("active manifest is outside the Orchestrator manifest directory");
 	const parsed = JSON.parse(await readFile(manifestPath, "utf8")) as ReviewManifest;
-	if (parsed.version !== 1 || parsed.workerSessionId !== workerSession || !Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
+	if (parsed.version !== 1 || !parsed.reviewerId || !parsed.reviewSessionId || parsed.workerSessionId !== workerSession || !Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
 		throw new Error("invalid active review manifest");
 	}
 	for (const task of parsed.tasks) {
@@ -162,8 +164,10 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ runId: Type.String(), prUrl: Type.String(), targetSha: Type.String(), body: Type.String(), comments: Type.Optional(Type.Array(Type.Object({ path: Type.String(), line: Type.Integer({ minimum: 1 }), body: Type.String() }))) }),
 		async execute(_id, params, signal) {
 			let dir = "";
+			let runId = "";
 			try {
 				const task = await authorizedTask(params.runId, params.prUrl, params.targetSha);
+				runId = task.runId;
 				const url = new URL(params.prUrl);
 				const match = url.hostname === "github.com" && url.pathname.match(/^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\/?$/);
 				if (!match) throw new Error("unsupported GitHub pull request URL");
@@ -174,8 +178,14 @@ export default function (pi: ExtensionAPI) {
 				dir = await mkdtemp(join(promptRoot, "github-review-"));
 				const input = join(dir, "review.json");
 				await writeFile(input, JSON.stringify({ event: "COMMENT", body: params.body, commit_id: task.targetSha, ...(params.comments?.length ? { comments: params.comments } : {}) }), { mode: 0o600 });
-				return await run(pi, "gh", ["api", "--method", "POST", `repos/${match[1]}/${match[2]}/pulls/${match[3]}/reviews`, "--input", input, "--jq", ".id"], signal);
-			} catch (error) { return result(String(error), true); }
+				const output = await pi.exec("gh", ["api", "--method", "POST", `repos/${match[1]}/${match[2]}/pulls/${match[3]}/reviews`, "--input", input, "--jq", ".id"], { cwd: workspace, signal, timeout: 30_000 });
+				if (output.code !== 0) throw new Error(`gh exited ${output.code}: ${output.stderr || output.stdout}`);
+				const reviewId = output.stdout.trim();
+				if (!/^\d+$/.test(reviewId)) throw new Error("GitHub did not return a numeric review id");
+				postedReviewIds.set(task.runId, reviewId);
+				failedReviewPosts.delete(task.runId);
+				return result(reviewId);
+			} catch (error) { if (runId) failedReviewPosts.add(runId); return result(String(error), true); }
 			finally { if (dir) await rm(dir, { recursive: true, force: true }); }
 		},
 	});
@@ -190,9 +200,18 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const manifest = await activeManifest();
 				for (const review of params.reviews) if (!manifest.tasks.some((task) => task.runId === review.runId)) throw new Error(`run ${review.runId} is not in the active Orchestrator review manifest`);
+				const reviews = params.reviews.map((review) => {
+					const postedId = postedReviewIds.get(review.runId);
+					if (!postedId) {
+						if (!failedReviewPosts.has(review.runId) || review.githubReviewId) throw new Error(`run ${review.runId} has no matching GitHub review posted by this reviewer process`);
+						return { ...review, githubReviewId: "" };
+					}
+					if (review.githubReviewId && review.githubReviewId !== postedId) throw new Error(`run ${review.runId} GitHub review id does not match the posted review`);
+					return { ...review, githubReviewId: postedId };
+				});
 				dir = await mkdtemp(join(promptRoot, "ao-submit-"));
 				const input = join(dir, "reviews.json");
-				await writeFile(input, JSON.stringify({ reviews: params.reviews }), { mode: 0o600 });
+				await writeFile(input, JSON.stringify({ reviews }), { mode: 0o600 });
 				return await run(pi, "ao", ["review", "submit", "--session", workerSession, "--reviews", input], signal);
 			} catch (error) { return result(String(error), true); }
 			finally { if (dir) await rm(dir, { recursive: true, force: true }); }

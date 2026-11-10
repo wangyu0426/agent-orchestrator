@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hookutil"
 	agentpi "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/pi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -18,7 +17,7 @@ import (
 )
 
 const extensionFilename = "ao-pi-reviewer.ts"
-const manifestPointerFilename = "pi-active-manifest"
+const manifestPointerFilename = reviewgateway.ManifestPointerFilename
 
 var requiredFlags = []string{
 	"--no-builtin-tools",
@@ -137,6 +136,8 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 	envVars["AO_PI_REVIEW_PROMPT_ROOT"] = inv.TaskPromptRoot
 	envVars["AO_PI_REVIEW_SESSION"] = string(inv.WorkerSessionID)
 	envVars["AO_PI_REVIEW_MANIFEST_POINTER"] = manifestPointer
+	envVars[reviewgateway.EnvManifestPointer] = manifestPointer
+	envVars[reviewgateway.EnvResultPendingDir] = reviewEnv.ResultPendingDir
 	return ports.ReviewCommandSpec{Argv: argv, Env: envVars}, nil
 }
 
@@ -170,17 +171,13 @@ func activateManifest(inv ports.ReviewInvocation) (reviewgateway.Environment, st
 			TaskPromptFile: inv.TaskPromptFile,
 		})
 	}
-	env, err := reviewgateway.PrepareEnvironment(inv.DataDir, reviewgateway.Manifest{
-		ReviewerID: inv.ReviewerID, WorkerSessionID: inv.WorkerSessionID,
+	env, pointerPath, err := reviewgateway.PrepareActiveEnvironment(inv.DataDir, reviewgateway.Manifest{
+		ReviewerID: inv.ReviewerID, ReviewSessionID: inv.ReviewSessionID, WorkerSessionID: inv.WorkerSessionID,
 		WorkspacePath: inv.WorkspacePath, TaskPromptRoot: inv.TaskPromptRoot,
 		Tasks: manifestTasks,
 	})
 	if err != nil {
 		return reviewgateway.Environment{}, "", err
-	}
-	pointerPath := filepath.Join(env.Root, manifestPointerFilename)
-	if err := hookutil.AtomicWriteFile(pointerPath, []byte(env.ManifestPath+"\n"), 0o600); err != nil {
-		return reviewgateway.Environment{}, "", fmt.Errorf("write active manifest pointer: %w", err)
 	}
 	return env, pointerPath, nil
 }
@@ -192,4 +189,4 @@ func (*Reviewer) ReviewCancel(context.Context) (ports.ReviewCancelSpec, error) {
 
 const piPolicy = `Pi reviewer security policy
 
-You are running in Pi's interactive TUI with no built-in tools and no project or user resources. Use only the Orchestrator review tools supplied by the loaded Orchestrator extension. Use github_post_review instead of the task file's gh command, and use ao_review_submit instead of its ao CLI command. Those structured tools enforce the current review queue and do not provide arbitrary shell execution. Never ask for or attempt to enable other tools or resources.`
+You are running in Pi's interactive TUI with no built-in tools and no project or user resources. Use only the Orchestrator review tools supplied by the loaded Orchestrator extension. Use github_post_review instead of the task file's gh command, and use ao_review_submit instead of its ao CLI command. The extension carries the exact GitHub review id it receives into AO's structured result inbox; AO's trusted host controller validates the worker, reviewer, run, PR, target commit, and review id before recording the verdict. Do not derive the verdict from arbitrary GitHub review text; choose it from your independent review of the target diff. Those structured tools do not provide arbitrary shell execution. Never ask for or attempt to enable other tools or resources.`

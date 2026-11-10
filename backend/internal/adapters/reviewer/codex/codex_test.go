@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -73,6 +74,41 @@ func TestReviewCommandUsesReadOnlySandbox(t *testing.T) {
 	}
 	if agent.got.SystemPrompt != "review only" {
 		t.Fatalf("system prompt = %q", agent.got.SystemPrompt)
+	}
+}
+
+func TestReviewCommandGrantsWriteAccessOnlyToResultInbox(t *testing.T) {
+	agent := &captureAgent{}
+	r := &Reviewer{agent: agent}
+	inv := ports.ReviewInvocation{
+		ReviewerID: "review-w1", ReviewSessionID: "review-row-1", WorkerSessionID: "worker-1",
+		WorkspacePath: "/workspace/project", DataDir: "/var/lib/ao",
+		RunFilePath: "/var/lib/ao/run.json", ReviewManifestPointer: "/var/lib/ao/reviewer-runtime/review-w1/pi-active-manifest",
+		ReviewResultPendingDir: "/var/lib/ao/reviewer-runtime/review-w1/results/pending", Prompt: "review it",
+	}
+	got, err := r.ReviewCommand(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("ReviewCommand: %v", err)
+	}
+	if !slices.Contains(got.Argv, "--sandbox") || !slices.Contains(got.Argv, "read-only") {
+		t.Fatalf("read-only sandbox missing: %#v", got.Argv)
+	}
+	if !slices.Contains(got.Argv, "--add-dir") || !slices.Contains(got.Argv, inv.ReviewResultPendingDir) {
+		t.Fatalf("result inbox not added as writable path: %#v", got.Argv)
+	}
+	if slices.Contains(got.Argv, inv.DataDir) || slices.Contains(got.Argv, inv.WorkspacePath) {
+		t.Fatalf("broader writable root was granted: %#v", got.Argv)
+	}
+	for _, name := range []string{"AO_REVIEW_SESSION_ID", "AO_REVIEW_WORKER_SESSION_ID", "AO_REVIEW_GATEWAY_MANIFEST_POINTER", "AO_REVIEW_RESULT_PENDING_DIRECTORY"} {
+		found := false
+		for _, arg := range got.Argv {
+			if strings.Contains(arg, `shell_environment_policy.set.`+name+`=`) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("shell environment policy omitted %s: %#v", name, got.Argv)
+		}
 	}
 }
 

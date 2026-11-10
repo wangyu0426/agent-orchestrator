@@ -604,6 +604,7 @@ func Run(buildVersion string) error {
 	if usage != nil {
 		sessionSvc.SetUsageArchiveFlush(func(context.Context) { usage.requestArchiveFlush() })
 	}
+	reviewSvc.StartResultDelivery(ctx)
 	sessionSvc.SetChatProviderPreserver(chatSvc.PreservesProviderOnRestart)
 	memoryReader := usagesvc.NewMemoryReader(usagesvc.MemoryReaderDeps{
 		Store: store, Runtime: runtimeAdapter, Reviewers: store, CacheTTL: 2 * time.Second,

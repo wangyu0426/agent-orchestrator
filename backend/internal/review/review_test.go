@@ -41,6 +41,11 @@ type fakeStore struct {
 	recoverableReviewsErr  error
 	recoveryErrors         map[string]string
 	settledReviewIDs       []string
+	pendingReviewResults   bool
+}
+
+func (f *fakeStore) HasPendingResults(_ context.Context, _ string, _ []domain.ReviewRun) (bool, error) {
+	return f.pendingReviewResults, nil
 }
 
 func (f *fakeStore) UpsertReview(_ context.Context, r domain.Review) error {
@@ -659,7 +664,7 @@ func TestTriggerPersistsChatModeBeforeCreatingReviewerConversation(t *testing.T)
 	var started ReviewerChatStart
 	chat := sqliteReviewChatController{store: store, started: &started}
 	launcher := NewLauncher(singleReviewerResolver{reviewer: chatReviewAdapter{}}, &fakeRuntime{}, t.TempDir(), WithReviewerChat(chat))
-	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("0123456789abcdef0123456789abcdef01234567"), fakeProjects{}, launcher)
 
 	result, err := trigger(ctx, eng, worker.ID, domain.ReviewerCodex, domain.AgentConfig{Model: "gpt-6-sol", Effort: "high"})
 	if err != nil {
@@ -3017,6 +3022,39 @@ func TestListMarksRunningReviewFailedWhenReviewerExited(t *testing.T) {
 	}
 	if len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunFailed || got.Runs[0].Body != reviewerExitedBeforeSubmission {
 		t.Fatalf("runs = %+v, want failed reviewer-exit result", got.Runs)
+	}
+}
+
+func TestListDefersReviewerExitFailureWhileMatchingResultIsPending(t *testing.T) {
+	store := &fakeStore{
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "review-mer-1", ReviewerActivityState: domain.ActivityActive},
+		runs: []domain.ReviewRun{{
+			ID: "run-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider,
+			PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning,
+		}},
+		pendingReviewResults: true,
+	}
+	launcher := &fakeLauncher{alive: false}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	eng.pendingResults = store
+
+	got, err := eng.List(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReviewerActivityState != domain.ActivityActive || len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunRunning || len(store.runs) != 1 {
+		t.Fatalf("pending result was treated as reviewer failure: list=%+v stored=%+v", got, store.runs)
+	}
+
+	// Once delivery rejects/clears the file, the normal exit reconciliation
+	// resumes and marks a genuinely unsubmitted run failed.
+	store.pendingReviewResults = false
+	got, err = eng.List(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReviewerActivityState != domain.ActivityExited || len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunFailed {
+		t.Fatalf("reviewer exit was not reconciled after pending result cleared: %+v", got)
 	}
 }
 

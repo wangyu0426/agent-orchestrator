@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -92,6 +94,9 @@ type Service struct {
 	notifications      reviewNotificationSink
 	prRefresher        PRRefresher
 	reviewRefresher    ThreadRefresher
+	resultInbox        *reviewgateway.ResultInbox
+	resultDeliveryMu   sync.Mutex
+	resultDeliveryOnce sync.Once
 	// engineTrigger indirects the engine's source-tagged trigger so the
 	// instrumented path can be exercised without standing up a full engine and
 	// its eighteen-method store. Defaulted in New; only tests replace it.
@@ -210,6 +215,13 @@ func WithNotificationSink(sink reviewNotificationSink) Option {
 // entering while the device-global Codex credential is changing.
 func WithCodexAccountOperationGate(gate ports.CodexOperationGate) Option {
 	return func(s *Service) { s.codexOperationGate = gate }
+}
+
+// WithResultInbox wires the sandboxed reviewer's filesystem mailbox. The
+// daemon polls it from the trusted host and submits results through this
+// service, preserving the same run-state checks as the HTTP API.
+func WithResultInbox(inbox *reviewgateway.ResultInbox) Option {
+	return func(s *Service) { s.resultInbox = inbox }
 }
 
 // emit reports an event when a sink is wired.
@@ -879,6 +891,122 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 	return runs, nil
 }
 
+// SubmitGatewayResult validates every identity copied from the active review
+// manifest before passing a sandbox result through the ordinary submit path.
+func (s *Service) SubmitGatewayResult(ctx context.Context, result reviewgateway.Result) (domain.ReviewRun, error) {
+	if s.store == nil {
+		return domain.ReviewRun{}, errors.New("review service store is not configured")
+	}
+	if result.Version != 1 || strings.TrimSpace(result.ReviewerID) == "" || strings.TrimSpace(result.ReviewSessionID) == "" || strings.TrimSpace(result.WorkerSessionID) == "" || strings.TrimSpace(result.RunID) == "" || strings.TrimSpace(result.PRURL) == "" || strings.TrimSpace(result.TargetSHA) == "" {
+		return domain.ReviewRun{}, fmt.Errorf("%w: incomplete sandbox review identity", ErrInvalid)
+	}
+	workerID := domain.SessionID(result.WorkerSessionID)
+	run, ok, err := s.store.GetReviewRun(ctx, result.RunID)
+	if err != nil {
+		return domain.ReviewRun{}, err
+	}
+	if !ok {
+		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q", ErrNotFound, result.RunID)
+	}
+	if run.SessionID != workerID || run.ReviewID != result.ReviewSessionID || run.PRURL != result.PRURL || run.TargetSHA != result.TargetSHA {
+		return domain.ReviewRun{}, fmt.Errorf("%w: result identity does not match review run %q", ErrInvalid, result.RunID)
+	}
+	review, ok, err := s.store.GetReviewByID(ctx, run.ReviewID)
+	if err != nil {
+		return domain.ReviewRun{}, err
+	}
+	if !ok {
+		return domain.ReviewRun{}, fmt.Errorf("%w: reviewer session %q", ErrNotFound, run.ReviewID)
+	}
+	if review.ID != result.ReviewSessionID || review.SessionID != workerID || review.ReviewerHandleID != result.ReviewerID {
+		return domain.ReviewRun{}, fmt.Errorf("%w: reviewer identity does not own review run %q", ErrInvalid, result.RunID)
+	}
+	verdict := domain.ReviewVerdict(result.Verdict)
+	if !verdict.Valid() {
+		return domain.ReviewRun{}, fmt.Errorf("%w: invalid sandbox review verdict", ErrInvalid)
+	}
+	switch run.Status {
+	case domain.ReviewRunRunning:
+		return s.Submit(ctx, workerID, result.RunID, verdict, result.Body, result.GithubReviewID)
+	case domain.ReviewRunComplete, domain.ReviewRunDelivered:
+		if run.Verdict != verdict || run.Body != result.Body || run.GithubReviewID != result.GithubReviewID {
+			return domain.ReviewRun{}, fmt.Errorf("%w: run %q already has a different result", ErrInvalid, result.RunID)
+		}
+		return run, nil
+	default:
+		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is no longer running", ErrInvalid, result.RunID)
+	}
+}
+
+const reviewResultDeliveryInterval = 250 * time.Millisecond
+
+// StartResultDelivery polls the host-side inbox while the daemon is running.
+// Submitted files remain durable until the service commits and acknowledges
+// them, so reviewer exit does not race the poll interval.
+func (s *Service) StartResultDelivery(ctx context.Context) {
+	if s.resultInbox == nil {
+		return
+	}
+	s.resultDeliveryOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(reviewResultDeliveryInterval)
+			defer ticker.Stop()
+			for {
+				if err := s.ProcessPendingReviewResults(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Default().WarnContext(ctx, "native review result delivery failed", "err", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	})
+}
+
+// ProcessPendingReviewResults drains any ready inbox entries once. It is also
+// called before listing reviews so an exited reviewer cannot be reconciled as
+// failed ahead of a result the host has already received.
+func (s *Service) ProcessPendingReviewResults(ctx context.Context) error {
+	if s.resultInbox == nil {
+		return nil
+	}
+	s.resultDeliveryMu.Lock()
+	defer s.resultDeliveryMu.Unlock()
+	items, err := s.resultInbox.Pending(ctx)
+	if err != nil {
+		return err
+	}
+	var deliveryErrors []error
+	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(deliveryErrors, err)...)
+		}
+		if item.InvalidReason != "" {
+			if err := s.resultInbox.Acknowledge(item, "rejected", item.InvalidReason); err != nil {
+				deliveryErrors = append(deliveryErrors, err)
+			}
+			continue
+		}
+		_, submitErr := s.SubmitGatewayResult(ctx, item.Result)
+		if submitErr != nil {
+			if errors.Is(submitErr, ErrInvalid) || errors.Is(submitErr, ErrNotFound) {
+				if err := s.resultInbox.Acknowledge(item, "rejected", submitErr.Error()); err != nil {
+					deliveryErrors = append(deliveryErrors, err)
+				}
+				continue
+			}
+			deliveryErrors = append(deliveryErrors, submitErr)
+			continue
+		}
+		if err := s.resultInbox.Acknowledge(item, "delivered", ""); err != nil {
+			deliveryErrors = append(deliveryErrors, err)
+		}
+	}
+	return errors.Join(deliveryErrors...)
+}
+
 func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, review SubmittedReview) (domain.ReviewRun, error) {
 	runID := review.RunID
 	verdict := review.Verdict
@@ -1001,6 +1129,9 @@ func (s *Service) emitReviewNotification(ctx context.Context, run domain.ReviewR
 
 // List returns a worker's review state.
 func (s *Service) List(ctx context.Context, workerID domain.SessionID) (reviewcore.SessionReviews, error) {
+	if err := s.ProcessPendingReviewResults(ctx); err != nil {
+		return reviewcore.SessionReviews{}, err
+	}
 	return s.engine.List(ctx, workerID)
 }
 

@@ -1239,6 +1239,7 @@ func TestDeferredCodexTerminalDispatchesTaskOnlyOnNotify(t *testing.T) {
 	spec := launchSpec()
 	spec.Harness = domain.ReviewerCodex
 	spec.WorkspacePath = t.TempDir()
+	spec.TargetSHA = "0123456789abcdef0123456789abcdef01234567"
 	spec.InterfaceMode = domain.ReviewerInterfaceTUI
 	spec.DeferInitialMessage = true
 	result, err := l.Spawn(context.Background(), spec)

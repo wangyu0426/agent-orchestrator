@@ -13,6 +13,9 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 // reviewCapture records the method/path/body of the request the CLI made.
@@ -48,7 +51,92 @@ func setReviewEnv(t *testing.T) testConfig {
 	cfg := setConfigEnv(t)
 	t.Setenv("AO_SESSION_ID", "")
 	t.Setenv("AO_REVIEW_SESSION_ID", "")
+	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", "")
+	t.Setenv(reviewgateway.EnvManifestPointer, "")
+	t.Setenv(reviewgateway.EnvResultPendingDir, "")
 	return cfg
+}
+
+func TestReviewSubmitDeliversThroughInboxWhenLoopbackIsInaccessible(t *testing.T) {
+	cfg := setReviewEnv(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: os.Getpid(), Port: 3001, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	promptRoot := filepath.Join(dataDir, "prompts")
+	if err := os.MkdirAll(promptRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	taskPath := filepath.Join(promptRoot, "run-1.md")
+	if err := os.WriteFile(taskPath, []byte("review task"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := reviewgateway.Manifest{
+		ReviewerID: "review-mer-1", ReviewSessionID: "review-row-1", WorkerSessionID: "mer-1",
+		WorkspacePath: filepath.Join(dataDir, "checkout"), TaskPromptRoot: promptRoot,
+		Tasks: []reviewgateway.Task{{
+			RunID: "run-1", PRURL: "https://github.com/acme/widgets/pull/42", TargetSHA: "0123456789abcdef",
+			TaskPromptFile: taskPath,
+		}},
+	}
+	env, _, err := reviewgateway.PrepareActiveEnvironment(dataDir, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AO_DATA_DIR", dataDir)
+	t.Setenv("AO_REVIEW_SESSION_ID", manifest.ReviewSessionID)
+	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", string(manifest.WorkerSessionID))
+	// An idle restored reviewer may have launched before the active task
+	// manifest was published; AO updates the stable pointer before notification.
+	t.Setenv(reviewgateway.EnvManifestPointer, "")
+	t.Setenv(reviewgateway.EnvResultPendingDir, env.ResultPendingDir)
+	inbox, err := reviewgateway.NewResultInbox(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var socketAttempts int
+	deps := aliveDeps()
+	deps.In = strings.NewReader(`{"reviews":[{"runId":"run-1","verdict":"approved","body":"No required changes.","githubReviewId":"5841980481"}]}`)
+	deps.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		socketAttempts++
+		return nil, errors.New("connect to daemon loopback: Operation not permitted")
+	})}
+
+	delivered := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			items, pendingErr := inbox.Pending(context.Background())
+			if pendingErr != nil {
+				delivered <- pendingErr
+				return
+			}
+			if len(items) > 0 {
+				if items[0].Result.WorkerSessionID != string(manifest.WorkerSessionID) || items[0].Result.RunID != "run-1" || items[0].Result.TargetSHA != manifest.Tasks[0].TargetSHA || items[0].Result.GithubReviewID != "5841980481" {
+					delivered <- errors.New("mailbox result did not preserve the active review identity")
+					return
+				}
+				delivered <- inbox.Acknowledge(items[0], "delivered", "")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		delivered <- errors.New("host did not observe the queued result")
+	}()
+
+	out, errOut, err := executeCLI(t, deps, "review", "submit", "mer-1", "--reviews", "-")
+	if err != nil {
+		t.Fatalf("inbox submit: %v\nstderr=%s", err, errOut)
+	}
+	if socketAttempts != 0 {
+		t.Fatalf("review submit attempted %d loopback requests", socketAttempts)
+	}
+	if err := <-delivered; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "recorded 1 review(s) for mer-1") {
+		t.Fatalf("stdout = %q", out)
+	}
 }
 
 func TestReviewSubmitReadsBodyFile(t *testing.T) {
