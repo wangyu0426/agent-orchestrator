@@ -29,7 +29,7 @@ func TestWaitForStoppedKeepsRunFileFromConcurrentStart(t *testing.T) {
 		Sleep:        func(time.Duration) {},
 	}.withDefaults()}
 
-	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second)
+	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestWaitForStoppedRemovesOwnRunFile(t *testing.T) {
 		Sleep:        func(time.Duration) {},
 	}.withDefaults()}
 
-	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second)
+	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestWaitForStoppedWaitsAfterRunFileRemovedUntilProcessExits(t *testing.T) {
 		},
 	}.withDefaults()}
 
-	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second)
+	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +136,38 @@ func TestWaitForStoppedReportsStoppedWhenRunFileGoneButProcessLingers(t *testing
 		Sleep:        func(d time.Duration) { now = now.Add(d) },
 	}.withDefaults()}
 
-	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second)
+	st, err := c.waitForStopped(context.Background(), stoppedPID, runFile, dir, time.Second, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if st.State != stateStopped {
 		t.Fatalf("state = %q, want stopped", st.State)
+	}
+}
+
+
+// An isolated worker must not treat its inability to see the host PID as
+// evidence the daemon has finished shutdown while the run-file remains.
+func TestWaitForStoppedKeepsInvisibleLiveHostRunFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "running.json")
+	const hostPID = 424242
+	if err := runfile.Write(path, runfile.Info{PID: hostPID, Port: 3301, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200, 0).UTC()
+	c := &commandContext{deps: (Deps{
+		ProcessAlive: func(int) bool { return false },
+		Now: func() time.Time { return now },
+		Sleep: func(d time.Duration) { now = now.Add(d) },
+	}).withDefaults()}
+	st, err := c.waitForStopped(context.Background(), hostPID, path, dir, time.Second, false)
+	if err == nil || st.State == stateStopped {
+		t.Fatalf("wait = %+v, %v; must not report stopped while owner cannot be verified", st, err)
+	}
+	info, err := runfile.Read(path)
+	if err != nil { t.Fatal(err) }
+	if info == nil || info.PID != hostPID {
+		t.Fatalf("live host run-file must remain intact, got %#v", info)
 	}
 }
