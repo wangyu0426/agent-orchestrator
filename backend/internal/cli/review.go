@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
 )
 
 const (
@@ -132,6 +135,14 @@ type reviewTriggerOptions struct {
 // review.agentLauncher.runtimeEnv). Reviewers review; they never start reviews.
 const envReviewSessionID = "AO_REVIEW_SESSION_ID"
 
+const envReviewWorkerSessionID = "AO_REVIEW_WORKER_SESSION_ID"
+
+func reviewerResultGatewayEnabled() bool {
+	// Reviewer session identity is set for every harness. The mailbox directory
+	// is the explicit capability granted only to adapters using this transport.
+	return strings.TrimSpace(os.Getenv(reviewgateway.EnvResultPendingDir)) != ""
+}
+
 // reviewTargetSession resolves the worker session a review command acts on:
 // the explicit argument or --session, otherwise the calling AO session.
 func reviewTargetSession(args []string, flag string) string {
@@ -247,6 +258,11 @@ func (c *commandContext) submitReview(cmd *cobra.Command, args []string, opts re
 		body = string(raw)
 	}
 	reviewID := strings.TrimSpace(opts.reviewID)
+	if reviewerResultGatewayEnabled() {
+		return c.submitReviewViaGateway(cmd, session, []submitReviewItem{{
+			RunID: runID, Verdict: verdict, Body: body, GithubReviewID: reviewID,
+		}}, true)
+	}
 	path := "sessions/" + url.PathEscape(session) + "/reviews/submit"
 	var res reviewRunResponse
 	if err := c.postReviewJSON(cmd.Context(), path, submitReviewRequest{RunID: runID, Verdict: verdict, Body: body, GithubReviewID: reviewID}, &res); err != nil {
@@ -269,6 +285,9 @@ func (c *commandContext) submitReviewBatch(cmd *cobra.Command, session string, o
 	reviews, err := readReviewItems(cmd, strings.TrimSpace(opts.reviews))
 	if err != nil {
 		return err
+	}
+	if reviewerResultGatewayEnabled() {
+		return c.submitReviewViaGateway(cmd, session, reviews, false)
 	}
 	path := "sessions/" + url.PathEscape(session) + "/reviews/submit"
 	var res reviewRunResponse
@@ -293,6 +312,89 @@ func (c *commandContext) submitReviewBatch(cmd *cobra.Command, session string, o
 		count = len(reviews)
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "recorded %d review(s) for %s\n", count, session)
+	return err
+}
+
+// submitReviewViaGateway is the sandbox transport for the structured Pi
+// reviewer. It writes only to the AO-owned per-reviewer result inbox and waits
+// for a host receipt; it never attempts to reach the daemon's loopback socket.
+func (c *commandContext) submitReviewViaGateway(cmd *cobra.Command, session string, reviews []submitReviewItem, single bool) error {
+	if strings.TrimSpace(os.Getenv(envReviewSessionID)) == "" {
+		return usageError{errors.New("review result inbox is available only inside an Orchestrator reviewer")}
+	}
+	manifestPath := strings.TrimSpace(os.Getenv(reviewgateway.EnvManifestPointer))
+	if manifestPath == "" {
+		workerID := strings.TrimSpace(os.Getenv(envReviewWorkerSessionID))
+		if workerID == "" {
+			workerID = session
+		}
+		manifestPath = filepath.Join(os.Getenv("AO_DATA_DIR"), "reviewer-runtime", "review-"+workerID, reviewgateway.ManifestPointerFilename)
+	}
+	manifest, err := reviewgateway.LoadManifest(manifestPath)
+	if err != nil {
+		return usageError{fmt.Errorf("load reviewer result authorization: %w", err)}
+	}
+	workerID := strings.TrimSpace(os.Getenv(envReviewWorkerSessionID))
+	if workerID == "" || workerID != session || string(manifest.WorkerSessionID) != session {
+		return usageError{errors.New("review submission worker session does not match the active AO manifest")}
+	}
+	if strings.TrimSpace(os.Getenv(envReviewSessionID)) != manifest.ReviewSessionID {
+		return usageError{errors.New("review submission reviewer session does not match the active AO manifest")}
+	}
+	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+	inbox, err := reviewgateway.NewResultInbox(dataDir)
+	if err != nil {
+		return usageError{fmt.Errorf("open reviewer result inbox: %w", err)}
+	}
+	expectedPendingDir := filepath.Join(dataDir, "reviewer-runtime", manifest.ReviewerID, "results", reviewgateway.ResultPendingDirName)
+	configuredPendingDir := strings.TrimSpace(os.Getenv(reviewgateway.EnvResultPendingDir))
+	if configuredPendingDir == "" {
+		configuredPendingDir = expectedPendingDir
+	}
+	if filepath.Clean(configuredPendingDir) != filepath.Clean(expectedPendingDir) {
+		return usageError{errors.New("reviewer result inbox path does not match the active AO manifest")}
+	}
+	if len(reviews) == 0 {
+		return usageError{errors.New("reviewer result inbox requires at least one review result")}
+	}
+	queued := make([]reviewgateway.PendingResult, 0, len(reviews))
+	seen := make(map[string]bool, len(reviews))
+	for _, review := range reviews {
+		if seen[review.RunID] {
+			return usageError{fmt.Errorf("duplicate review result for run %q", review.RunID)}
+		}
+		seen[review.RunID] = true
+		item, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+			RunID: review.RunID, Verdict: review.Verdict, Body: review.Body, GithubReviewID: review.GithubReviewID,
+		})
+		if err != nil {
+			return usageError{fmt.Errorf("queue reviewer result: %w", err)}
+		}
+		queued = append(queued, item)
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), reviewSubmitRetryWindow)
+	defer cancel()
+	for _, item := range queued {
+		receipt, err := inbox.WaitForReceipt(ctx, item, reviewSubmitRetryInterval)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("review result for run %s is queued but AO has not confirmed delivery; retry the same result to check again", item.RunID)
+			}
+			return err
+		}
+		if receipt.Status != "delivered" {
+			message := strings.TrimSpace(receipt.Message)
+			if message == "" {
+				message = "AO rejected the result"
+			}
+			return fmt.Errorf("review result for run %s was rejected: %s", item.RunID, message)
+		}
+	}
+	if single {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "recorded %s review for %s\n", queued[0].Result.Verdict, session)
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "recorded %d review(s) for %s\n", len(queued), session)
 	return err
 }
 

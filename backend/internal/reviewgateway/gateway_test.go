@@ -1,10 +1,15 @@
 package reviewgateway
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 func testManifest(t *testing.T) Manifest {
@@ -16,6 +21,7 @@ func testManifest(t *testing.T) Manifest {
 	}
 	return Manifest{
 		ReviewerID:      "reviewer-1",
+		ReviewSessionID: "review-session-1",
 		WorkerSessionID: "worker-1",
 		WorkspacePath:   filepath.Join(root, "source"),
 		TaskPromptRoot:  promptRoot,
@@ -116,5 +122,138 @@ func TestPrepareEnvironmentRejectsTraversalAndInvalidAuthorization(t *testing.T)
 func TestPrepareEnvironmentRequiresAbsoluteDataDir(t *testing.T) {
 	if _, err := PrepareEnvironment("relative", testManifest(t)); err == nil {
 		t.Fatal("relative AO data directory was accepted")
+	}
+}
+
+func TestResultInboxDelayedDeliveryAndDuplicateResult(t *testing.T) {
+	dataDir := t.TempDir()
+	manifest := testManifest(t)
+	if _, _, err := PrepareActiveEnvironment(dataDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := NewResultInbox(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := Submission{RunID: "run-1", Verdict: "approved", Body: "reviewed", GithubReviewID: "5841980481"}
+	first, err := inbox.QueueResult(manifest, submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := inbox.QueueResult(manifest, submission)
+	if err != nil {
+		t.Fatalf("identical duplicate: %v", err)
+	}
+	if duplicate.ResultHash != first.ResultHash {
+		t.Fatalf("duplicate hash = %s, want %s", duplicate.ResultHash, first.ResultHash)
+	}
+	delayedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := inbox.WaitForReceipt(delayedCtx, first, 5*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("receipt wait error = %v, want deadline exceeded while host delivery is delayed", err)
+	}
+	pending, err := inbox.Pending(context.Background())
+	if err != nil || len(pending) != 1 || pending[0].Result.GithubReviewID != "5841980481" {
+		t.Fatalf("pending = %+v, err=%v", pending, err)
+	}
+	if err := inbox.Acknowledge(first, "delivered", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := inbox.WaitForReceipt(context.Background(), first, time.Millisecond)
+	if err != nil || receipt.Status != "delivered" {
+		t.Fatalf("receipt = %+v, err=%v", receipt, err)
+	}
+	// A submit retry after acknowledgement reuses the receipt and is safe for
+	// the host to process again without making a second state transition.
+	if _, err := inbox.QueueResult(manifest, submission); err != nil {
+		t.Fatalf("retry after acknowledgement: %v", err)
+	}
+	items, err := inbox.Pending(context.Background())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("replayed item = %+v, err=%v", items, err)
+	}
+	if err := inbox.Acknowledge(items[0], "delivered", ""); err != nil {
+		t.Fatal(err)
+	}
+	items, err = inbox.Pending(context.Background())
+	if err != nil || len(items) != 0 {
+		t.Fatalf("pending after duplicate acknowledgement = %+v, err=%v", items, err)
+	}
+}
+
+func TestResultInboxRejectsChangedDuplicateAndChecksExactRunIdentity(t *testing.T) {
+	dataDir := t.TempDir()
+	manifest := testManifest(t)
+	inbox, err := NewResultInbox(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := inbox.QueueResult(manifest, Submission{RunID: "run-1", Verdict: "approved", GithubReviewID: "5841980481"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.QueueResult(manifest, Submission{RunID: "run-1", Verdict: "changes_requested", Body: "new verdict", GithubReviewID: "5841980481"}); err == nil {
+		t.Fatal("different result replaced a pending result")
+	}
+	run := domain.ReviewRun{
+		ID: "run-1", ReviewID: manifest.ReviewSessionID, SessionID: manifest.WorkerSessionID,
+		PRURL: manifest.Tasks[0].PRURL, TargetSHA: manifest.Tasks[0].TargetSHA, Status: domain.ReviewRunRunning,
+	}
+	if pending, err := inbox.HasPendingResults(context.Background(), manifest.ReviewerID, []domain.ReviewRun{run}); err != nil || !pending {
+		t.Fatalf("exact pending identity = %v, err=%v", pending, err)
+	}
+	run.TargetSHA = "fedcba9876543210"
+	if pending, err := inbox.HasPendingResults(context.Background(), manifest.ReviewerID, []domain.ReviewRun{run}); err != nil || pending {
+		t.Fatalf("stale-head pending identity = %v, err=%v, want false", pending, err)
+	}
+	if err := inbox.Acknowledge(item, "rejected", "test cleanup"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareActiveEnvironmentPublishesSessionBoundManifest(t *testing.T) {
+	dataDir := t.TempDir()
+	manifest := testManifest(t)
+	env, pointer, err := PrepareActiveEnvironment(dataDir, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadManifest(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReviewerID != manifest.ReviewerID || got.ReviewSessionID != manifest.ReviewSessionID || got.WorkerSessionID != manifest.WorkerSessionID || filepath.Dir(pointer) != env.Root {
+		t.Fatalf("active manifest = %+v, pointer = %q", got, pointer)
+	}
+}
+
+func TestHasPendingResultsWaitsForRecentPartialWrite(t *testing.T) {
+	dataDir := t.TempDir()
+	manifest := testManifest(t)
+	env, err := PrepareResultEnvironment(dataDir, manifest.ReviewerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := NewResultInbox(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := domain.ReviewRun{
+		ID: "run-1", ReviewID: manifest.ReviewSessionID, SessionID: manifest.WorkerSessionID,
+		PRURL: manifest.Tasks[0].PRURL, TargetSHA: manifest.Tasks[0].TargetSHA, Status: domain.ReviewRunRunning,
+	}
+	path := filepath.Join(env.ResultPendingDir, "run-1.json")
+	if err := os.WriteFile(path, []byte(`{"version":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := inbox.HasPendingResults(context.Background(), manifest.ReviewerID, []domain.ReviewRun{run}); err != nil || !pending {
+		t.Fatalf("recent partial result = %v, err=%v, want pending", pending, err)
+	}
+	old := time.Now().Add(-3 * time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := inbox.HasPendingResults(context.Background(), manifest.ReviewerID, []domain.ReviewRun{run}); err != nil || pending {
+		t.Fatalf("stable malformed result = %v, err=%v, want not pending", pending, err)
 	}
 }

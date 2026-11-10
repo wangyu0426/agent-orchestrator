@@ -39,7 +39,7 @@ Do these steps in order:
 
     printf '%%s' '{ "reviews": [ { "runId": "<run-id>", "verdict": "<approved|changes_requested>", "githubReviewId": "<id-from-step-1-or-empty>", "body": "<your full review markdown>" } ] }' | ao review submit --session %s --reviews -
 
-Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded.`,
+Only if step 1 genuinely fails on the provider for a PR, still include that run in step 2 with an empty githubReviewId so the result is recorded. If AO reports that a result is queued but delivery is not yet confirmed, retry the exact same structured result; do not post a second GitHub review. Choose each machine-readable verdict from your own review of the target diff. Never derive or fabricate a verdict by parsing arbitrary GitHub review text.`,
 		spec.WorkerID, queueText, spec.WorkerID)
 	return prompt, systemPrompt
 }

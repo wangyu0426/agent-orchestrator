@@ -35,12 +35,19 @@ type fakeStore struct {
 	// writer that already recorded a run for this commit: it records that
 	// winner (so a follow-up GetReviewRunBySessionAndSHA finds it) and returns
 	// insertErr instead of recording the caller's run.
-	insertErr              error
-	insertErrWinnerAtFront bool
-	recoverableReviews     []domain.Review
-	recoverableReviewsErr  error
-	recoveryErrors         map[string]string
-	settledReviewIDs       []string
+	insertErr                error
+	insertErrWinnerAtFront   bool
+	recoverableReviews       []domain.Review
+	recoverableReviewsErr    error
+	recoveryErrors           map[string]string
+	settledReviewIDs         []string
+	pendingReviewResults     bool
+	pendingResultReviewerIDs []string
+}
+
+func (f *fakeStore) HasPendingResults(_ context.Context, reviewerID string, _ []domain.ReviewRun) (bool, error) {
+	f.pendingResultReviewerIDs = append(f.pendingResultReviewerIDs, reviewerID)
+	return f.pendingReviewResults, nil
 }
 
 func (f *fakeStore) UpsertReview(_ context.Context, r domain.Review) error {
@@ -659,7 +666,7 @@ func TestTriggerPersistsChatModeBeforeCreatingReviewerConversation(t *testing.T)
 	var started ReviewerChatStart
 	chat := sqliteReviewChatController{store: store, started: &started}
 	launcher := NewLauncher(singleReviewerResolver{reviewer: chatReviewAdapter{}}, &fakeRuntime{}, t.TempDir(), WithReviewerChat(chat))
-	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("0123456789abcdef0123456789abcdef01234567"), fakeProjects{}, launcher)
 
 	result, err := trigger(ctx, eng, worker.ID, domain.ReviewerCodex, domain.AgentConfig{Model: "gpt-6-sol", Effort: "high"})
 	if err != nil {
@@ -3017,6 +3024,65 @@ func TestListMarksRunningReviewFailedWhenReviewerExited(t *testing.T) {
 	}
 	if len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunFailed || got.Runs[0].Body != reviewerExitedBeforeSubmission {
 		t.Fatalf("runs = %+v, want failed reviewer-exit result", got.Runs)
+	}
+}
+
+func TestListDefersReviewerExitFailureWhileMatchingResultIsPending(t *testing.T) {
+	store := &fakeStore{
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "review-mer-1", ReviewerActivityState: domain.ActivityActive},
+		runs: []domain.ReviewRun{{
+			ID: "run-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider,
+			PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning,
+		}},
+		pendingReviewResults: true,
+	}
+	launcher := &fakeLauncher{alive: false}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	eng.pendingResults = store
+
+	got, err := eng.List(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReviewerActivityState != domain.ActivityActive || len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunRunning || len(store.runs) != 1 {
+		t.Fatalf("pending result was treated as reviewer failure: list=%+v stored=%+v", got, store.runs)
+	}
+
+	// Once delivery rejects/clears the file, the normal exit reconciliation
+	// resumes and marks a genuinely unsubmitted run failed.
+	store.pendingReviewResults = false
+	got, err = eng.List(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReviewerActivityState != domain.ActivityExited || len(got.Runs) != 1 || got.Runs[0].Status != domain.ReviewRunFailed {
+		t.Fatalf("reviewer exit was not reconciled after pending result cleared: %+v", got)
+	}
+}
+
+func TestExitedCodexChatReviewerChecksStableInboxIdentity(t *testing.T) {
+	review := &domain.Review{
+		ID: "rev-chat", SessionID: "mer-1", Harness: domain.ReviewerCodex,
+		ReviewerHandleID: "review-chat:rev-chat", InterfaceMode: domain.ReviewerInterfaceChat,
+		ReviewerActivityState: domain.ActivityActive,
+	}
+	runs := []domain.ReviewRun{{
+		ID: "run-1", ReviewID: review.ID, SessionID: review.SessionID, Harness: domain.ReviewerCodex,
+		PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning,
+	}}
+	store := &fakeStore{review: review, runs: runs, pendingReviewResults: true}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, &fakeLauncher{alive: false})
+	eng.pendingResults = store
+
+	changed, err := eng.reconcileExitedReviewer(context.Background(), review, runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || review.ReviewerActivityState != domain.ActivityActive || store.runs[0].Status != domain.ReviewRunRunning {
+		t.Fatalf("pending Chat result was reconciled as a failure: changed=%v review=%+v run=%+v", changed, review, store.runs[0])
+	}
+	if len(store.pendingResultReviewerIDs) != 1 || store.pendingResultReviewerIDs[0] != reviewerHandleID(review.SessionID) {
+		t.Fatalf("inbox identities = %v, want stable worker identity %q", store.pendingResultReviewerIDs, reviewerHandleID(review.SessionID))
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
 )
 
 type fakeStore struct {
@@ -226,6 +229,132 @@ func TestResolveReviewCommentDoesNotPersistWhenProviderFails(t *testing.T) {
 	}
 	if store.prComments[prURL][0].Resolved {
 		t.Fatalf("comment was marked resolved after provider failure")
+	}
+}
+
+func gatewayReviewFixture(t *testing.T, status domain.ReviewRunStatus, targetSHA string) (*fakeStore, *reviewgateway.ResultInbox, reviewgateway.Manifest) {
+	t.Helper()
+	if targetSHA == "" {
+		targetSHA = "0123456789abcdef0123456789abcdef01234567"
+	}
+	prURL := "https://github.com/acme/widgets/pull/42"
+	workerID := domain.SessionID("worker-1")
+	reviewID := "review-row-1"
+	reviewerID := "review-worker-1"
+	store := &fakeStore{
+		ok:       true,
+		reviewOK: true,
+		review:   domain.Review{ID: reviewID, SessionID: workerID, ReviewerHandleID: reviewerID},
+		run: domain.ReviewRun{
+			ID: "run-1", ReviewID: reviewID, SessionID: workerID, PRURL: prURL,
+			TargetSHA: targetSHA, Status: status,
+		},
+	}
+	dataDir := t.TempDir()
+	promptRoot := t.TempDir()
+	taskPath := filepath.Join(promptRoot, "run-1.md")
+	if err := os.WriteFile(taskPath, []byte("task"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := reviewgateway.Manifest{
+		ReviewerID: reviewerID, ReviewSessionID: reviewID, WorkerSessionID: workerID,
+		WorkspacePath: t.TempDir(), TaskPromptRoot: promptRoot,
+		Tasks: []reviewgateway.Task{{RunID: "run-1", PRURL: prURL, TargetSHA: targetSHA, TaskPromptFile: taskPath}},
+	}
+	if _, _, err := reviewgateway.PrepareActiveEnvironment(dataDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := reviewgateway.NewResultInbox(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, inbox, manifest
+}
+
+func TestProcessPendingReviewResultsDeliversDelayedDuplicateOnce(t *testing.T) {
+	store, inbox, manifest := gatewayReviewFixture(t, domain.ReviewRunRunning, "")
+	item, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+		RunID: "run-1", Verdict: "approved", Body: "No required changes.", GithubReviewID: "5841980481",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(nil, store, WithResultInbox(inbox))
+	// The result sits in the filesystem until the host poll catches it.
+	if err := svc.ProcessPendingReviewResults(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.updateCalls != 1 || store.run.Status != domain.ReviewRunComplete || store.run.GithubReviewID != "5841980481" {
+		t.Fatalf("first delivery: updates=%d run=%+v", store.updateCalls, store.run)
+	}
+	receipt, err := inbox.WaitForReceipt(context.Background(), item, time.Millisecond)
+	if err != nil || receipt.Status != "delivered" {
+		t.Fatalf("receipt = %+v, err=%v", receipt, err)
+	}
+	// Replayed result delivery is acknowledged from the same completed state;
+	// it never causes a second atomic update or notification transition.
+	if _, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+		RunID: "run-1", Verdict: "approved", Body: "No required changes.", GithubReviewID: "5841980481",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessPendingReviewResults(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.updateCalls != 1 || store.run.Status != domain.ReviewRunComplete {
+		t.Fatalf("duplicate delivery changed result: updates=%d run=%+v", store.updateCalls, store.run)
+	}
+}
+
+func TestProcessPendingReviewResultsAcceptsCodexChatRuntimeHandle(t *testing.T) {
+	store, inbox, manifest := gatewayReviewFixture(t, domain.ReviewRunRunning, "")
+	store.review.ReviewerHandleID = "review-chat:" + manifest.ReviewSessionID
+	store.review.InterfaceMode = domain.ReviewerInterfaceChat
+	if _, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+		RunID: "run-1", Verdict: "approved", Body: "No required changes.", GithubReviewID: "5841980481",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(nil, store, WithResultInbox(inbox))
+	if err := svc.ProcessPendingReviewResults(context.Background()); err != nil {
+		t.Fatalf("deliver Codex Chat result: %v", err)
+	}
+	if store.updateCalls != 1 || store.run.Status != domain.ReviewRunComplete || store.run.GithubReviewID != "5841980481" {
+		t.Fatalf("Codex Chat result was not recorded: updates=%d run=%+v", store.updateCalls, store.run)
+	}
+}
+
+func TestProcessPendingReviewResultsRejectsSupersededRunAndHeadChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    domain.ReviewRunStatus
+		runSHA    string
+		resultSHA string
+	}{
+		{name: "superseded", status: domain.ReviewRunFailed, runSHA: "0123456789abcdef0123456789abcdef01234567", resultSHA: "0123456789abcdef0123456789abcdef01234567"},
+		{name: "new head", status: domain.ReviewRunRunning, runSHA: "fedcba9876543210fedcba9876543210fedcba98", resultSHA: "0123456789abcdef0123456789abcdef01234567"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, inbox, manifest := gatewayReviewFixture(t, tc.status, tc.runSHA)
+			manifest.Tasks[0].TargetSHA = tc.resultSHA
+			if _, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+				RunID: "run-1", Verdict: "approved", GithubReviewID: "5841980481",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			svc := New(nil, store, WithResultInbox(inbox))
+			if err := svc.ProcessPendingReviewResults(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if store.updateCalls != 0 || store.run.Status != tc.status {
+				t.Fatalf("unbound result changed run: updates=%d run=%+v", store.updateCalls, store.run)
+			}
+			items, err := inbox.Pending(context.Background())
+			if err != nil || len(items) != 0 {
+				t.Fatalf("rejected pending results = %+v, err=%v", items, err)
+			}
+		})
 	}
 }
 

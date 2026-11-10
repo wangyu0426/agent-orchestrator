@@ -47,6 +47,12 @@ type HarnessUseGate interface {
 	TryBeginHarnessUse(harness domain.AgentHarness) (release func(), ok bool)
 }
 
+// PendingReviewResults checks whether a dead reviewer has already published
+// a result that the host delivery loop has not consumed yet.
+type PendingReviewResults interface {
+	HasPendingResults(ctx stdctx.Context, reviewerID string, runs []domain.ReviewRun) (bool, error)
+}
+
 // Store is the persistence surface the engine needs. *sqlite.Store satisfies it
 // in production; tests use a fake.
 type Store interface {
@@ -94,12 +100,13 @@ type Projects interface {
 // Deps wires the engine.
 type Deps struct {
 	// HarnessUse, when set, is held across each reviewer launch.
-	HarnessUse HarnessUseGate
-	Store      Store
-	Sessions   Sessions
-	PRs        PRs
-	Projects   Projects
-	Launcher   Launcher
+	HarnessUse     HarnessUseGate
+	Store          Store
+	Sessions       Sessions
+	PRs            PRs
+	Projects       Projects
+	Launcher       Launcher
+	PendingResults PendingReviewResults
 	// ChatRecoveryDone gates operations that could mistake a recovering reviewer for an exited one.
 	ChatRecoveryDone <-chan struct{}
 
@@ -110,14 +117,15 @@ type Deps struct {
 
 // Engine is the core code-review engine.
 type Engine struct {
-	harnessUse HarnessUseGate
-	store      Store
-	sessions   Sessions
-	prs        PRs
-	projects   Projects
-	launcher   Launcher
-	clock      func() time.Time
-	newID      func() string
+	harnessUse     HarnessUseGate
+	store          Store
+	sessions       Sessions
+	prs            PRs
+	projects       Projects
+	launcher       Launcher
+	pendingResults PendingReviewResults
+	clock          func() time.Time
+	newID          func() string
 
 	chatRecoveryDone <-chan struct{}
 
@@ -141,15 +149,16 @@ func New(d Deps) *Engine {
 		newID = uuid.NewString
 	}
 	return &Engine{
-		store:        d.Store,
-		harnessUse:   d.HarnessUse,
-		sessions:     d.Sessions,
-		prs:          d.PRs,
-		projects:     d.Projects,
-		launcher:     d.Launcher,
-		clock:        clock,
-		newID:        newID,
-		triggerLocks: make(map[domain.SessionID]*sync.Mutex),
+		store:          d.Store,
+		harnessUse:     d.HarnessUse,
+		sessions:       d.Sessions,
+		prs:            d.PRs,
+		projects:       d.Projects,
+		launcher:       d.Launcher,
+		pendingResults: d.PendingResults,
+		clock:          clock,
+		newID:          newID,
+		triggerLocks:   make(map[domain.SessionID]*sync.Mutex),
 
 		chatRecoveryDone: d.ChatRecoveryDone,
 	}
@@ -1261,14 +1270,14 @@ func (e *Engine) restoreReviewerLocked(
 				restoreErr = errors.Join(restoreErr, markErr)
 			}
 		}
-		if failErr := e.failRunningRestoredRuns(ctx, previousRuns, restoreErr.Error()); failErr != nil {
+		if failErr := e.failRunningRestoredRuns(ctx, reviewRow, previousRuns, restoreErr.Error()); failErr != nil {
 			return RestoreReviewerResult{}, errors.Join(restoreErr, failErr)
 		}
 		return RestoreReviewerResult{}, restoreErr
 	}
 	if !launch.NativeResumed {
 		const reason = "reviewer native conversation was unavailable during restore; retry the review"
-		if err := e.failRunningRestoredRuns(ctx, previousRuns, reason); err != nil {
+		if err := e.failRunningRestoredRuns(ctx, reviewRow, previousRuns, reason); err != nil {
 			_ = e.launcher.Destroy(ctx, launch.HandleID)
 			return RestoreReviewerResult{}, err
 		}
@@ -1283,7 +1292,14 @@ func (e *Engine) restoreReviewerLocked(
 	return RestoreReviewerResult{ReviewerHandleID: launch.HandleID, Restored: true}, nil
 }
 
-func (e *Engine) failRunningRestoredRuns(ctx stdctx.Context, runs []domain.ReviewRun, body string) error {
+func (e *Engine) failRunningRestoredRuns(ctx stdctx.Context, review domain.Review, runs []domain.ReviewRun, body string) error {
+	pending, err := e.hasPendingReviewerResults(ctx, review.SessionID, runs)
+	if err != nil {
+		return fmt.Errorf("check pending review results: %w", err)
+	}
+	if pending {
+		return nil
+	}
 	for _, run := range runs {
 		if run.Status != domain.ReviewRunRunning {
 			continue
@@ -1366,6 +1382,22 @@ func reviewRunsForReview(runs []domain.ReviewRun, reviewID string) []domain.Revi
 	return out
 }
 
+func (e *Engine) hasPendingReviewerResults(ctx stdctx.Context, workerID domain.SessionID, runs []domain.ReviewRun) (bool, error) {
+	if e.pendingResults == nil || workerID == "" {
+		return false, nil
+	}
+	eligible := make([]domain.ReviewRun, 0, len(runs))
+	for _, run := range runs {
+		if run.Status == domain.ReviewRunRunning {
+			eligible = append(eligible, run)
+		}
+	}
+	if len(eligible) == 0 {
+		return false, nil
+	}
+	return e.pendingResults.HasPendingResults(ctx, reviewerHandleID(workerID), eligible)
+}
+
 // cancelStaleRunningRuns fails this reviewer's running passes when its pane is
 // gone. It is scoped to one reviewer so a dead pane cannot cancel another
 // reviewer that is still working on the same worker.
@@ -1388,6 +1420,19 @@ func (e *Engine) cancelStaleRunningRuns(ctx stdctx.Context, workerID domain.Sess
 		if alive {
 			return false, nil
 		}
+	}
+	var reviewerRuns []domain.ReviewRun
+	for _, run := range runs {
+		if run.SessionID == workerID && run.Status == domain.ReviewRunRunning && (run.Harness == harness || run.Harness == "") {
+			reviewerRuns = append(reviewerRuns, run)
+		}
+	}
+	pending, err := e.hasPendingReviewerResults(ctx, workerID, reviewerRuns)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return false, nil
 	}
 	for _, h := range []domain.ReviewerHarness{harness, ""} {
 		// Legacy rows predate per-harness runs and belong to whichever reviewer
@@ -1629,6 +1674,15 @@ func (e *Engine) reconcileExitedReviewer(ctx stdctx.Context, review *domain.Revi
 		alive = true
 	}
 	if alive {
+		return false, nil
+	}
+	pending, err := e.hasPendingReviewerResults(ctx, review.SessionID, runs)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		// Keep the reviewer marked active while its durable result is delivered.
+		// Acknowledgement happens only after the result transition commits.
 		return false, nil
 	}
 	for _, run := range runs {

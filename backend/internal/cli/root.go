@@ -18,6 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
+	"github.com/aoagents/agent-orchestrator/backend/internal/reviewgateway"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -41,7 +42,7 @@ func executeWithDeps(deps Deps, args []string) error {
 	cmd := NewRootCommand(deps)
 	cmd.SetArgs(args)
 	err := cmd.Execute()
-	if err != nil && ExitCode(err) == 2 {
+	if err != nil && ExitCode(err) == 2 && !isReviewerReviewSubmit(args) {
 		(&commandContext{deps: deps}).emitCLIUsageError(context.Background(), args, err)
 	}
 	return err
@@ -259,6 +260,9 @@ type commandContext struct {
 }
 
 func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
+	if strings.TrimSpace(cmd.CommandPath()) == "ao review submit" && isReviewerSubmitEnvironment() {
+		return false
+	}
 	commandPath := telemetrymeta.NormalizeCommandPath(cmd.CommandPath())
 	if telemetrymeta.IsRoutineInternalCLICommand(commandPath) {
 		return false
@@ -273,6 +277,14 @@ func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
 	default:
 		return true
 	}
+}
+
+func isReviewerSubmitEnvironment() bool {
+	return strings.TrimSpace(os.Getenv(envReviewSessionID)) != "" || strings.TrimSpace(os.Getenv(reviewgateway.EnvResultPendingDir)) != ""
+}
+
+func isReviewerReviewSubmit(args []string) bool {
+	return len(args) >= 2 && args[0] == "review" && args[1] == "submit" && isReviewerSubmitEnvironment()
 }
 
 func (c *commandContext) emitCLIInvoked(ctx context.Context, cmd *cobra.Command) {

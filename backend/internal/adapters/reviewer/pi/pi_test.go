@@ -33,7 +33,7 @@ func testInvocation(t *testing.T, runID, prURL, targetSHA string) ports.ReviewIn
 		t.Fatal(err)
 	}
 	return ports.ReviewInvocation{
-		ReviewerID: "review-worker-1", RunID: runID, WorkerSessionID: "worker-1",
+		ReviewerID: "review-worker-1", ReviewSessionID: "review-session-1", RunID: runID, WorkerSessionID: "worker-1",
 		PRURL: prURL, TargetSHA: targetSHA,
 		WorkspacePath: filepath.Join(root, "worktree"), DataDir: filepath.Join(root, "ao-data"),
 		Prompt: "Read and follow the AO review task.", TaskPromptFile: taskPath, TaskPromptRoot: promptRoot,
@@ -76,6 +76,9 @@ func TestExtensionRejectsCommandInjectionSurfaces(t *testing.T) {
 		`task.prUrl !== prUrl || task.targetSha !== targetSha`,
 		`commit_id: task.targetSha`,
 		`manifest.tasks.some((task) => task.runId === review.runId)`,
+		`postedReviewIds.set(task.runId, reviewId)`,
+		`review.githubReviewId !== postedId`,
+		`failedReviewPosts.has(review.runId)`,
 		`writeFile(input, JSON.stringify`,
 	} {
 		if !strings.Contains(text, want) {
@@ -132,8 +135,11 @@ func TestReviewCommandIsInteractiveAndIsolated(t *testing.T) {
 		t.Fatalf("Pi reviewer must use AO-owned profile roots, env = %#v", spec.Env)
 	}
 	manifest := readActiveManifest(t, spec.Env["AO_PI_REVIEW_MANIFEST_POINTER"])
-	if len(manifest.Tasks) != 1 || manifest.Tasks[0].RunID != inv.RunID || manifest.Tasks[0].PRURL != inv.PRURL || manifest.Tasks[0].TargetSHA != inv.TargetSHA {
+	if manifest.ReviewerID != inv.ReviewerID || manifest.ReviewSessionID != inv.ReviewSessionID || manifest.WorkerSessionID != inv.WorkerSessionID || len(manifest.Tasks) != 1 || manifest.Tasks[0].RunID != inv.RunID || manifest.Tasks[0].PRURL != inv.PRURL || manifest.Tasks[0].TargetSHA != inv.TargetSHA {
 		t.Fatalf("active manifest = %+v", manifest)
+	}
+	if spec.Env[reviewgateway.EnvManifestPointer] != spec.Env["AO_PI_REVIEW_MANIFEST_POINTER"] || spec.Env[reviewgateway.EnvResultPendingDir] != filepath.Join(inv.DataDir, "reviewer-runtime", inv.ReviewerID, "results", reviewgateway.ResultPendingDirName) {
+		t.Fatalf("result gateway environment = %#v", spec.Env)
 	}
 	extensionPath := filepath.Join(inv.TaskPromptRoot, extensionFilename)
 	data, err := os.ReadFile(extensionPath)

@@ -38,8 +38,15 @@ future interactive reviewer adapters.
   an arbitrary-command primitive.
 - Prompt reads resolve symlinks and remain inside the AO prompt root. Repository
   paths reject absolute paths, traversal, option injection, NUL, and newlines.
-- The gateway uses the existing loopback `ao review submit` flow and does not alter
-  listener behavior, database schema, or HTTP APIs.
+- Structured results are atomically written to the reviewer's private pending
+  directory. A trusted host-side poller validates the immutable reviewer, worker,
+  run, PR, target commit, verdict, and GitHub review id before using the existing
+  atomic review-run transition. The sandbox receives write access only to that
+  pending directory; result submission does not use the loopback listener.
+- A pending result remains on disk until the host commits it and writes a receipt.
+  Reviewer exit therefore cannot fail a matching run before the host consumes a
+  result already published to the inbox. Terminal or stale-HEAD runs remain
+  terminal and are never revived.
 
 This is an enforceable capability API when invoked, but it is not by itself a
 process sandbox. Agy, Continue, Devin, Droid, Goose, Kimi, Qwen, and Vibe may be
@@ -57,8 +64,8 @@ profile while preserving the visible TUI:
 - macOS/Linux tmux: launch the TUI through an AO-owned sandbox process, mount the
   neutral root read/write and required executable/runtime files read-only, and do
   not mount the checkout. Source access is exposed only through structured gateway
-  IPC. Network egress allows only the selected model provider, GitHub review API,
-  and AO loopback submission endpoint.
+  IPC. Network egress allows only the selected model provider and GitHub review
+  API; result delivery does not need an AO listener endpoint.
 - Windows ConPTY: apply the equivalent boundary with an AppContainer/restricted
   token, job object, explicit filesystem ACL/capability grants, and outbound network
   policy. ConPTY remains the terminal transport, not the security boundary.

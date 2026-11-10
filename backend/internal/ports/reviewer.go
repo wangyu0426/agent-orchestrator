@@ -88,6 +88,8 @@ type ReviewInvocation struct {
 	// ReviewerID is a stable id for the reviewer's runtime instance (pane,
 	// native session id), derived from the worker session.
 	ReviewerID string
+	// ReviewSessionID is the durable AO reviewer row that owns this run.
+	ReviewSessionID string
 	// RunID is the review_run this pass completes; the reviewer passes it to
 	// `ao review submit`.
 	RunID string
@@ -136,6 +138,10 @@ type ReviewInvocation struct {
 	// files for this reviewer. Adapters use it when a long-lived reviewer needs
 	// permission to read request-scoped task files created after launch.
 	TaskPromptRoot string
+	// ReviewManifestPointer and ReviewResultPendingDir expose only the immutable
+	// active review authorization and the private result mailbox to the reviewer.
+	ReviewManifestPointer  string
+	ReviewResultPendingDir string
 }
 
 // ReviewTask is one PR/run in a multi-PR review trigger queue.

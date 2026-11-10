@@ -121,14 +121,24 @@ func insertBeforeLastArg(argv []string, extra ...string) []string {
 
 func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 	extra := []string{"--sandbox", "read-only"}
-	// Shell commands inherit only Codex's core environment by default. Preserve
-	// the AO location overrides the reviewer needs to submit to this daemon.
-	values := map[string]string{
-		"AO_PORT":     os.Getenv("AO_PORT"),
-		"AO_DATA_DIR": firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
-		"AO_RUN_FILE": firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
+	// This is the only reviewer-writable path. The checkout remains protected by
+	// Codex's read-only sandbox, and no daemon socket or host process access is
+	// granted to submit the structured result.
+	if inv.ReviewResultPendingDir != "" {
+		extra = append(extra, "--add-dir", inv.ReviewResultPendingDir)
 	}
-	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE"} {
+	// Shell commands inherit only Codex's core environment by default. Preserve
+	// the identity and manifest needed to write into the narrow result inbox.
+	values := map[string]string{
+		"AO_PORT":                            os.Getenv("AO_PORT"),
+		"AO_DATA_DIR":                        firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
+		"AO_RUN_FILE":                        firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
+		"AO_REVIEW_SESSION_ID":               inv.ReviewSessionID,
+		"AO_REVIEW_WORKER_SESSION_ID":        string(inv.WorkerSessionID),
+		"AO_REVIEW_GATEWAY_MANIFEST_POINTER": inv.ReviewManifestPointer,
+		"AO_REVIEW_RESULT_PENDING_DIRECTORY": inv.ReviewResultPendingDir,
+	}
+	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE", "AO_REVIEW_SESSION_ID", "AO_REVIEW_WORKER_SESSION_ID", "AO_REVIEW_GATEWAY_MANIFEST_POINTER", "AO_REVIEW_RESULT_PENDING_DIRECTORY"} {
 		value := values[name]
 		if value == "" {
 			continue
