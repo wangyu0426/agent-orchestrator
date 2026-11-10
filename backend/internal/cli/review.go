@@ -137,11 +137,10 @@ const envReviewSessionID = "AO_REVIEW_SESSION_ID"
 
 const envReviewWorkerSessionID = "AO_REVIEW_WORKER_SESSION_ID"
 
-func reviewerResultGatewayEnabled(session string) bool {
-	if strings.TrimSpace(os.Getenv(reviewgateway.EnvResultPendingDir)) != "" {
-		return true
-	}
-	return strings.TrimSpace(os.Getenv(envReviewSessionID)) != "" && strings.TrimSpace(os.Getenv("AO_DATA_DIR")) != "" && strings.TrimSpace(session) != ""
+func reviewerResultGatewayEnabled() bool {
+	// Reviewer session identity is set for every harness. The mailbox directory
+	// is the explicit capability granted only to adapters using this transport.
+	return strings.TrimSpace(os.Getenv(reviewgateway.EnvResultPendingDir)) != ""
 }
 
 // reviewTargetSession resolves the worker session a review command acts on:
@@ -259,7 +258,7 @@ func (c *commandContext) submitReview(cmd *cobra.Command, args []string, opts re
 		body = string(raw)
 	}
 	reviewID := strings.TrimSpace(opts.reviewID)
-	if reviewerResultGatewayEnabled(session) {
+	if reviewerResultGatewayEnabled() {
 		return c.submitReviewViaGateway(cmd, session, []submitReviewItem{{
 			RunID: runID, Verdict: verdict, Body: body, GithubReviewID: reviewID,
 		}}, true)
@@ -287,7 +286,7 @@ func (c *commandContext) submitReviewBatch(cmd *cobra.Command, session string, o
 	if err != nil {
 		return err
 	}
-	if reviewerResultGatewayEnabled(session) {
+	if reviewerResultGatewayEnabled() {
 		return c.submitReviewViaGateway(cmd, session, reviews, false)
 	}
 	path := "sessions/" + url.PathEscape(session) + "/reviews/submit"

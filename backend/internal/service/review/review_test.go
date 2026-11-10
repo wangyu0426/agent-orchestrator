@@ -306,6 +306,25 @@ func TestProcessPendingReviewResultsDeliversDelayedDuplicateOnce(t *testing.T) {
 	}
 }
 
+func TestProcessPendingReviewResultsAcceptsCodexChatRuntimeHandle(t *testing.T) {
+	store, inbox, manifest := gatewayReviewFixture(t, domain.ReviewRunRunning, "")
+	store.review.ReviewerHandleID = "review-chat:" + manifest.ReviewSessionID
+	store.review.InterfaceMode = domain.ReviewerInterfaceChat
+	if _, err := inbox.QueueResult(manifest, reviewgateway.Submission{
+		RunID: "run-1", Verdict: "approved", Body: "No required changes.", GithubReviewID: "5841980481",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(nil, store, WithResultInbox(inbox))
+	if err := svc.ProcessPendingReviewResults(context.Background()); err != nil {
+		t.Fatalf("deliver Codex Chat result: %v", err)
+	}
+	if store.updateCalls != 1 || store.run.Status != domain.ReviewRunComplete || store.run.GithubReviewID != "5841980481" {
+		t.Fatalf("Codex Chat result was not recorded: updates=%d run=%+v", store.updateCalls, store.run)
+	}
+}
+
 func TestProcessPendingReviewResultsRejectsSupersededRunAndHeadChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

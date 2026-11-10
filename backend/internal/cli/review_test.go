@@ -52,6 +52,7 @@ func setReviewEnv(t *testing.T) testConfig {
 	t.Setenv("AO_SESSION_ID", "")
 	t.Setenv("AO_REVIEW_SESSION_ID", "")
 	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", "")
+	t.Setenv("AO_REVIEW_HARNESS", "")
 	t.Setenv(reviewgateway.EnvManifestPointer, "")
 	t.Setenv(reviewgateway.EnvResultPendingDir, "")
 	return cfg
@@ -424,6 +425,38 @@ func TestReviewSubmitUsesSessionFlag(t *testing.T) {
 	}
 	if capture.path != "/api/v1/sessions/mer-7/reviews/submit" {
 		t.Fatalf("path = %q, want mer-7", capture.path)
+	}
+}
+
+func TestOtherReviewerHarnessKeepsDaemonSubmitTransport(t *testing.T) {
+	cfg := setReviewEnv(t)
+	t.Setenv("AO_DATA_DIR", t.TempDir())
+	t.Setenv("AO_REVIEW_SESSION_ID", "review-row-claude")
+	t.Setenv("AO_REVIEW_WORKER_SESSION_ID", "mer-7")
+	t.Setenv("AO_REVIEW_HARNESS", "claude-code")
+	// The generic reviewer identity is present for all adapters; the result
+	// inbox capability is not granted to this harness.
+	t.Setenv(reviewgateway.EnvResultPendingDir, "")
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: os.Getpid(), Port: 3001, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	var requestedPath string
+	deps := aliveDeps()
+	deps.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestedPath = req.URL.Path
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"review":{"id":"run-7","verdict":"approved"}}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	if _, errOut, err := executeCLI(t, deps, "review", "submit", "mer-7", "--run", "run-7", "--verdict", "approved"); err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if requestedPath != "/api/v1/sessions/mer-7/reviews/submit" {
+		t.Fatalf("path = %q, want the daemon submit endpoint", requestedPath)
 	}
 }
 

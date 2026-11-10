@@ -129,6 +129,13 @@ type ResultInbox struct {
 	dataDir string
 }
 
+// ReviewerIDForWorker returns the stable AO identity used for a worker's
+// reviewer result mailbox. It is independent of the reviewer runtime handle,
+// which can differ between a terminal and Chat interface.
+func ReviewerIDForWorker(workerID domain.SessionID) string {
+	return "review-" + string(workerID)
+}
+
 // TUIEnvironment returns provider-neutral directory overrides for an adapter's
 // RuntimeConfig.Env. Provider-specific adapters may add only documented flags;
 // the eventual OS sandbox remains responsible for excluding inherited host state.

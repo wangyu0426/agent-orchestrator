@@ -311,10 +311,10 @@ func looksLikeAuthFailure(err error) bool {
 	return false
 }
 
-// reviewerHandleID is the stable runtime handle for a worker's reviewer pane, so
-// one live reviewer is reused across passes.
+// reviewerHandleID is the stable identity used for a worker's terminal reviewer
+// pane and its associated result mailbox. Chat handles remain interface-specific.
 func reviewerHandleID(workerID domain.SessionID) string {
-	return "review-" + string(workerID)
+	return reviewgateway.ReviewerIDForWorker(workerID)
 }
 
 func (l *agentLauncher) invocation(spec LaunchSpec) ports.ReviewInvocation {

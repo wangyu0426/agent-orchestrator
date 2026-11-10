@@ -918,7 +918,7 @@ func (s *Service) SubmitGatewayResult(ctx context.Context, result reviewgateway.
 	if !ok {
 		return domain.ReviewRun{}, fmt.Errorf("%w: reviewer session %q", ErrNotFound, run.ReviewID)
 	}
-	if review.ID != result.ReviewSessionID || review.SessionID != workerID || review.ReviewerHandleID != result.ReviewerID {
+	if review.ID != result.ReviewSessionID || review.SessionID != workerID || result.ReviewerID != reviewgateway.ReviewerIDForWorker(workerID) {
 		return domain.ReviewRun{}, fmt.Errorf("%w: reviewer identity does not own review run %q", ErrInvalid, result.RunID)
 	}
 	verdict := domain.ReviewVerdict(result.Verdict)

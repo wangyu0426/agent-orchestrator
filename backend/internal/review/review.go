@@ -1293,7 +1293,7 @@ func (e *Engine) restoreReviewerLocked(
 }
 
 func (e *Engine) failRunningRestoredRuns(ctx stdctx.Context, review domain.Review, runs []domain.ReviewRun, body string) error {
-	pending, err := e.hasPendingReviewerResults(ctx, review.ReviewerHandleID, runs)
+	pending, err := e.hasPendingReviewerResults(ctx, review.SessionID, runs)
 	if err != nil {
 		return fmt.Errorf("check pending review results: %w", err)
 	}
@@ -1382,8 +1382,8 @@ func reviewRunsForReview(runs []domain.ReviewRun, reviewID string) []domain.Revi
 	return out
 }
 
-func (e *Engine) hasPendingReviewerResults(ctx stdctx.Context, reviewerID string, runs []domain.ReviewRun) (bool, error) {
-	if e.pendingResults == nil || reviewerID == "" {
+func (e *Engine) hasPendingReviewerResults(ctx stdctx.Context, workerID domain.SessionID, runs []domain.ReviewRun) (bool, error) {
+	if e.pendingResults == nil || workerID == "" {
 		return false, nil
 	}
 	eligible := make([]domain.ReviewRun, 0, len(runs))
@@ -1395,7 +1395,7 @@ func (e *Engine) hasPendingReviewerResults(ctx stdctx.Context, reviewerID string
 	if len(eligible) == 0 {
 		return false, nil
 	}
-	return e.pendingResults.HasPendingResults(ctx, reviewerID, eligible)
+	return e.pendingResults.HasPendingResults(ctx, reviewerHandleID(workerID), eligible)
 }
 
 // cancelStaleRunningRuns fails this reviewer's running passes when its pane is
@@ -1427,7 +1427,7 @@ func (e *Engine) cancelStaleRunningRuns(ctx stdctx.Context, workerID domain.Sess
 			reviewerRuns = append(reviewerRuns, run)
 		}
 	}
-	pending, err := e.hasPendingReviewerResults(ctx, reviewRow.ReviewerHandleID, reviewerRuns)
+	pending, err := e.hasPendingReviewerResults(ctx, workerID, reviewerRuns)
 	if err != nil {
 		return false, err
 	}
@@ -1676,7 +1676,7 @@ func (e *Engine) reconcileExitedReviewer(ctx stdctx.Context, review *domain.Revi
 	if alive {
 		return false, nil
 	}
-	pending, err := e.hasPendingReviewerResults(ctx, review.ReviewerHandleID, runs)
+	pending, err := e.hasPendingReviewerResults(ctx, review.SessionID, runs)
 	if err != nil {
 		return false, err
 	}
