@@ -336,7 +336,8 @@ func TestE2E_SecondDaemonOnSameDataDir(t *testing.T) {
 
 func TestE2E_StaleRunFile(t *testing.T) {
 	e := newEnv(t)
-	// PID 2147483647 is never alive -> the CLI must classify this as stale.
+	// PID 2147483647 is not visible; status is stale but stop must not
+	// mistake unreachable identity for verified death or remove the run-file.
 	content := fmt.Sprintf(`{"pid":2147483647,"port":%d,"startedAt":"2020-01-01T00:00:00Z"}`, e.port)
 	if err := os.MkdirAll(filepath.Dir(e.runFile), 0o755); err != nil {
 		t.Fatal(err)
@@ -348,11 +349,15 @@ func TestE2E_StaleRunFile(t *testing.T) {
 	out, _ := e.run(t, "status", "--json")
 	mustContain(t, out, `"state": "stale"`)
 
-	if out, code := e.run(t, "stop"); code != 0 || !strings.Contains(out, "stopped") {
-		t.Fatalf("stop stale: exit %d, out %s", code, out)
+	if out, code := e.run(t, "stop"); code != 1 || !strings.Contains(out, "refusing to remove run-file") {
+		t.Fatalf("stop stale should refuse without proof: exit %d, out %s", code, out)
 	}
-	if _, err := os.Stat(e.runFile); !os.IsNotExist(err) {
-		t.Fatal("stale run-file should be removed")
+	got, err := os.ReadFile(e.runFile)
+	if err != nil {
+		t.Fatalf("stop stale must preserve run-file: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("stop stale modified run-file: got %q, want %q", got, content)
 	}
 }
 
