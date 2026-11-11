@@ -285,6 +285,76 @@ filesystem read-only enforcement, provider-created GitHub Review ID,
 native session resume or owner gating. Keep #4 Draft and autoReview off
 until those are checked in a scratch instance with a disposable PR.
 
+## Real Codex TUI reviewer canary (disposable PR #3)
+
+**The preceding tests prove an AO CLI POST from a Codex sandbox, not the real
+AO-launched Reviewer.** The remaining acceptance trial uses a *real* Codex
+TUI selected with `ao review trigger --agent codex --interface tui`, a
+separate daemon and the already-existing one-file
+[Draft PR #3](https://github.com/wangyu0426/agent-orchestrator/pull/3).
+PR #3 exists only for verification and must never be merged.
+
+Important prerequisites on the SSH host:
+
+- The effective `ao-review-loopback` Codex profile must keep filesystem
+  read-only and allow the `api.github.com` domain **in addition to** the
+  local AO proxy target. For this trial, uncomment
+  `"api.github.com" = "allow"` in that profile's network domain table.
+- `gh auth status` and `codex sandbox -P ao-review-loopback -- gh api user
+  --jq '.login'` must pass. The latter is a safe GET and does not print a token.
+- Existing `~/ao-eval-lab/ao-pr4-check` is the test checkout. The trial
+  rebuilds an AO binary from the latest PR #4 HEAD, makes a fresh clone of
+  PR #3's head branch, and verifies its pinned commit SHA.
+- The running production `127.0.0.1:3301` AO binary, run-file and data dir
+  are **not** changed. The test uses a random separate port and its own
+  durable SQLite directory, and does not change any Worker installation.
+
+Run in the host's SSH/login shell:
+
+```bash
+set +e
+cd ~/ao-eval-lab/ao-pr4-check
+bash -n scripts/ao-codex-review-tui-e2e.sh
+bash scripts/ao-codex-review-tui-e2e.sh start
+```
+
+This `start` operation checks the real reviewer's GitHub API access and
+read-only write-denial canary before triggering. It uses
+`ao project add`, `ao spawn --claim-pr` and `ao review trigger --interface
+tui --no-inject`; the worker receives an explicit no-edit/idle instruction.
+It writes a scratch root locator to
+`~/ao-eval-lab/.native-review-pr4-current` for the follow-up commands.
+**It deliberately does not auto-merge or stop the scratch daemon on success**,
+because the Reviewer needs a chance to finish its interactive TUI pass.
+
+Inspect the result in the same host session:
+
+```bash
+bash scripts/ao-codex-review-tui-e2e.sh check
+```
+
+The `check` command reads AO's persisted current-head run, requires a
+nonempty `githubReviewId`, fetches that exact Review from GitHub and
+checks its `commit_id` matches PR #3's pinned head and its state is COMMENTED.
+It also checks that the Reviewer's worktree HEAD is unchanged and clean.
+**Also inspect the TUI pane and confirm that the actual reviewer argv uses
+`default_permissions="ao-review-loopback"` without a legacy `--sandbox` or
+full-access override.** Verify the resulting AO run has a terminal
+`complete` status and an internal verdict. A COMMENT review is deliberately
+not a GitHub APPROVE; the reviewer prompt specifies COMMENT because the
+PR author cannot approve their own PR.
+
+Stop only the test daemon when finished:
+
+```bash
+bash scripts/ao-codex-review-tui-e2e.sh stop
+```
+
+This retains scratch files for diagnosis. Close disposable PR #3 after the
+acceptance trial, **never merge it**. If any step blocks, do not fall back
+to production port 3301 or weaken the profile. Preserve logs and mark the
+full Reviewer E2E as BLOCKED until both provider Review and AO persistence
+are verified.
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
