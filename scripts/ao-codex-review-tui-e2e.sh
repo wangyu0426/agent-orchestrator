@@ -47,7 +47,6 @@ start() {
   mkdir -p "$BASE"
   [[ ! -f "$LAST" ]] || die "scratch instance already tracked at $LAST; check/stop it first"
   ROOT="$(mktemp -d "$BASE/native-review-pr4.XXXXXXXX")"
-  printf '%s\n' "$ROOT" > "$LAST"
   printf 'Scratch root: %s\n' "$ROOT"
 
   (
@@ -69,6 +68,8 @@ start() {
   PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
   [[ "$PORT" != 3301 ]] || die "unexpected live AO port"
   printf '%s\n' "$PORT" > "$ROOT/port"
+  # Only publish a resumable scratch instance after its binary and port exist.
+  printf '%s\n' "$ROOT" > "$LAST"
 
   # Do not inherit an ambient reviewer-specific client proxy into the daemon.
   nohup env -u AO_CLI_PROXY_LOOPBACK \
