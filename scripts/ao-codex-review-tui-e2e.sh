@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real AO-launched Codex TUI reviewer canary. Only operates on a disposable
 # Draft PR and a newly allocated scratch AO daemon (never the live :3301).
-# Usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|stop
+# Usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|restore|stop
 set -euo pipefail
 umask 077
 
@@ -186,6 +186,145 @@ print("Provider review verified: id=%s commit=%s state=%s"%(r["id"],r["commit_id
   printf 'Scratch run status must show completed verdict above; do not confuse provider COMMENT with AO internal verdict.\n'
 }
 
+
+# Restore acceptance after the completed review. This is intentionally scoped
+# to one pinned scratch test and refuses to signal any process except the
+# reviewer PTY host recorded in this test instance's own registry.
+restore() {
+  require python3
+  require curl
+  require gh
+  require git
+  load_state
+  [[ -f "$ROOT/worker" && -f "$ROOT/worktree" ]] || die "scratch worker metadata missing"
+  WORKER="$(cat "$ROOT/worker")"
+  WORKTREE="$(cat "$ROOT/worktree")"
+  [[ "$WORKER" == "native-review-pr4-e2e-1" ]] ||
+    die "refusing to restore an unexpected worker $WORKER"
+  [[ ! -e "$ROOT/restore-attempted" ]] ||
+    die "restore already attempted; inspect $ROOT/restore-* before retrying"
+  [[ -f "$ROOT/windows-pty-hosts.json" ]] ||
+    die "scratch PTY registry missing; refusing to signal any process"
+  ao_scratch status --json >"$ROOT/restore-daemon-before.json"
+  check
+  gh api repos/wangyu0426/agent-orchestrator/pulls/3/reviews >"$ROOT/restore-github-before.json"
+
+  # Preflight uses SQLite read-only mode. The exact completed run, real
+  # provider review ID and hook-captured native Codex session are mandatory.
+  # It also checks /proc/exe AND /proc/cmdline match this scratch binary.
+  python3 - "$ROOT" "$WORKER" "$PR_HEAD" <<'PY'
+import json, pathlib, sqlite3, sys
+root, worker, head = sys.argv[1:]
+root = pathlib.Path(root)
+expected_handle = "review-" + worker
+db = sqlite3.connect(f"file:{root / 'data' / 'ao.db'}?mode=ro", uri=True)
+rv = db.execute(
+    "SELECT id, agent_session_id, reviewer_handle_id, reviewer_launch_id, interface_mode "
+    "FROM review WHERE session_id=? AND harness='codex' AND is_archived=0", (worker,)
+).fetchall()
+if len(rv)!=1:
+    sys.exit("BLOCKED: expected exactly one non-archived Codex reviewer row")
+review_id, native_id, handle, generation, mode = rv[0]
+if not native_id or not generation or mode != 'tui' or expected_handle not in handle:
+    sys.exit("BLOCKED: TUI reviewer has no saved native Codex session/launch ID or handle; will not kill PTY")
+runs = db.execute(
+    "SELECT id, status, verdict, github_review_id, target_sha "
+    "FROM review_run WHERE session_id=?", (worker,)
+).fetchall()
+run_id = "558e2883-11ad-4ecc-a9ea-90ef534e3daa"
+if len(runs)!=1 or runs[0] != (run_id,'complete','approved','5860205489',head):
+    sys.exit(f"BLOCKED: unexpected review runs before restoration: {runs!r}")
+registry = json.loads((root / "windows-pty-hosts.json").read_text())
+matches = [x for x in registry if x.get("sessionId") == expected_handle]
+if len(matches)!=1:
+    sys.exit("BLOCKED: exactly one scratch reviewer PTY host entry required")
+pid = matches[0]["ptyHostPid"]
+daemon_pid = json.loads((root / "running.json").read_text())["pid"]
+if not isinstance(pid,int) or pid <= 1 or pid == daemon_pid:
+    sys.exit("BLOCKED: invalid or daemon PTY PID")
+proc = pathlib.Path(f"/proc/{pid}")
+try:
+    exe = (proc/"exe").resolve(strict=True)
+    argv = (proc/"cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+except (OSError, ValueError) as e:
+    sys.exit(f"BLOCKED: PTY host process unavailable: {e}")
+expected_bin = (root/"ao").resolve(strict=True)
+args = [a.decode("utf-8", "replace") for a in argv]
+if exe != expected_bin or len(args)<3 or args[1] != "pty-host" or expected_handle not in args:
+    sys.exit(f"BLOCKED: PTY process identity mismatch; executable={exe}, args={args[:5]}")
+info = dict(
+    worker=worker, reviewId=review_id, nativeSessionId=native_id,
+    reviewerHandle=handle, generation=generation, pid=pid,
+    githubReviewId="5860205489", reviewRunId=run_id
+)
+(root/"restore-before.json").write_text(json.dumps(info, indent=2)+"\n")
+print("PRECHECK PASS: isolated reviewer PTY host=%s, saved native Codex session present, completed review pinned" % pid)
+PY
+
+  # The once-only marker prevents blind repeated SIGTERM after a partial
+  # restore. No arbitrary pgrep, pkill, process-group kill or daemon restart.
+  touch "$ROOT/restore-attempted"
+  old_pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["pid"])' "$ROOT/restore-before.json")"
+  printf 'SIGTERM only to verified scratch Reviewer PTY host PID %s\n' "$old_pid"
+  kill -TERM "$old_pid"
+  gone=0
+  for _ in $(seq 1 30); do
+    if [[ ! -e "/proc/$old_pid" ]] ||
+      [[ "$(awk '{print $3}' "/proc/$old_pid/stat" 2>/dev/null)" == "Z" ]]; then
+      gone=1
+      break
+    fi
+    sleep 0.25
+  done
+  [[ "$gone" == 1 ]] || die "reviewer PTY did not exit; inspect scratch instance (no force-kill)"
+
+  printf 'Restoring Reviewer through scratch AO /reviews/restore API...\n'
+  curl --noproxy '*' -fsS --max-time 45 \
+    -H "Content-Type: application/json" -d '{}' \
+    "http://127.0.0.1:$PORT/api/v1/sessions/$WORKER/reviews/restore" \
+    > "$ROOT/restore-response.json" ||
+      die "restore API failed; inspect $ROOT/daemon.log and restore-response.json"
+  cat "$ROOT/restore-response.json"
+  printf '\n'
+
+  # A new PTY host must own the same stable reviewer handle, with a new
+  # generation. AO must preserve the native session and completed review run.
+  python3 - "$ROOT" "$WORKER" <<'PY'
+import json, pathlib, sqlite3, sys
+root, worker = pathlib.Path(sys.argv[1]), sys.argv[2]
+before = json.loads((root/"restore-before.json").read_text())
+db = sqlite3.connect(f"file:{root / 'data' / 'ao.db'}?mode=ro", uri=True)
+rv = db.execute(
+    "SELECT agent_session_id, reviewer_handle_id, reviewer_launch_id, interface_mode "
+    "FROM review WHERE session_id=? AND harness='codex' AND is_archived=0", (worker,)
+).fetchone()
+if rv is None or rv[0] != before['nativeSessionId'] or rv[1] != before['reviewerHandle'] or rv[2] == before['generation'] or rv[3] != 'tui':
+    sys.exit("BLOCKED: native Reviewer identity/launch generation did not survive restore: %r"% (rv,))
+runs = db.execute(
+    "SELECT id, status, verdict, github_review_id FROM review_run WHERE session_id=?", (worker,)
+).fetchall()
+if runs != [(before['reviewRunId'],'complete','approved',before['githubReviewId'])]:
+    sys.exit("BLOCKED: reviewer restore created or changed Review Run: %r"% (runs,))
+entries = json.loads((root/"windows-pty-hosts.json").read_text())
+matches = [e for e in entries if e.get("sessionId")=="review-"+worker]
+if len(matches)!=1 or matches[0]["ptyHostPid"]==before["pid"]:
+    sys.exit("BLOCKED: new native Reviewer PTY not created")
+print("RESTORE PASS: nativeSessionId preserved; Reviewer generation and PTY replaced; completed Review Run unchanged")
+PY
+  gh api repos/wangyu0426/agent-orchestrator/pulls/3/reviews >"$ROOT/restore-github-after.json"
+  python3 - "$ROOT" <<'PY'
+import json,sys,pathlib
+r=pathlib.Path(sys.argv[1])
+before=json.loads((r/"restore-github-before.json").read_text())
+after=json.loads((r/"restore-github-after.json").read_text())
+if sorted(x["id"] for x in before)!=sorted(x["id"] for x in after):
+    sys.exit("BLOCKED: Reviewer restore caused a GitHub Review count/ID change")
+print("GITHUB PASS: no duplicate provider Review created during native resume")
+PY
+  check
+  printf '\nNative TUI Reviewer restore acceptance PASS (scratch only).\n'
+}
+
 stop() {
   load_state
   printf 'Stopping scratch AO daemon on port %s (never 3301)\n' "$PORT"
@@ -194,10 +333,11 @@ stop() {
   printf 'Test files retained at %s for evidence. Disposable PR #3 remains Draft/Open; close it after review.\n' "$ROOT"
 }
 
-[[ "$#" -eq 1 ]] || die "usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|stop"
+[[ "$#" -eq 1 ]] || die "usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|restore|stop"
 case "$1" in
   start) start ;;
   check) check ;;
+  restore) restore ;;
   stop) stop ;;
-  *) die "usage: start|check|stop" ;;
+  *) die "usage: start|check|restore|stop" ;;
 esac
