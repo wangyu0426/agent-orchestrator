@@ -18,13 +18,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
-// TestE2E_ReviewSubmitDurableAcrossDaemonRestart exercises the real CLI,
-// daemon HTTP controller, review service, and SQLite store without GitHub
-// access or a synthetic verdict on any user's PR.
-//
-// It deliberately seeds an isolated, otherwise inactive review run before
-// starting the daemon. Unlike the true Codex TUI reviewer acceptance test,
-// this does NOT launch an agent or claim to have posted a GitHub review.
 // isolatedSubmit runs the same request either on the host (portable CI) or,
 // when explicitly opted in, from a real Codex read-only sandbox. This is
 // intentionally *not* a reviewer launch; it tests the sandboxed transport and
@@ -67,6 +60,11 @@ func isolatedSubmit(t *testing.T, e env, workerID, runID, body, reviewID string,
 	return "", 1
 }
 
+// TestE2E_ReviewSubmitDurableAcrossDaemonRestart exercises the real CLI,
+// daemon HTTP controller, review service, and SQLite store without posting
+// to GitHub or touching another AO instance. A deliberately synthetic,
+// otherwise inactive run is inserted before starting the isolated daemon.
+// This is not a real TUI Reviewer acceptance test.
 func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
