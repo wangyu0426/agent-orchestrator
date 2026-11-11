@@ -52,8 +52,13 @@ shared global policy.
 The network proxy must actually be active for its domain allowlist to be
 enforced. `allow_local_binding=true` intentionally broadens access to local
 network destinations; the allowlist is **not a TCP port 3301 firewall**.
-Go's standard HTTP client can bypass HTTP proxies for loopback, so this
-experiment must check the real `ao` CLI, not just proxied `curl`.
+Go's standard HTTP client bypasses proxy settings for loopback IPs, and
+can therefore be blocked by the OS sandbox even when proxied `curl` works.
+For Go `ao`, validate **direct** loopback as well as proxy-mediated HTTP.
+On this single-user host, `allow_local_binding = true` is the proposed
+profile adjustment if the direct TCP canary is blocked. It broadens private
+network access; this isn't a per-port permission. Never equate `curl`
+success alone with successful AO CLI → daemon communication.
 A GitHub review POST from the reviewer also needs network access to
 `api.github.com` and a working authorized `gh` login; if only loopback is
 allowed, validate AO result transport separately and report GitHub posting
@@ -72,9 +77,9 @@ that the sandbox can already read.
    ```bash
    codex --version
    curl -fsS --max-time 3 http://127.0.0.1:<scratch-port>/healthz
-   codex sandbox linux --permission-profile ao-review-loopback -- \
+   codex sandbox -P ao-review-loopback -- \
      /bin/true
-   codex sandbox linux --permission-profile ao-review-loopback -- \
+   codex sandbox -P ao-review-loopback -- \
      curl -fsS --max-time 3 http://127.0.0.1:<scratch-port>/healthz
    ```
 
@@ -161,6 +166,40 @@ connection. The old live daemon remains untouched by this procedure.
 This is **not** yet proof of a real AO-launched Reviewer or review submission.
 `go test` must pass and the clean-worktree build must use the current PR
 HEAD before declaring this test passed.
+
+## Direct vs proxied loopback diagnostic
+
+If the patched CLI's `review ls` still reports a stale run-file despite
+two passing Go test packages and a successful sandbox `curl`, distinguish
+run-file identity mismatch from **Go direct-socket denial**:
+
+```bash
+set +e
+RUN="$HOME/.ao-orchestrator-test/running.json"
+python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print("runfile PID/port:",j["pid"],j["port"])' "$RUN"
+codex sandbox -P ao-review-loopback -- \
+  curl --noproxy '*' -fsS --max-time 3 http://127.0.0.1:3301/healthz
+codex sandbox -P ao-review-loopback -- \
+  curl -fsS --max-time 3 http://127.0.0.1:3301/healthz
+```
+
+If PID/port match the health JSON and **direct** `--noproxy '*'` fails
+while ordinary curl succeeds, try the permission change **for this one
+canary only** without modifying the global Codex config:
+
+```bash
+codex sandbox -P ao-review-loopback \
+  -c 'permissions.ao-review-loopback.network.allow_local_binding=true' -- \
+  env AO_RUN_FILE="$HOME/.ao-orchestrator-test/running.json" \
+      AO_DATA_DIR="$HOME/.ao-orchestrator-test/data" \
+      "$HOME/ao-eval-lab/ao-pr4-cli" review ls path-of-reasoning-4 --json
+```
+
+If the override succeeds, add `allow_local_binding = true` under
+`[permissions.ao-review-loopback.network]` to persist it. If it fails,
+do not guess: compare the run-file PID/port against the direct HTTP response
+and collect a precise Go socket denial with a diagnostic build. Never
+restart the healthy daemon to work around a client-side check.
 
 ## Operational decisions
 
