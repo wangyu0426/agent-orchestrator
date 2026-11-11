@@ -87,9 +87,13 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 	if err := os.WriteFile(otherBody, []byte("Different review body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conflict := append(append([]string(nil), submit...), "--body", otherBody)
-	// Cobra consumes the final repeated --body flag; assert this is not
-	// accidentally accepted as a second independent review.
+	conflict := append([]string(nil), submit...)
+	for i := 0; i < len(conflict)-1; i++ {
+		if conflict[i] == "--body" {
+			conflict[i+1] = otherBody
+			break
+		}
+	}
 	if out, code := e.run(t, conflict...); code == 0 {
 		t.Fatalf("different review payload was accepted: %s", out)
 	}
