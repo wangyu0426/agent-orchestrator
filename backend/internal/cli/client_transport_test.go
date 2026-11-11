@@ -346,3 +346,66 @@ func TestTransportHealthFallbackDoesNotProbeWhenPIDVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTransportExplicitLoopbackProxyForInvisiblePID(t *testing.T) {
+	cfg := setConfigEnv(t)
+	t.Setenv("AO_CLI_PROXY_LOOPBACK", "1")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
+
+	var healthCount, apiCount atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host != "127.0.0.1:3301" {
+			t.Errorf("proxy received unexpected target %q", r.URL.Host)
+			http.Error(w, "wrong host", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			healthCount.Add(1)
+			_, _ = io.WriteString(w, `{"service":"agent-orchestrator-daemon","pid":254414}`)
+		case "/api/v1/projects/demo":
+			apiCount.Add(1)
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(proxy.Close)
+	t.Setenv("http_proxy", proxy.URL)
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: 254414, Port: 3301}); err != nil {
+		t.Fatal(err)
+	}
+	c := &commandContext{deps: Deps{
+		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+		ProcessAlive: func(int) bool { return false },
+	}}
+	var out map[string]any
+	if err := c.getJSON(context.Background(), "projects/demo", &out); err != nil {
+		t.Fatalf("proxied CLI request failed: %v", err)
+	}
+	if out["status"] != "ok" || healthCount.Load() != 1 || apiCount.Load() != 1 {
+		t.Fatalf("status=%v health=%d api=%d; want ok / 1 / 1", out["status"], healthCount.Load(), apiCount.Load())
+	}
+}
+
+func TestTransportExplicitLoopbackProxyRejectsRemoteEndpoints(t *testing.T) {
+	t.Setenv("AO_CLI_PROXY_LOOPBACK", "1")
+	t.Setenv("HTTP_PROXY", "")
+	for _, value := range []string{
+		"http://example.com:3128",
+		"https://127.0.0.1:3128",
+		"http://person:pass@127.0.0.1:3128",
+		"http://127.0.0.1",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("http_proxy", value)
+			c := &commandContext{deps: Deps{HTTPClient: &http.Client{}}}
+			if _, err := c.daemonHTTPClient(); err == nil {
+				t.Fatalf("proxy %q was accepted, want rejection", value)
+			}
+		})
+	}
+}
