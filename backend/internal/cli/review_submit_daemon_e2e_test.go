@@ -96,13 +96,24 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const reviewID = "e2e-codex-review"
+	// review_runs.review_id is a foreign key to the per-worker reviewer row.
+	// The test must mirror the real review lifecycle: project -> worker ->
+	// reviewer -> run. Never disable SQLite foreign-key enforcement.
+	if err := store.UpsertReview(ctx, domain.Review{
+		ID: reviewID, SessionID: worker.ID, ProjectID: worker.ProjectID,
+		Harness: domain.ReviewerCodex, InterfaceMode: domain.ReviewerInterfaceTUI,
+		PRURL: prURL, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed reviewer parent: %v", err)
+	}
 	if err := store.InsertReviewRun(ctx, domain.ReviewRun{
-		ID: runID, SessionID: worker.ID, BatchID: "e2e-batch",
+		ID: runID, ReviewID: reviewID, SessionID: worker.ID, BatchID: "e2e-batch",
 		Harness: domain.ReviewerCodex, PRURL: prURL,
 		TargetSHA: "e2e-target-sha", Status: domain.ReviewRunRunning,
 		CreatedAt: now,
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("seed review run: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
