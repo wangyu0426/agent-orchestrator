@@ -139,10 +139,10 @@ func asExit(err error, target **exec.ExitError) bool {
 // startDaemon brings the daemon up and registers a stop on cleanup. `ao start`
 // no longer spawns the daemon (the desktop app owns it now), so the e2e suite
 // drives the hidden `ao daemon` command directly and polls for readiness.
-func (e env) startDaemon(t *testing.T) {
+func (e env) startDaemon(t *testing.T, extraEnv ...string) {
 	t.Helper()
 	cmd := exec.Command(aoBin, "daemon")
-	cmd.Env = e.environ("")
+	cmd.Env = append(e.environ(""), extraEnv...)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("spawn ao daemon: %v", err)
 	}
