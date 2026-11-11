@@ -1,0 +1,93 @@
+# Experimental Codex Native Review loopback permission profile
+
+This opt-in experiments with restoring the **existing** Reviewer → AO CLI →
+loopback HTTP → daemon result-submission path. It does **not** deploy PR #2's
+filesystem inbox, add API auth, modify the daemon's listener, or allow merge.
+
+## Why it is opt-in
+
+AO's Codex TUI reviewer normally receives `--sandbox read-only`. Codex's
+permission profiles cannot be combined with that legacy flag. With the host
+environment variable `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1`, the reviewer TUI
+launch **and resume** instead receive
+`-c 'default_permissions="ao-review-loopback"'`. All other sessions and
+reviewer harnesses keep their original policies. The named profile must exist
+in the **effective Codex user configuration on the execution host**.
+
+Unset the environment variable (and relaunch the reviewer) to roll back. A
+missing or malformed profile should fail the reviewer launch; do not silently
+fall back to broader sandbox permissions.
+
+## Host Codex configuration (example)
+
+Use the actual Codex configuration home for the AO daemon's user (often
+`~/.codex/config.toml`). Merge this with the existing configuration rather
+than overwriting authentication or other settings:
+
+```toml
+[features]
+network_proxy = true
+
+[permissions.ao-review-loopback]
+extends = ":read-only"
+
+[permissions.ao-review-loopback.network]
+enabled = true
+allow_local_binding = true
+
+[permissions.ao-review-loopback.network.domains]
+"127.0.0.1" = "allow"
+"localhost" = "allow"
+```
+
+**Read the effective configuration first.** A legacy `sandbox_mode`,
+`sandbox_workspace_write`, or an explicit `--sandbox` in another active
+config layer selects the legacy sandbox path instead of permission profiles.
+Remove conflicting *legacy sandbox keys from the profile in use* only after
+inspecting the impact on other Codex sessions; do not blindly change a
+shared global policy.
+
+The network proxy must actually be active for its domain allowlist to be
+enforced. `allow_local_binding=true` intentionally broadens access to local
+network destinations; the allowlist is **not a TCP port 3301 firewall**.
+Go's standard HTTP client can bypass HTTP proxies for loopback, so this
+experiment must check the real `ao` CLI, not just proxied `curl`.
+Neither filesystem read-only nor the network allowlist hides host credentials
+that the sandbox can already read.
+
+## Verification and rollout (no production changes until proven)
+
+1. Record Codex CLI version and effective config without printing auth tokens.
+   Confirm the host's `127.0.0.1:<scratch-port>/healthz` responds.
+2. Test a **scratch** AO instance and an unmerged disposable PR. The AO daemon
+   must inherit `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1`. Launch a **new** Codex
+   reviewer TUI through real AO, not only `codex sandbox linux` or manual
+   `codex exec`. Confirm the argv has the named profile and *no*
+   `--sandbox`, `--add-dir`, or full-access flag.
+3. In that same reviewer, use `ao` to reach the scratch daemon via its
+   actual run-file / port override. Test `/healthz`, then submit one
+   real review through the existing `ao review submit` contract.
+4. Confirm the exact PR, expected latest HEAD SHA, GitHub review ID, persisted
+   run verdict, duplicate-submission behaviour and reviewer-exit/restart
+   recovery. Check the reviewer cannot **write** its checkout, other AO state,
+   or host files. Do not read secret values during canaries.
+5. Stop/restart only the disposable instance and clean it up. Do not change
+   production settings or enable autoReview until the full scratch E2E passes.
+
+Any `EPERM`, connection refusal, wrong daemon, unexpected permissions,
+review ID mismatch, or missing durable result means **BLOCKED**. The Codex
+proxy/OS namespace may still prevent host loopback access even with these
+settings; do not call this feature working based on syntax-only or unit tests.
+
+## Operational decisions
+
+- Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
+- Accept the single-user host loopback API risk explicitly; no new auth system.
+- Keep PR #2 frozen and leave ordinary Worker permissions unchanged.
+- Never automatically merge a PR; CI/reviewer results are evidence for the
+  owner, not authority to merge.
+- This only covers Codex **TUI** review launches/restores. Codex app-server
+  Chat reviews have a separate runtime surface and must be tested separately.
+
+References: [Codex permission profiles](https://learn.chatgpt.com/docs/permissions)
+and [CLI reference](https://learn.chatgpt.com/docs/cli/reference).
