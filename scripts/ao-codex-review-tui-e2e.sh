@@ -240,6 +240,11 @@ if len(matches)!=1:
     sys.exit("BLOCKED: exactly one scratch reviewer PTY host entry required")
 pid = matches[0]["ptyHostPid"]
 daemon_pid = json.loads((root / "running.json").read_text())["pid"]
+status = json.loads((root / "restore-daemon-before.json").read_text())
+if (status.get("state") != "ready" or status.get("pid") != daemon_pid or
+    status.get("port") != int((root / "port").read_text()) or
+    pathlib.Path(status.get("executablePath","")).resolve() != (root/"ao").resolve()):
+    sys.exit("BLOCKED: scratch daemon identity/port/binary mismatch")
 if not isinstance(pid,int) or pid <= 1 or pid == daemon_pid:
     sys.exit("BLOCKED: invalid or daemon PTY PID")
 proc = pathlib.Path(f"/proc/{pid}")
@@ -266,7 +271,28 @@ PY
   touch "$ROOT/restore-attempted"
   old_pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["pid"])' "$ROOT/restore-before.json")"
   printf 'SIGTERM only to verified scratch Reviewer PTY host PID %s\n' "$old_pid"
-  kill -TERM "$old_pid"
+  # pidfd binds the signal to the exact process identity, even if a PID gets
+  # recycled between the preflight snapshot and the signal attempt. Linux only.
+  python3 - "$ROOT" "$old_pid" "$WORKER" <<'PY'
+import json, os, pathlib, signal, sys
+root, pid, worker = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+before = json.loads((root/"restore-before.json").read_text())
+if before["pid"] != pid or before["worker"] != worker:
+    sys.exit("BLOCKED: restore PID/worker preflight mismatch")
+try:
+    fd = os.pidfd_open(pid)
+    exe = pathlib.Path(f"/proc/{pid}/exe").resolve(strict=True)
+    args = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+    expected = (root/"ao").resolve(strict=True)
+    if exe != expected or len(args)<3 or args[1]!=b"pty-host" or ("review-"+worker).encode() not in args:
+        sys.exit("BLOCKED: reviewer host identity changed; refusing SIGTERM")
+    signal.pidfd_send_signal(fd, signal.SIGTERM)
+except (OSError, ValueError) as e:
+    sys.exit(f"BLOCKED: cannot safely signal reviewer PID: {e}")
+finally:
+    if "fd" in locals():
+        os.close(fd)
+PY
   gone=0
   for _ in $(seq 1 30); do
     if [[ ! -e "/proc/$old_pid" ]] ||
