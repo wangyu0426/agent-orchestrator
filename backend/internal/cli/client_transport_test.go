@@ -427,7 +427,7 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 	const worker = "scratch-worker"
 	const runID = "scratch-review-run"
 	const bodyText = "isolated E2E transport test"
-	var healthCount, submitCount, readCount atomic.Int32
+	var healthCount, telemetryCount, submitCount, readCount atomic.Int32
 	var recorded bool
 	var firstBody string
 	var stateMu sync.Mutex
@@ -442,6 +442,12 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 			healthCount.Add(1)
 			_, _ = io.WriteString(w, `{"service":"agent-orchestrator-daemon","pid":254414}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/telemetry/cli-invoked":
+			// Each CLI command reports best-effort usage before its API call.
+			// Both requests perform independent PID-invisible health probes.
+			telemetryCount.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/"+worker+"/reviews/submit":
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -523,8 +529,10 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 		!strings.Contains(out, `"verdict": "changes_requested"`) {
 		t.Fatalf("read-back did not preserve review result: %s", out)
 	}
-	if healthCount.Load() != 3 || submitCount.Load() != 2 || readCount.Load() != 1 {
-		t.Fatalf("unexpected proxy calls health=%d submit=%d read=%d",
-			healthCount.Load(), submitCount.Load(), readCount.Load())
+	// Three CLI invocations each emit one telemetry POST and one API call.
+	// When the host PID is hidden, both operations validate /healthz first.
+	if healthCount.Load() != 6 || telemetryCount.Load() != 3 || submitCount.Load() != 2 || readCount.Load() != 1 {
+		t.Fatalf("unexpected proxy calls health=%d telemetry=%d submit=%d read=%d",
+			healthCount.Load(), telemetryCount.Load(), submitCount.Load(), readCount.Load())
 	}
 }
