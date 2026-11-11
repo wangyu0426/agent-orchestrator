@@ -112,6 +112,45 @@ review ID mismatch, or missing durable result means **BLOCKED**. The Codex
 proxy/OS namespace may still prevent host loopback access even with these
 settings; do not call this feature working based on syntax-only or unit tests.
 
+## Sandbox-visible HTTP but PID-invisible: stale run-file fix
+
+A real SSH test on 2026-11-11 confirmed:
+
+- Host `/tmp/codex-daemon-1000` is owner UID 1000 with mode 0700.
+- Both `codex sandbox -P ao-review-loopback -- /bin/true` and the
+  sandboxed `curl http://127.0.0.1:3301/healthz` succeeded.
+- The **old** sandboxed `ao review ls path-of-reasoning-4 --json`
+  reported a stale run-file despite that HTTP health result.
+
+The CLI used `kill(pid, 0)` before contacting the daemon. A sandbox's
+PID namespace can hide the host PID, causing a false stale-run-file result.
+This PR now verifies `/healthz` on the run-file's loopback port **only when**
+the PID probe fails. It accepts the daemon only if both the service name and
+the exact run-file PID match. Wrong/missing/unhealthy endpoints remain stale.
+
+To test **without replacing the running AO binary or restarting the daemon**,
+use a host SSH shell and a clean worktree:
+
+```bash
+set -e
+cd "$HOME/orchestrator-eval"
+git fetch origin pull/4/head
+git worktree add --detach "$HOME/ao-eval-lab/ao-pr4-check" FETCH_HEAD
+cd "$HOME/ao-eval-lab/ao-pr4-check/backend"
+go test ./internal/cli ./internal/adapters/reviewer/codex
+go build -o "$HOME/ao-eval-lab/ao-pr4-cli" ./cmd/ao
+codex sandbox -P ao-review-loopback -- \
+  env AO_RUN_FILE="$HOME/.ao-orchestrator-test/running.json" \
+      AO_DATA_DIR="$HOME/.ao-orchestrator-test/data" \
+      "$HOME/ao-eval-lab/ao-pr4-cli" review ls path-of-reasoning-4 --json
+```
+
+An empty review list with no transport error is still a successful CLI
+connection. The old live daemon remains untouched by this procedure.
+This is **not** yet proof of a real AO-launched Reviewer or review submission.
+`go test` must pass and the clean-worktree build must use the current PR
+HEAD before declaring this test passed.
+
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
