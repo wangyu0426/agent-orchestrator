@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -429,6 +430,7 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 	var healthCount, submitCount, readCount atomic.Int32
 	var recorded bool
 	var firstBody string
+	var stateMu sync.Mutex
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Host != "127.0.0.1:3301" {
 			t.Errorf("unexpected proxy request target %q", r.URL.Host)
@@ -449,6 +451,8 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 			}
 			reqBody := string(raw)
 			submitCount.Add(1)
+			stateMu.Lock()
+			defer stateMu.Unlock()
 			if recorded && firstBody != reqBody {
 				http.Error(w, `{"message":"conflicting submission","code":"INVALID"}`, http.StatusConflict)
 				return
@@ -470,6 +474,8 @@ func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
 			_, _ = io.WriteString(w, `{"review":{"id":"scratch-review-run","verdict":"changes_requested","githubReviewId":"12345"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/"+worker+"/reviews":
 			readCount.Add(1)
+			stateMu.Lock()
+			defer stateMu.Unlock()
 			if !recorded {
 				http.Error(w, "no submitted review", http.StatusNotFound)
 				return
