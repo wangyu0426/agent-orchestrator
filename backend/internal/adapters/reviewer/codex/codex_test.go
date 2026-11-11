@@ -96,6 +96,7 @@ func TestReviewCommandOptInLoopbackPermissionProfile(t *testing.T) {
 		"agent",
 		"-c", `default_permissions="ao-review-loopback"`,
 		"-c", `shell_environment_policy.set.AO_PORT="3301"`,
+		"-c", `shell_environment_policy.set.AO_CLI_PROXY_LOOPBACK="1"`,
 		"--", "review it",
 	}
 	if !slices.Equal(got.Argv, want) {
@@ -127,6 +128,7 @@ func TestReviewRestoreOptInLoopbackPermissionProfile(t *testing.T) {
 		"agent", "resume",
 		"-c", `default_permissions="ao-review-loopback"`,
 		"-c", `shell_environment_policy.set.AO_PORT="3301"`,
+		"-c", `shell_environment_policy.set.AO_CLI_PROXY_LOOPBACK="1"`,
 		"codex-native-1",
 	}
 	if !slices.Equal(got.Argv, want) {
