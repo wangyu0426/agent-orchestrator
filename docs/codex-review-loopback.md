@@ -344,6 +344,48 @@ full-access override.** Verify the resulting AO run has a terminal
 not a GitHub APPROVE; the reviewer prompt specifies COMMENT because the
 PR author cannot approve their own PR.
 
+### Native Reviewer TUI restore after a completed Review
+
+After `check` proves that the real GitHub review and AO verdict have been
+recorded, do **not** open a second review or rerun the same PR. On Linux the
+same scratch-instance script has a guarded one-shot `restore` command:
+
+```bash
+set +e
+cd ~/ao-eval-lab/ao-pr4-check
+git fetch origin pull/4/head
+git switch --detach FETCH_HEAD
+bash -n scripts/ao-codex-review-tui-e2e.sh
+bash scripts/ao-codex-review-tui-e2e.sh restore
+echo "Restore exit code: $?"
+```
+
+Before any signal is sent, `restore` performs the full previous `check`,
+reads **only the scratch database** in SQLite read-only mode, requires
+the known completed run `558e2883-11ad-4ecc-a9ea-90ef534e3daa`
+and GitHub Review ID `5860205489`, and confirms the persisted reviewer
+record has a nonempty native Codex session ID. It also checks the scratch
+daemon's PID, port and executable, plus its **instance-local** PTY registry
+`windows-pty-hosts.json`. On Linux it verifies `/proc/<pid>/exe` and
+`cmdline` belong to that exact scratch executable and `review-` worker.
+It sends SIGTERM via a Linux `pidfd` bound to that process; no generic
+`pkill` or process group kill is used. Any failed precondition means
+**BLOCKED without killing a process**.
+
+Once only, it retires that scratch Reviewer PTY host and POSTs to its
+`/api/v1/sessions/{id}/reviews/restore` endpoint, which invokes the
+real Codex `ReviewRestoreCommand`. It then requires a **new** PTY host PID
+and launch generation, the **same** saved native Codex session ID, and the
+**same** completed AO Review Run and GitHub Review ID. GitHub Review IDs
+are counted before/after, so any duplicate provider Review fails the check.
+It also verifies the checkout HEAD and cleanliness again. The script
+records a `restore-attempted` marker; if the operation partially fails,
+do not blindly rerun or remove the marker. Inspect scratch logs and
+`restore-before.json`/`restore-response.json` instead.
+
+The live `3301` daemon, its CLI wrapper, PoR #33, and the fixture PR's
+GitHub state are unaffected. This is still an operational **real-host**
+test, not an automated passing result until executed on `yuworker`.
 Stop only the test daemon when finished:
 
 ```bash
