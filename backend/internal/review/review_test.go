@@ -987,7 +987,7 @@ func TestRestoreReviewerNoopsWithoutReviewHistory(t *testing.T) {
 
 func TestRestoreReviewerRestoresDeadReviewerFromHistory(t *testing.T) {
 	store := &fakeStore{
-		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex, ReviewerHandleID: "ptyhost-v1:review-mer-1"},
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex, InterfaceMode: domain.ReviewerInterfaceTUI, ReviewerHandleID: "ptyhost-v1:review-mer-1"},
 		runs:   []domain.ReviewRun{{ID: "run-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunComplete, Verdict: domain.VerdictApproved}},
 	}
 	launcher := &fakeLauncher{alive: false, handle: "review-mer-1"}
