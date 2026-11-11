@@ -689,7 +689,6 @@ func TestReviewTriggerForwardsReviewerAndPolicyFlags(t *testing.T) {
 	}
 }
 
-
 // TestReviewTriggerRejectsInvalidInterfaceBeforeDaemonCall proves that CLI
 // typos cannot accidentally start an unrequested reviewer surface.
 func TestReviewTriggerRejectsInvalidInterfaceBeforeDaemonCall(t *testing.T) {

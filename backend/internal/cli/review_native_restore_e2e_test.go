@@ -72,11 +72,11 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 	worker, err := store.CreateSession(ctx, domain.SessionRecord{
 		ProjectID: projectID, Kind: domain.KindWorker,
 		Harness: domain.HarnessCodex, ReviewerHarness: domain.ReviewerCodex,
-		Mode: domain.SessionModeChat,
+		Mode:         domain.SessionModeChat,
 		HibernatedAt: &now,
-		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
-		Metadata: domain.SessionMetadata{WorkspacePath: workspace},
-		CreatedAt: now, UpdatedAt: now,
+		Activity:     domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		Metadata:     domain.SessionMetadata{WorkspacePath: workspace},
+		CreatedAt:    now, UpdatedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 		ID: reviewID, SessionID: worker.ID, ProjectID: worker.ProjectID,
 		Harness: domain.ReviewerCodex, InterfaceMode: domain.ReviewerInterfaceTUI,
 		AgentSessionID: nativeID, ReviewerActivityState: domain.ActivityExited,
-		PRURL: "https://github.com/example/no-real-review/pull/1",
+		PRURL:     "https://github.com/example/no-real-review/pull/1",
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
@@ -94,8 +94,8 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 		ID: runID, ReviewID: reviewID, SessionID: worker.ID,
 		Harness: domain.ReviewerCodex, PRURL: "https://github.com/example/no-real-review/pull/1",
 		TargetSHA: targetSHA,
-		Status: domain.ReviewRunComplete, Verdict: domain.VerdictApproved,
-		Body: "Synthetic completed review: no provider actions allowed.",
+		Status:    domain.ReviewRunComplete, Verdict: domain.VerdictApproved,
+		Body:           "Synthetic completed review: no provider actions allowed.",
 		GithubReviewID: providerID, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
@@ -151,11 +151,16 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 		}
 	}
 
-	type state struct{ handle, agentID, generation, status, verdict, reviewID string; runCount int }
+	type state struct {
+		handle, agentID, generation, status, verdict, reviewID string
+		runCount                                               int
+	}
 	readState := func() state {
 		t.Helper()
 		db, err := sql.Open("sqlite", "file:"+filepath.Join(e.dataDir, "ao.db")+"?mode=ro")
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		defer db.Close()
 		var v state
 		if err := db.QueryRow(
@@ -178,8 +183,8 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 		return v
 	}
 	type entry struct {
-		SessionID string `json:"sessionId"`
-		PtyHostPID int `json:"ptyHostPid"`
+		SessionID  string `json:"sessionId"`
+		PtyHostPID int    `json:"ptyHostPid"`
 	}
 	getHost := func() entry {
 		t.Helper()
@@ -188,11 +193,15 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 			t.Fatalf("isolated native PTY registry unavailable: %v", err)
 		}
 		var all []entry
-		if err := json.Unmarshal(raw, &all); err != nil { t.Fatal(err) }
+		if err := json.Unmarshal(raw, &all); err != nil {
+			t.Fatal(err)
+		}
 		target := "review-" + string(worker.ID)
 		var matches []entry
 		for _, x := range all {
-			if x.SessionID == target { matches = append(matches, x) }
+			if x.SessionID == target {
+				matches = append(matches, x)
+			}
 		}
 		if len(matches) != 1 || matches[0].PtyHostPID <= 1 {
 			t.Fatalf("expected one real direct PTY for %q, got %+v", target, matches)
@@ -212,16 +221,22 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 	// binary executing pty-host for our one disposable worker.
 	proc := fmt.Sprintf("/proc/%d", host1.PtyHostPID)
 	exe, err := os.Readlink(filepath.Join(proc, "exe"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	args, err := os.ReadFile(filepath.Join(proc, "cmdline"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if host1.PtyHostPID == os.Getpid() || exe != aoBin ||
 		!bytes.Contains(args, []byte("pty-host")) ||
 		!bytes.Contains(args, []byte(host1.SessionID)) {
 		t.Fatalf("refusing signal to unmatched PTY host pid=%d exe=%q argv=%q", host1.PtyHostPID, exe, args)
 	}
 	fd, err := unix.PidfdOpen(host1.PtyHostPID, 0)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := unix.PidfdSendSignal(fd, unix.SIGTERM, nil, 0); err != nil {
 		_ = unix.Close(fd)
 		t.Fatal(err)
@@ -230,7 +245,9 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		_, err := os.Stat(proc)
-		if os.IsNotExist(err) { break }
+		if os.IsNotExist(err) {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatal("scratch Reviewer PTY did not exit; refusing force-kill")
 		}

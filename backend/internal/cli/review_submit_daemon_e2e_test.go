@@ -89,9 +89,9 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 		ProjectID: "scratch-review", Kind: domain.KindWorker,
 		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
 		HibernatedAt: &now,
-		Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
-		Metadata: domain.SessionMetadata{WorkspacePath: workspace},
-		CreatedAt: now, UpdatedAt: now,
+		Activity:     domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		Metadata:     domain.SessionMetadata{WorkspacePath: workspace},
+		CreatedAt:    now, UpdatedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)

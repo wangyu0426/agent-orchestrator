@@ -136,9 +136,9 @@ func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 	// Shell commands inherit only Codex's core environment by default. Preserve
 	// the AO location overrides the reviewer needs to submit to this daemon.
 	values := map[string]string{
-		"AO_PORT":     os.Getenv("AO_PORT"),
-		"AO_DATA_DIR": firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
-		"AO_RUN_FILE": firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
+		"AO_PORT":               os.Getenv("AO_PORT"),
+		"AO_DATA_DIR":           firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
+		"AO_RUN_FILE":           firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
 		"AO_CLI_PROXY_LOOPBACK": proxyLoopback,
 	}
 	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE", "AO_CLI_PROXY_LOOPBACK"} {

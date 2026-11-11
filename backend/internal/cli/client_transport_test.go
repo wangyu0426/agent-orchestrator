@@ -412,7 +412,6 @@ func TestTransportExplicitLoopbackProxyRejectsRemoteEndpoints(t *testing.T) {
 	}
 }
 
-
 // TestTransportProxyReviewSubmitPOSTAndReadBack covers the actual reviewer CLI
 // request path (not just a read-only GET). The stand-in proxy implements a
 // minimal stateful daemon, so no real GitHub PR or daemon is mutated. The
