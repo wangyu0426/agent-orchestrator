@@ -79,6 +79,9 @@ func TestReviewCommandUsesReadOnlySandbox(t *testing.T) {
 
 func TestReviewCommandOptInLoopbackPermissionProfile(t *testing.T) {
 	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "1")
+	// Clear ambient daemon locators: the argv assertions must be host-independent.
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_RUN_FILE", "")
 	t.Setenv("AO_PORT", "3301")
 	agent := &captureAgent{}
 	r := &Reviewer{agent: agent}
@@ -105,6 +108,9 @@ func TestReviewCommandOptInLoopbackPermissionProfile(t *testing.T) {
 
 func TestReviewRestoreOptInLoopbackPermissionProfile(t *testing.T) {
 	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "1")
+	// Clear ambient daemon locators: the argv assertions must be host-independent.
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_RUN_FILE", "")
 	t.Setenv("AO_PORT", "3301")
 	agent := &captureAgent{}
 	r := &Reviewer{agent: agent}
