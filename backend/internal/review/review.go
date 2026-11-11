@@ -1245,25 +1245,24 @@ func (e *Engine) restoreReviewerLocked(
 		return RestoreReviewerResult{}, err
 	}
 	defer releaseHarness()
+	previousReviewerHandleID := ""
+	if reviewRow.InterfaceMode == domain.ReviewerInterfaceTUI {
+		previousReviewerHandleID = reviewRow.ReviewerHandleID
+	}
 	launch, err := e.launcher.RestoreTerminal(ctx, LaunchSpec{
-		ReviewSessionID:      reviewRow.ID,
-		LaunchID:             launchID,
-		WorkerID:             worker.ID,
-		ProjectID:            worker.ProjectID,
-		ProjectEnv:           projectEnv,
-		Harness:              harness,
-		AgentConfig:          config,
-		WorkspacePath:        worker.Metadata.WorkspacePath,
-		AgentSessionID:       agentSessionID,
-		PreviousReviewerHandleID: func() string {
-			if reviewRow.InterfaceMode == domain.ReviewerInterfaceTUI {
-				return reviewRow.ReviewerHandleID
-			}
-			return ""
-		}(),
-		RequireNativeHistory: harness == domain.ReviewerCodex && strings.TrimSpace(agentSessionID) != "",
-		PreviousRuns:         previousRuns,
-		InterfaceMode:        reviewRow.InterfaceMode,
+		ReviewSessionID:          reviewRow.ID,
+		LaunchID:                 launchID,
+		PreviousReviewerHandleID: previousReviewerHandleID,
+		WorkerID:                 worker.ID,
+		ProjectID:                worker.ProjectID,
+		ProjectEnv:               projectEnv,
+		Harness:                  harness,
+		AgentConfig:              config,
+		WorkspacePath:            worker.Metadata.WorkspacePath,
+		AgentSessionID:           agentSessionID,
+		RequireNativeHistory:     harness == domain.ReviewerCodex && strings.TrimSpace(agentSessionID) != "",
+		PreviousRuns:             previousRuns,
+		InterfaceMode:            reviewRow.InterfaceMode,
 	})
 	if err != nil {
 		restoreErr := fmt.Errorf("restore reviewer: %w", err)
