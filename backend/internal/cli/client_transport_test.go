@@ -309,7 +309,7 @@ func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
 				t.Fatal(err)
 			}
 			c := &commandContext{deps: Deps{
-				HTTPClient: &http.Client{Timeout: 2 * time.Second},
+				HTTPClient:   &http.Client{Timeout: 2 * time.Second},
 				ProcessAlive: func(int) bool { return false },
 			}}
 			var out map[string]any
@@ -340,7 +340,7 @@ func TestTransportHealthFallbackDoesNotProbeWhenPIDVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &commandContext{deps: Deps{
-		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+		HTTPClient:   &http.Client{Timeout: 2 * time.Second},
 		ProcessAlive: func(int) bool { return true },
 	}}
 	var out map[string]any
@@ -381,7 +381,7 @@ func TestTransportExplicitLoopbackProxyForInvisiblePID(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &commandContext{deps: Deps{
-		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+		HTTPClient:   &http.Client{Timeout: 2 * time.Second},
 		ProcessAlive: func(int) bool { return false },
 	}}
 	var out map[string]any
