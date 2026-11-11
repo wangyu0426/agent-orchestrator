@@ -162,6 +162,10 @@ if not v: sys.exit("BLOCKED: fixture PR #3 missing from AO review list")
 r=v.get("latestRun") or {}
 if r.get("targetSha") != "9a2f8e41eb8caf6116dc0b87eadf38f37adfcda3":
     sys.exit("BLOCKED: review run is not pinned to fixture HEAD")
+if r.get("status") not in ("complete","delivered"):
+    sys.exit("PENDING: AO review run has not completed (status=%s)"%r.get("status"))
+if r.get("verdict") not in ("approved","changes_requested"):
+    sys.exit("BLOCKED: AO completed run lacks a valid internal verdict")
 print(r.get("githubReviewId",""))
 ')"
   [[ -n "$review_id" ]] || die "AO has not recorded a real GitHub Review ID yet (may still be running)"
