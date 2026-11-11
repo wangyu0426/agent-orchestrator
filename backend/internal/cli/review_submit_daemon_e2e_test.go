@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
@@ -113,7 +114,7 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 		t.Fatalf("second stop scratch daemon: exit %d: %s", code, out)
 	}
 
-	reopened, err := sqlitetest.Open(e.dataDir)
+	reopened, err := sqlite.Open(e.dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
