@@ -4,8 +4,11 @@ package cli_test
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +25,48 @@ import (
 // It deliberately seeds an isolated, otherwise inactive review run before
 // starting the daemon. Unlike the true Codex TUI reviewer acceptance test,
 // this does NOT launch an agent or claim to have posted a GitHub review.
+// isolatedSubmit runs the same request either on the host (portable CI) or,
+// when explicitly opted in, from a real Codex read-only sandbox. This is
+// intentionally *not* a reviewer launch; it tests the sandboxed transport and
+// the real durable daemon boundary without creating a GitHub review.
+func isolatedSubmit(t *testing.T, e env, workerID, runID, body, reviewID string, hostArgs []string) (string, int) {
+	t.Helper()
+	if os.Getenv("AO_E2E_CODEX_SANDBOX") != "1" {
+		return e.run(t, hostArgs...)
+	}
+	args := []string{
+		"sandbox", "-P", "ao-review-loopback", "--", "env",
+		"AO_RUN_FILE=" + e.runFile,
+		"AO_DATA_DIR=" + e.dataDir,
+		"AO_PORT=" + strconv.Itoa(e.port),
+		"AO_CLI_PROXY_LOOPBACK=1",
+		aoBin, "review", "submit", workerID,
+		"--run", runID, "--verdict", "changes_requested",
+		"--body", "-", "--review-id", reviewID,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Env = e.environ("")
+	cmd.Stdin = strings.NewReader(body)
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
+	if ctx.Err() != nil {
+		t.Fatalf("Codex sandbox submit timed out or was cancelled: %v; output=%s", ctx.Err(), out)
+	}
+	if err == nil {
+		t.Logf("sandboxed AO review submit: exit 0\n%s", out)
+		return out, 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		t.Logf("sandboxed AO review submit: exit %d\n%s", exitErr.ExitCode(), out)
+		return out, exitErr.ExitCode()
+	}
+	t.Fatalf("launch Codex sandbox: %v; output=%s", err, out)
+	return "", 1
+}
+
 func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -77,7 +122,7 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 
 	e.startDaemon(t)
 	for attempt := 0; attempt < 2; attempt++ {
-		out, code := e.run(t, submit...)
+		out, code := isolatedSubmit(t, e, string(worker.ID), runID, bodyText, githubReviewID, submit)
 		if code != 0 || !strings.Contains(out, "recorded changes_requested review") {
 			t.Fatalf("submit %d: exit %d output %s", attempt+1, code, out)
 		}
@@ -106,7 +151,7 @@ func TestE2E_ReviewSubmitDurableAcrossDaemonRestart(t *testing.T) {
 	// Reboot against the same temporary SQLite directory, then repeat the
 	// exact result: it should be idempotent even after a process restart.
 	e.startDaemon(t)
-	if out, code := e.run(t, submit...); code != 0 ||
+	if out, code := isolatedSubmit(t, e, string(worker.ID), runID, bodyText, githubReviewID, submit); code != 0 ||
 		!strings.Contains(out, "recorded changes_requested review") {
 		t.Fatalf("resubmit after restart: exit %d: %s", code, out)
 	}
