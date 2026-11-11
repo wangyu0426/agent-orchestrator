@@ -38,6 +38,8 @@ allow_local_binding = true
 [permissions.ao-review-loopback.network.domains]
 "127.0.0.1" = "allow"
 "localhost" = "allow"
+# If the reviewer itself posts a GitHub review, also allow its API endpoint:
+# "api.github.com" = "allow"
 ```
 
 **Read the effective configuration first.** A legacy `sandbox_mode`,
@@ -52,13 +54,24 @@ enforced. `allow_local_binding=true` intentionally broadens access to local
 network destinations; the allowlist is **not a TCP port 3301 firewall**.
 Go's standard HTTP client can bypass HTTP proxies for loopback, so this
 experiment must check the real `ao` CLI, not just proxied `curl`.
+A GitHub review POST from the reviewer also needs network access to
+`api.github.com` and a working authorized `gh` login; if only loopback is
+allowed, validate AO result transport separately and report GitHub posting
+as blocked until that dependency is available.
 Neither filesystem read-only nor the network allowlist hides host credentials
 that the sandbox can already read.
 
 ## Verification and rollout (no production changes until proven)
 
 1. Record Codex CLI version and effective config without printing auth tokens.
-   Confirm the host's `127.0.0.1:<scratch-port>/healthz` responds.
+   Confirm the host's `127.0.0.1:<scratch-port>/healthz` responds. A
+   preliminary OS-sandbox check (not a substitute for real AO) is:
+
+   ```bash
+   codex sandbox linux --permission-profile ao-review-loopback -- \
+     curl -fsS --max-time 3 http://127.0.0.1:<scratch-port>/healthz
+   ```
+
 2. Test a **scratch** AO instance and an unmerged disposable PR. The AO daemon
    must inherit `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1`. Launch a **new** Codex
    reviewer TUI through real AO, not only `codex sandbox linux` or manual
