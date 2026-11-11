@@ -129,21 +129,32 @@ the PID probe fails. It accepts the daemon only if both the service name and
 the exact run-file PID match. Wrong/missing/unhealthy endpoints remain stale.
 
 To test **without replacing the running AO binary or restarting the daemon**,
-use a host SSH shell and a clean worktree:
+use a host SSH shell and the existing PR test worktree. **Never paste
+`set -e` into an interactive SSH shell**: a failing test can exit the shell
+and disconnect SSH. The chain below stops before build on a test failure,
+yet returns control to the prompt.
 
 ```bash
-set -e
-cd "$HOME/orchestrator-eval"
-git fetch origin pull/4/head
-git worktree add --detach "$HOME/ao-eval-lab/ao-pr4-check" FETCH_HEAD
-cd "$HOME/ao-eval-lab/ao-pr4-check/backend"
-go test ./internal/cli ./internal/adapters/reviewer/codex
-go build -o "$HOME/ao-eval-lab/ao-pr4-cli" ./cmd/ao
-codex sandbox -P ao-review-loopback -- \
-  env AO_RUN_FILE="$HOME/.ao-orchestrator-test/running.json" \
-      AO_DATA_DIR="$HOME/.ao-orchestrator-test/data" \
-      "$HOME/ao-eval-lab/ao-pr4-cli" review ls path-of-reasoning-4 --json
+set +e
+(
+  cd "$HOME/ao-eval-lab/ao-pr4-check" &&
+  git fetch origin pull/4/head &&
+  git switch --detach FETCH_HEAD &&
+  cd backend &&
+  go test ./internal/cli ./internal/adapters/reviewer/codex &&
+  go build -o "$HOME/ao-eval-lab/ao-pr4-cli" ./cmd/ao &&
+  codex sandbox -P ao-review-loopback -- \
+    env AO_RUN_FILE="$HOME/.ao-orchestrator-test/running.json" \
+        AO_DATA_DIR="$HOME/.ao-orchestrator-test/data" \
+        "$HOME/ao-eval-lab/ao-pr4-cli" review ls path-of-reasoning-4 --json
+)
+echo "Verification exit code: $?"
 ```
+
+If the `ao-pr4-check` worktree does not already exist, create it once
+from the host shell with `git -C ~/orchestrator-eval fetch origin
+pull/4/head` followed by `git -C ~/orchestrator-eval worktree add
+--detach ~/ao-eval-lab/ao-pr4-check FETCH_HEAD`.
 
 An empty review list with no transport error is still a successful CLI
 connection. The old live daemon remains untouched by this procedure.
