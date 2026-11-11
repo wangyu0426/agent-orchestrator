@@ -400,7 +400,21 @@ are verified.
 ### Fresh isolated native-PTY restore replay (no GitHub write)
 
 After an actual reviewer TUI pass has already completed, the old scratch
-instance may retain a one-shot `restore-attempted` marker. **Do not** clear
+instance may retain a one-shot `restore-attempted` marker. If it still hosts
+the earlier tmux fallback Reviewer, retire it first; otherwise the fresh
+replay could concurrently resume the same Codex conversation:
+
+```bash
+cd ~/ao-eval-lab/ao-pr4-check
+bash scripts/ao-codex-review-tui-e2e.sh retire
+```
+
+`retire` validates the old scratch daemon's exact PID, executable, port,
+completed Review Run, GitHub Review ID and recovered Codex session ID,
+then archives **only** that scratch Reviewer and stops **only** that daemon.
+It retains the original SQLite files, logs and `restore-attempted` marker,
+and does **not** modify GitHub or the production :3301 daemon. It must not
+be used during an unfinished review. **Do not** clear
 that marker or retry its terminated Reviewer. Instead, use the following
 opt-in Linux E2E. It creates a brand-new per-test daemon with its own SQLite
 database, run-file and random port. It seeds a **synthetic completed review**
