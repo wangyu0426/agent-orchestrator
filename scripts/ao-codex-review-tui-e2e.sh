@@ -324,8 +324,16 @@ rv = db.execute(
     "SELECT agent_session_id, reviewer_handle_id, reviewer_launch_id, interface_mode "
     "FROM review WHERE session_id=? AND harness='codex' AND is_archived=0", (worker,)
 ).fetchone()
-if rv is None or rv[0] != before['nativeSessionId'] or rv[1] != before['reviewerHandle'] or rv[2] == before['generation'] or rv[3] != 'tui':
-    sys.exit("BLOCKED: native Reviewer identity/launch generation did not survive restore: %r"% (rv,))
+if rv is None:
+    sys.exit("BLOCKED: reviewer row missing after restore")
+if before['reviewerHandle'].startswith('ptyhost-v1:') and not rv[1].startswith('ptyhost-v1:'):
+    sys.exit("BLOCKED: native PTY restore fell back to legacy tmux: %r"% (rv,))
+if rv[0] != before['nativeSessionId']:
+    sys.exit("BLOCKED: Codex native session ID changed during restore")
+if rv[1] != before['reviewerHandle']:
+    sys.exit("BLOCKED: reviewer runtime handle changed: %r"% (rv,))
+if rv[2] == before['generation'] or rv[3] != 'tui':
+    sys.exit("BLOCKED: reviewer launch generation/mode did not change as required: %r"% (rv,))
 runs = db.execute(
     "SELECT id, status, verdict, github_review_id FROM review_run WHERE session_id=?", (worker,)
 ).fetchall()
