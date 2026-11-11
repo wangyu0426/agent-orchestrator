@@ -63,14 +63,34 @@ that the sandbox can already read.
 
 ## Verification and rollout (no production changes until proven)
 
-1. Record Codex CLI version and effective config without printing auth tokens.
-   Confirm the host's `127.0.0.1:<scratch-port>/healthz` responds. A
-   preliminary OS-sandbox check (not a substitute for real AO) is:
+1. **Run diagnostics from a real host SSH/login shell, NOT a shell tool
+   running inside an existing Codex session.** First record the Codex CLI
+   version and inspect the effective config without printing tokens.
+   Check the host's scratch daemon responds, then run the read-only-profile
+   canary directly from that same host shell:
 
    ```bash
+   codex --version
+   curl -fsS --max-time 3 http://127.0.0.1:<scratch-port>/healthz
+   codex sandbox linux --permission-profile ao-review-loopback -- \
+     /bin/true
    codex sandbox linux --permission-profile ao-review-loopback -- \
      curl -fsS --max-time 3 http://127.0.0.1:<scratch-port>/healthz
    ```
+
+   **Known upstream pitfall:** Codex 0.162.1 can fail on nested Linux
+   sandbox initialization before executing `/bin/true` or `curl`:
+   `app-server socket directory must be a user-owned directory with
+   mode 0700`. The outer Codex sandbox masks
+   `/tmp/codex-daemon-<UID>` with a mode-000 tmpfs, whereas the nested
+   sandbox requires 0700. See
+   [openai/codex#53799](https://github.com/openai/codex/issues/53799).
+   A direct host invocation can avoid this *nested* failure; it is not a
+   guarantee that the loopback network path is working. If a direct host
+   invocation also fails, inspect `stat -c '%u %a %n' /tmp/codex-daemon-$(id -u)`
+   and `findmnt -T /tmp/codex-daemon-$(id -u)` from the host shell.
+   Do not blindly chmod/chown/delete Codex's shared socket directory.
+   A read-only PATH-alias warning is separate from the bubblewrap error.
 
 2. Test a **scratch** AO instance and an unmerged disposable PR. The AO daemon
    must inherit `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1`. Launch a **new** Codex
