@@ -72,7 +72,7 @@ func TestE2E_RealNativeReviewerIdleRestore(t *testing.T) {
 	worker, err := store.CreateSession(ctx, domain.SessionRecord{
 		ProjectID: projectID, Kind: domain.KindWorker,
 		Harness: domain.HarnessCodex, ReviewerHarness: domain.ReviewerCodex,
-		Mode: domain.SessionModeTUI,
+		Mode: domain.SessionModeChat,
 		HibernatedAt: &now,
 		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
 		Metadata: domain.SessionMetadata{WorkspacePath: workspace},
