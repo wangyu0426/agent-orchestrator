@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real AO-launched Codex TUI reviewer canary. Only operates on a disposable
 # Draft PR and a newly allocated scratch AO daemon (never the live :3301).
-# Usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|restore|stop
+# Usage: bash scripts/ao-codex-review-tui-e2e.sh start|check|restore|retire|stop
 set -euo pipefail
 umask 077
 
@@ -359,6 +359,55 @@ PY
   printf '\nNative TUI Reviewer restore acceptance PASS (scratch only).\n'
 }
 
+# Retire the already-completed disposable Reviewer after a restore trial.
+# Unlike review kill during a restore test, this is terminal cleanup: it
+# archives the Reviewer surface, leaves the completed run/ID intact and stops
+# only this scratch daemon. Never reuse the one-shot restore marker.
+retire() {
+  require python3
+  require curl
+  load_state
+  [[ -f "$ROOT/restore-attempted" && -f "$ROOT/worker" ]] ||
+    die "not the completed one-shot restore fixture; do not retire"
+  WORKER="$(cat "$ROOT/worker")"
+  [[ "$WORKER" == "native-review-pr4-e2e-1" ]] ||
+    die "unexpected reviewer worker; refusing cleanup"
+  check
+  ao_scratch status --json > "$ROOT/retire-daemon-before.json"
+  curl --noproxy '*' -fsS --max-time 5 \
+    "http://127.0.0.1:$PORT/healthz" > "$ROOT/retire-health.json"
+  python3 - "$ROOT" <<'PY'
+import json,pathlib,sys,sqlite3
+r=pathlib.Path(sys.argv[1])
+run=json.loads((r/"running.json").read_text())
+health=json.loads((r/"retire-health.json").read_text())
+status=json.loads((r/"retire-daemon-before.json").read_text())
+if (status.get("state")!="ready" or
+    run["pid"]!=status["pid"] or health.get("pid")!=run["pid"] or
+    health.get("service")!="agent-orchestrator-daemon" or
+    status["port"]!=int((r/"port").read_text()) or
+    pathlib.Path(status["executablePath"]).resolve()!=(r/"ao").resolve()):
+    sys.exit("BLOCKED: scratch daemon identity mismatch")
+db=sqlite3.connect(f"file:{r/'data'/'ao.db'}?mode=ro",uri=True)
+row=db.execute("SELECT reviewer_handle_id, agent_session_id FROM review WHERE session_id='native-review-pr4-e2e-1' AND harness='codex'").fetchone()
+if not row or row[0]!="review-native-review-pr4-e2e-1" or row[1]!="01a1cafb-e908-7821-b7d3-c4ca4bbbf5e5":
+    sys.exit("BLOCKED: legacy fallback Reviewer identity unexpected")
+runrow=db.execute("SELECT status,verdict,github_review_id FROM review_run WHERE id='558e2883-11ad-4ecc-a9ea-90ef534e3daa'").fetchone()
+if runrow!=("complete","approved","5860205489"):
+    sys.exit("BLOCKED: completed review evidence changed")
+print("Retiring ONLY completed scratch fallback Reviewer; review evidence preserved.")
+PY
+  curl --noproxy '*' -fsS --max-time 30 \
+    -H "Content-Type: application/json" -d '{}' \
+    "http://127.0.0.1:$PORT/api/v1/sessions/$WORKER/reviews/kill" \
+    > "$ROOT/retire-result.json" ||
+      die "scratch Reviewer archive failed, leaving daemon running for inspection"
+  cat "$ROOT/retire-result.json"
+  printf '\n'
+  stop
+  printf 'Original scratch data and restore-attempted marker retained for evidence.\n'
+}
+
 stop() {
   load_state
   printf 'Stopping scratch AO daemon on port %s (never 3301)\n' "$PORT"
@@ -372,6 +421,7 @@ case "$1" in
   start) start ;;
   check) check ;;
   restore) restore ;;
+  retire) retire ;;
   stop) stop ;;
-  *) die "usage: start|check|restore|stop" ;;
+  *) die "usage: start|check|restore|retire|stop" ;;
 esac
