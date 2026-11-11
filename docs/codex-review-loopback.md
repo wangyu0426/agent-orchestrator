@@ -33,7 +33,6 @@ extends = ":read-only"
 
 [permissions.ao-review-loopback.network]
 enabled = true
-allow_local_binding = true
 
 [permissions.ao-review-loopback.network.domains]
 "127.0.0.1" = "allow"
@@ -50,15 +49,11 @@ inspecting the impact on other Codex sessions; do not blindly change a
 shared global policy.
 
 The network proxy must actually be active for its domain allowlist to be
-enforced. `allow_local_binding=true` intentionally broadens access to local
-network destinations; the allowlist is **not a TCP port 3301 firewall**.
-Go's standard HTTP client bypasses proxy settings for loopback IPs, and
-can therefore be blocked by the OS sandbox even when proxied `curl` works.
-For Go `ao`, validate **direct** loopback as well as proxy-mediated HTTP.
-On this single-user host, `allow_local_binding = true` is the proposed
-profile adjustment if the direct TCP canary is blocked. It broadens private
-network access; this isn't a per-port permission. Never equate `curl`
-success alone with successful AO CLI → daemon communication.
+enforced. The allowlist is **not a TCP port 3301 firewall**. Go's default
+HTTP client bypasses proxy settings for loopback, and direct socket access
+failed on `yuworker` even with `allow_local_binding=true`. Do not broaden
+that permission as a workaround; instead use the explicit reviewer-local
+HTTP proxy described below and test the real AO CLI.
 A GitHub review POST from the reviewer also needs network access to
 `api.github.com` and a working authorized `gh` login; if only loopback is
 allowed, validate AO result transport separately and report GitHub posting
@@ -99,7 +94,7 @@ that the sandbox can already read.
 
 2. Test a **scratch** AO instance and an unmerged disposable PR. The AO daemon
    must inherit `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1`. Launch a **new** Codex
-   reviewer TUI through real AO, not only `codex sandbox linux` or manual
+   reviewer TUI through real AO, not only `codex sandbox` or manual
    `codex exec`. Confirm the argv has the named profile and *no*
    `--sandbox`, `--add-dir`, or full-access flag.
 3. In that same reviewer, use `ao` to reach the scratch daemon via its
@@ -226,62 +221,43 @@ duplicate handling, and restart recovery before enabling automatic review.
 
 ## Review submit verification on an isolated real daemon
 
-This PR also includes two regression tests beyond the earlier live read-only
-\`review ls\` canary:
+Two regression tests extend the earlier live read-only `review ls` canary:
 
-- \`TestTransportProxyReviewSubmitPOSTAndReadBack\` exercises the AO CLI's
-  explicit proxy on both **POST review submit** and **GET review ls**, with
-  health/PID validation. It uses a stateful \`httptest\` handler (no real
-  daemon/PR) and sends the same review result twice.
-- \`TestE2E_ReviewSubmitDurableAcrossDaemonRestart\` uses the repository's
-  existing \`-tags=e2e\` CLI harness. That harness allocates a temporary
-  data directory, run-file and free TCP port, builds an isolated AO executable
-  and launches \`ao daemon\` (not the desktop-only \`ao start\`). The test
-  seeds one synthetic review run, calls the real HTTP submit API using the CLI,
-  verifies an identical replay is idempotent, a changed body is rejected,
-  restarts only its test daemon and verifies the saved Verdict, PR target SHA,
-  reviewer ID and body in SQLite. It does **not** post a GitHub review.
+- `TestTransportProxyReviewSubmitPOSTAndReadBack` exercises the opt-in
+  reviewer CLI proxy for HTTP POST submit and GET ls, including the health
+  identity probe and an identical second submission. It uses an in-memory
+  fake backend; no live daemon or GitHub PR is touched.
+- `TestE2E_ReviewSubmitDurableAcrossDaemonRestart` uses the existing Go
+  `e2e` test harness. It creates a temporary data directory, run-file and
+  free port, then launches a real `ao daemon` child. The test seeds a
+  synthetic review run, submits through the real AO HTTP API, checks
+  identical replay and conflicting-payload rejection, restarts the test
+  daemon, resubmits and verifies Verdict, PR SHA, review ID and body in
+  SQLite. It does not post an actual GitHub review.
 
-To run **only these tests** on \`yuworker\` without altering production:
+Run these in a host SSH shell (not inside another Codex sandbox):
 
-\`\`\`bash
+```bash
 set +e
 (
-  cd "$HOME/ao-eval-lab/ao-pr4-check" &&
+  cd ~/ao-eval-lab/ao-pr4-check &&
   git fetch origin pull/4/head &&
   git switch --detach FETCH_HEAD &&
   cd backend &&
   go test -count=1 ./internal/cli ./internal/adapters/reviewer/codex &&
-  go test -tags=e2e -count=1 -v ./internal/cli \
-    -run '^TestE2E_ReviewSubmitDurableAcrossDaemonRestart
-
-- Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
-- Accept the single-user host loopback API risk explicitly; no new auth system.
-- Keep PR #2 frozen and leave ordinary Worker permissions unchanged.
-- Never automatically merge a PR; CI/reviewer results are evidence for the
-  owner, not authority to merge.
-- This only covers Codex **TUI** review launches/restores. Codex app-server
-  Chat reviews have a separate runtime surface and must be tested separately.
-
-References: [Codex permission profiles](https://learn.chatgpt.com/docs/permissions)
-and [CLI reference](https://learn.chatgpt.com/docs/cli/reference).
-
+  go test -tags=e2e -count=1 -v -run TestE2E_ReviewSubmitDurableAcrossDaemonRestart ./internal/cli
 )
 echo "Verification exit code: $?"
-\`\`\`
+```
 
-The E2E helper strips ambient \`AO_*\` and GitHub authentication environment
-variables from the daemon child. Its scratch data dir and free port are
-separate from \`~/.ao-orchestrator-test\` and \`3301\`; it stops the child
-daemon at test cleanup. **Do not** use \`set -e\` in an interactive SSH shell.
+The e2e helper strips inherited AO and GitHub token environment variables
+from the daemon child, uses its own temporary files and port, and stops the
+child on cleanup. **Do not** use `set -e` in interactive SSH.
 
-These tests are intentionally below the full live acceptance bar. They do
-not prove that AO launches a real Codex TUI, that its read-only filesystem
-rules hold during a review, that a real GitHub Review ID has been created,
-or that a restarted TUI can resume and submit. Until a disposable-PR,
-scratch-daemon *real reviewer* trial validates those points, keep PR #4
-Draft and autoReview off. Do not submit a fake approval to PoR #33.
-
+This proves a real daemon round trip, **not** real Codex TUI launch,
+filesystem read-only enforcement, provider-created GitHub Review ID,
+native session resume or owner gating. Keep #4 Draft and autoReview off
+until those are checked in a scratch instance with a disposable PR.
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
