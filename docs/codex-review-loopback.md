@@ -397,6 +397,58 @@ acceptance trial, **never merge it**. If any step blocks, do not fall back
 to production port 3301 or weaken the profile. Preserve logs and mark the
 full Reviewer E2E as BLOCKED until both provider Review and AO persistence
 are verified.
+### Fresh isolated native-PTY restore replay (no GitHub write)
+
+After an actual reviewer TUI pass has already completed, the old scratch
+instance may retain a one-shot `restore-attempted` marker. **Do not** clear
+that marker or retry its terminated Reviewer. Instead, use the following
+opt-in Linux E2E. It creates a brand-new per-test daemon with its own SQLite
+database, run-file and random port. It seeds a **synthetic completed review**
+and reuses only the previously captured *native Codex session UUID*. It
+**never issues `review trigger` or creates a GitHub Review**. The synthetic
+worker is hibernated and the daemon has an empty GH config.
+
+```bash
+set +e
+(
+  cd ~/ao-eval-lab/ao-pr4-check &&
+  git fetch origin pull/4/head &&
+  git switch --detach FETCH_HEAD &&
+  cd backend &&
+  AO_E2E_NATIVE_SESSION_ID=01a1cafb-e908-7821-b7d3-c4ca4bbbf5e5 \
+  TMPDIR=/home/ywang19/ao-eval-lab/.tmp \
+    go test -tags=e2e -count=1 -v \
+      -run '^TestE2E_RealNativeReviewerIdleRestore
+
+- Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
+- Accept the single-user host loopback API risk explicitly; no new auth system.
+- Keep PR #2 frozen and leave ordinary Worker permissions unchanged.
+- Never automatically merge a PR; CI/reviewer results are evidence for the
+  owner, not authority to merge.
+- This only covers Codex **TUI** review launches/restores. Codex app-server
+  Chat reviews have a separate runtime surface and must be tested separately.
+
+References: [Codex permission profiles](https://learn.chatgpt.com/docs/permissions)
+and [CLI reference](https://learn.chatgpt.com/docs/cli/reference).
+ ./internal/cli
+)
+echo "Native restore replay exit code: $?"
+```
+
+The test launches a real Codex **idle** TUI through the native PTY backend,
+then sends SIGTERM via a Linux pidfd to that specifically verified PTY host.
+With the dead native host still present in the daemon's in-memory registry,
+it invokes idle restore again. Success requires `ptyhost-v1:` before and
+after, a different PTY host PID and launch generation, the same native
+Codex session UUID and exactly the same synthetic completed ReviewRun.
+The test uses the existing harness cleanup to archive the test Reviewer
+and stop the test daemon; it never stops or changes :3301 or the previous
+scratch instance. **A passing unit test alone does not replace this check.**
+
+An unavailable Codex native transcript, a child exiting unexpectedly, or
+a permission-profile mismatch must be recorded as a blocked real-host E2E,
+not treated as a green result. This E2E also does **not** claim that owner
+merge rights or arbitrary GitHub write denial were independently tested.
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
