@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 // transportServer returns an httptest server that always answers with the
@@ -244,5 +246,102 @@ func TestReviewSubmitRejectsEmptyResult(t *testing.T) {
 				t.Fatalf("body %q: err = %q, want %q", tt.body, err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
+	const daemonPID = 254414
+	for _, tc := range []struct {
+		name        string
+		healthBody  string
+		healthCode  int
+		wantSuccess bool
+	}{
+		{
+			name: "matching daemon service and PID",
+			healthBody: `{"service":"agent-orchestrator-daemon","pid":254414}`,
+			healthCode: http.StatusOK,
+			wantSuccess: true,
+		},
+		{
+			name: "wrong PID does not establish ownership",
+			healthBody: `{"service":"agent-orchestrator-daemon","pid":123}`,
+			healthCode: http.StatusOK,
+		},
+		{
+			name: "wrong service does not establish ownership",
+			healthBody: `{"service":"unrelated-service","pid":254414}`,
+			healthCode: http.StatusOK,
+		},
+		{
+			name: "invalid health payload remains stale",
+			healthBody: `{bad-json`,
+			healthCode: http.StatusOK,
+		},
+		{
+			name: "unhealthy endpoint remains stale",
+			healthBody: `{"service":"agent-orchestrator-daemon","pid":254414}`,
+			healthCode: http.StatusServiceUnavailable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setConfigEnv(t)
+			var apiRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/healthz" {
+					w.WriteHeader(tc.healthCode)
+					_, _ = io.WriteString(w, tc.healthBody)
+					return
+				}
+				if r.URL.Path == "/api/v1/projects/demo" {
+					apiRequests++
+					_, _ = io.WriteString(w, `{"status":"ok"}`)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			if err := runfile.Write(cfg.runFile, runfile.Info{PID: daemonPID, Port: serverPort(t, srv.URL)}); err != nil {
+				t.Fatal(err)
+			}
+			c := &commandContext{deps: Deps{
+				HTTPClient: &http.Client{Timeout: 2 * time.Second},
+				ProcessAlive: func(int) bool { return false },
+			}}
+			var out map[string]any
+			err := c.getJSON(context.Background(), "projects/demo", &out)
+			if tc.wantSuccess {
+				if err != nil || out["status"] != "ok" || apiRequests != 1 {
+					t.Fatalf("getJSON = %v out=%v apiRequests=%d; want successful API request", err, out, apiRequests)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "stale run-file") || apiRequests != 0 {
+					t.Fatalf("getJSON = %v apiRequests=%d; want stale rejection before API call", err, apiRequests)
+				}
+			}
+		})
+	}
+}
+
+func TestTransportHealthFallbackDoesNotProbeWhenPIDVisible(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			t.Error("health fallback must not run when process exists")
+		}
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(srv.Close)
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: 254414, Port: serverPort(t, srv.URL)}); err != nil {
+		t.Fatal(err)
+	}
+	c := &commandContext{deps: Deps{
+		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+		ProcessAlive: func(int) bool { return true },
+	}}
+	var out map[string]any
+	if err := c.getJSON(context.Background(), "projects/demo", &out); err != nil {
+		t.Fatal(err)
 	}
 }
