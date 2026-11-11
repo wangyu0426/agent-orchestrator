@@ -261,28 +261,28 @@ func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
 		wantSuccess bool
 	}{
 		{
-			name: "matching daemon service and PID",
-			healthBody: `{"service":"agent-orchestrator-daemon","pid":254414}`,
-			healthCode: http.StatusOK,
+			name:        "matching daemon service and PID",
+			healthBody:  `{"service":"agent-orchestrator-daemon","pid":254414}`,
+			healthCode:  http.StatusOK,
 			wantSuccess: true,
 		},
 		{
-			name: "wrong PID does not establish ownership",
+			name:       "wrong PID does not establish ownership",
 			healthBody: `{"service":"agent-orchestrator-daemon","pid":123}`,
 			healthCode: http.StatusOK,
 		},
 		{
-			name: "wrong service does not establish ownership",
+			name:       "wrong service does not establish ownership",
 			healthBody: `{"service":"unrelated-service","pid":254414}`,
 			healthCode: http.StatusOK,
 		},
 		{
-			name: "invalid health payload remains stale",
+			name:       "invalid health payload remains stale",
 			healthBody: `{bad-json`,
 			healthCode: http.StatusOK,
 		},
 		{
-			name: "unhealthy endpoint remains stale",
+			name:       "unhealthy endpoint remains stale",
 			healthBody: `{"service":"agent-orchestrator-daemon","pid":254414}`,
 			healthCode: http.StatusServiceUnavailable,
 		},
