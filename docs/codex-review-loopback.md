@@ -250,6 +250,32 @@ set +e
 echo "Verification exit code: $?"
 ```
 
+To exercise a **real Codex sandbox POST** instead of a host-only POST,
+run the same isolated test with this explicit opt-in from the host SSH
+session. The home-based TMPDIR makes the temporary run-file and built AO
+binary visible to the read-only sandbox:
+
+```bash
+mkdir -p ~/ao-eval-lab/.tmp
+set +e
+(
+  cd ~/ao-eval-lab/ao-pr4-check &&
+  git fetch origin pull/4/head &&
+  git switch --detach FETCH_HEAD &&
+  cd backend &&
+  AO_E2E_CODEX_SANDBOX=1 TMPDIR=/home/ywang19/ao-eval-lab/.tmp \
+    go test -tags=e2e -count=1 -v \
+      -run TestE2E_ReviewSubmitDurableAcrossDaemonRestart ./internal/cli
+)
+echo "Sandbox E2E exit code: $?"
+```
+
+This mode runs the real CLI inside `codex sandbox -P ao-review-loopback`,
+sets `AO_CLI_PROXY_LOOPBACK=1` only for that child and sends the review
+body via stdin (no checkout writes). Both repeat submission and post-restart
+submission use the same sandbox route. It can fail if the host's Codex
+permission profile or scratch paths are inaccessible; record that as a
+sandbox E2E failure, not a stopped production daemon.
 The e2e helper strips inherited AO and GitHub token environment variables
 from the daemon child, uses its own temporary files and port, and stops the
 child on cleanup. **Do not** use `set -e` in interactive SSH.
@@ -258,6 +284,7 @@ This proves a real daemon round trip, **not** real Codex TUI launch,
 filesystem read-only enforcement, provider-created GitHub Review ID,
 native session resume or owner gating. Keep #4 Draft and autoReview off
 until those are checked in a scratch instance with a disposable PR.
+
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
