@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
@@ -91,6 +92,40 @@ func (e apiError) String() string {
 		msg = fmt.Sprintf("%s [request %s]", msg, e.RequestID)
 	}
 	return msg
+}
+
+// daemonMatchesRunFile confirms daemon ownership over loopback HTTP when the
+// local process table cannot see the recorded host PID (e.g. a Codex Linux
+// sandbox with a separate PID namespace). A successful TCP connection alone
+// is insufficient: the health response must identify AO and the exact PID
+// from the run-file. An unavailable/mismatched endpoint remains stale.
+func (c *commandContext) daemonMatchesRunFile(ctx context.Context, info *runfile.Info) bool {
+	if info == nil || info.PID <= 0 || info.Port <= 0 || info.Port > 65535 {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet,
+		fmt.Sprintf("http://%s:%d/healthz", config.LoopbackHost, info.Port), http.NoBody)
+	if err != nil {
+		return false
+	}
+	resp, err := c.deps.HTTPClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var body struct {
+		Service string `json:"service"`
+		PID     int    `json:"pid"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
+		return false
+	}
+	return body.Service == daemonmeta.ServiceName && body.PID == info.PID
 }
 
 // getJSON sends GET /api/v1/<path> to the running daemon and decodes a 2xx
@@ -175,7 +210,7 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	if info == nil {
 		return daemonUnavailableError{message: "Orchestrator daemon is not running — start it with `ao start`", cause: errDaemonNotRunning}
 	}
-	if !c.deps.ProcessAlive(info.PID) {
+	if !c.deps.ProcessAlive(info.PID) && !c.daemonMatchesRunFile(ctx, info) {
 		return daemonUnavailableError{message: fmt.Sprintf("Orchestrator daemon is not running (stale run-file at %s) — start it with `ao start`", cfg.RunFilePath), cause: errDaemonNotRunning}
 	}
 
