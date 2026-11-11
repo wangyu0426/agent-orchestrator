@@ -661,7 +661,7 @@ func TestReviewTriggerForwardsReviewerAndPolicyFlags(t *testing.T) {
 	srv, capture := reviewServer(t, http.StatusCreated, `{"created":true}`)
 	writeRunFileFor(t, cfg, srv)
 
-	out, errOut, err := executeCLI(t, aliveDeps(), "review", "trigger", "mer-1", "--agent", "codex", "--model", "gpt-5.5", "--effort", "high", "--rerun", "--no-inject", "--pr", "https://github.com/o/r/pull/4")
+	out, errOut, err := executeCLI(t, aliveDeps(), "review", "trigger", "mer-1", "--agent", "codex", "--interface", "tui", "--model", "gpt-5.5", "--effort", "high", "--rerun", "--no-inject", "--pr", "https://github.com/o/r/pull/4")
 	if err != nil {
 		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
 	}
@@ -670,7 +670,7 @@ func TestReviewTriggerForwardsReviewerAndPolicyFlags(t *testing.T) {
 		t.Fatalf("decode body %q: %v", capture.body, err)
 	}
 	cfgBody, _ := body["agentConfig"].(map[string]any)
-	if body["harness"] != "codex" || cfgBody["model"] != "gpt-5.5" || cfgBody["effort"] != "high" {
+	if body["harness"] != "codex" || body["interfaceMode"] != "tui" || cfgBody["model"] != "gpt-5.5" || cfgBody["effort"] != "high" {
 		t.Fatalf("body = %v, want codex/gpt-5.5/high", body)
 	}
 	if body["rerun"] != true {
@@ -686,6 +686,20 @@ func TestReviewTriggerForwardsReviewerAndPolicyFlags(t *testing.T) {
 	}
 	if !strings.Contains(out, "left review auto-inject unchanged for mer-1") {
 		t.Fatalf("stdout = %q, want the unchanged-inject note", out)
+	}
+}
+
+
+// TestReviewTriggerRejectsInvalidInterfaceBeforeDaemonCall proves that CLI
+// typos cannot accidentally start an unrequested reviewer surface.
+func TestReviewTriggerRejectsInvalidInterfaceBeforeDaemonCall(t *testing.T) {
+	setReviewEnv(t)
+	_, _, err := executeCLI(t, aliveDeps(), "review", "trigger", "mer-1", "--interface", "sandbox")
+	if got := ExitCode(err); got != 2 {
+		t.Fatalf("exit code = %d, want usage error (2); err = %v", got, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "--interface must be tui or chat") {
+		t.Fatalf("err = %v, want valid interface selection guidance", err)
 	}
 }
 
