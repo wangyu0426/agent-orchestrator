@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -407,5 +408,117 @@ func TestTransportExplicitLoopbackProxyRejectsRemoteEndpoints(t *testing.T) {
 				t.Fatalf("proxy %q was accepted, want rejection", value)
 			}
 		})
+	}
+}
+
+
+// TestTransportProxyReviewSubmitPOSTAndReadBack covers the actual reviewer CLI
+// request path (not just a read-only GET). The stand-in proxy implements a
+// minimal stateful daemon, so no real GitHub PR or daemon is mutated. The
+// persisted-daemon and GitHub review E2E remain separate acceptance checks.
+func TestTransportProxyReviewSubmitPOSTAndReadBack(t *testing.T) {
+	cfg := setReviewEnv(t)
+	t.Setenv("AO_CLI_PROXY_LOOPBACK", "1")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
+
+	const worker = "scratch-worker"
+	const runID = "scratch-review-run"
+	const bodyText = "isolated E2E transport test"
+	var healthCount, submitCount, readCount atomic.Int32
+	var recorded bool
+	var firstBody string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host != "127.0.0.1:3301" {
+			t.Errorf("unexpected proxy request target %q", r.URL.Host)
+			http.Error(w, "unexpected target", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			healthCount.Add(1)
+			_, _ = io.WriteString(w, `{"service":"agent-orchestrator-daemon","pid":254414}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/"+worker+"/reviews/submit":
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				http.Error(w, "read body", http.StatusBadRequest)
+				return
+			}
+			reqBody := string(raw)
+			submitCount.Add(1)
+			if recorded && firstBody != reqBody {
+				http.Error(w, `{"message":"conflicting submission","code":"INVALID"}`, http.StatusConflict)
+				return
+			}
+			if !recorded {
+				firstBody = reqBody
+				recorded = true
+			}
+			var submitted submitReviewRequest
+			if err := json.Unmarshal(raw, &submitted); err != nil ||
+				submitted.RunID != runID ||
+				submitted.Verdict != "changes_requested" ||
+				submitted.Body != bodyText ||
+				submitted.GithubReviewID != "12345" {
+				t.Errorf("incorrect review request: %+v decode err=%v", submitted, err)
+				http.Error(w, "invalid review", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, `{"review":{"id":"scratch-review-run","verdict":"changes_requested","githubReviewId":"12345"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/"+worker+"/reviews":
+			readCount.Add(1)
+			if !recorded {
+				http.Error(w, "no submitted review", http.StatusNotFound)
+				return
+			}
+			_, _ = io.WriteString(w, `{"reviews":[{"prNumber":1,"targetSha":"scratch-head","status":"up_to_date","latestRun":{"id":"scratch-review-run","verdict":"changes_requested","githubReviewId":"12345"}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(proxy.Close)
+	t.Setenv("http_proxy", proxy.URL)
+	if err := runfile.Write(cfg.runFile, runfile.Info{PID: 254414, Port: 3301}); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		var out, errOut strings.Builder
+		deps := Deps{
+			HTTPClient:   &http.Client{Timeout: 2 * time.Second},
+			ProcessAlive: func(int) bool { return false },
+			In:           strings.NewReader(bodyText),
+			Out:          &out,
+			Err:          &errOut,
+		}
+		cmd := NewRootCommand(deps)
+		cmd.SetArgs([]string{
+			"review", "submit", worker, "--run", runID, "--verdict", "changes_requested",
+			"--body", "-", "--review-id", "12345",
+		})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("attempt %d submit failed: %v stderr=%s", attempt+1, err, errOut.String())
+		}
+		if !strings.Contains(out.String(), "recorded changes_requested review") {
+			t.Fatalf("attempt %d reported no successful submission: %q", attempt+1, out.String())
+		}
+	}
+	out, _, err := executeCLI(t, Deps{
+		HTTPClient:   &http.Client{Timeout: 2 * time.Second},
+		ProcessAlive: func(int) bool { return false },
+	}, "review", "ls", worker, "--json")
+	if err != nil {
+		t.Fatalf("read-back through proxy failed: %v", err)
+	}
+	if !strings.Contains(out, `"githubReviewId": "12345"`) ||
+		!strings.Contains(out, `"verdict": "changes_requested"`) {
+		t.Fatalf("read-back did not preserve review result: %s", out)
+	}
+	if healthCount.Load() != 3 || submitCount.Load() != 2 || readCount.Load() != 1 {
+		t.Fatalf("unexpected proxy calls health=%d submit=%d read=%d",
+			healthCount.Load(), submitCount.Load(), readCount.Load())
 	}
 }
