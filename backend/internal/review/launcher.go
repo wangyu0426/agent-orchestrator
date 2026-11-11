@@ -73,13 +73,13 @@ type LaunchSpec struct {
 	// replacing a TUI. Hybrid runtime handles are versioned: dropping the
 	// "ptyhost-v1:" prefix would route teardown to legacy tmux.
 	PreviousReviewerHandleID string
-	WorkerID        domain.SessionID
-	ProjectID       domain.ProjectID
-	ProjectEnv      map[string]string
-	Harness         domain.ReviewerHarness
-	AgentConfig     domain.AgentConfig
-	WorkspacePath   string
-	AgentSessionID  string
+	WorkerID                 domain.SessionID
+	ProjectID                domain.ProjectID
+	ProjectEnv               map[string]string
+	Harness                  domain.ReviewerHarness
+	AgentConfig              domain.AgentConfig
+	WorkspacePath            string
+	AgentSessionID           string
 	// ProviderConversationID is the typed Chat driver's stable conversation id.
 	// Terminal reviewers continue to use AgentSessionID.
 	ProviderConversationID string
