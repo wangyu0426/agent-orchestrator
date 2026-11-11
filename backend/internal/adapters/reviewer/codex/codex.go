@@ -121,6 +121,14 @@ func insertBeforeLastArg(argv []string, extra ...string) []string {
 
 func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 	extra := []string{"--sandbox", "read-only"}
+	// A host opt-in replaces the legacy read-only sandbox with a named
+	// permission profile. Codex cannot combine --sandbox with permission
+	// profiles. The profile must be defined in the host's Codex config and
+	// should keep filesystem access read-only while permitting loopback HTTP.
+	// This affects only Codex reviewer TUI launches/restores, not workers.
+	if os.Getenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE") == "1" {
+		extra = []string{"-c", `default_permissions="ao-review-loopback"`}
+	}
 	// Shell commands inherit only Codex's core environment by default. Preserve
 	// the AO location overrides the reviewer needs to submit to this daemon.
 	values := map[string]string{
