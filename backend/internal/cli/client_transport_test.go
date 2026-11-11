@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,7 +287,7 @@ func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := setConfigEnv(t)
-			var apiRequests int
+			var apiRequests atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/healthz" {
@@ -295,7 +296,7 @@ func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/api/v1/projects/demo" {
-					apiRequests++
+					apiRequests.Add(1)
 					_, _ = io.WriteString(w, `{"status":"ok"}`)
 					return
 				}
@@ -312,12 +313,12 @@ func TestTransportHealthFallbackForSandboxInvisibleDaemonPID(t *testing.T) {
 			var out map[string]any
 			err := c.getJSON(context.Background(), "projects/demo", &out)
 			if tc.wantSuccess {
-				if err != nil || out["status"] != "ok" || apiRequests != 1 {
-					t.Fatalf("getJSON = %v out=%v apiRequests=%d; want successful API request", err, out, apiRequests)
+				if err != nil || out["status"] != "ok" || apiRequests.Load() != 1 {
+					t.Fatalf("getJSON = %v out=%v apiRequests=%d; want successful API request", err, out, apiRequests.Load())
 				}
 			} else {
-				if err == nil || !strings.Contains(err.Error(), "stale run-file") || apiRequests != 0 {
-					t.Fatalf("getJSON = %v apiRequests=%d; want stale rejection before API call", err, apiRequests)
+				if err == nil || !strings.Contains(err.Error(), "stale run-file") || apiRequests.Load() != 0 {
+					t.Fatalf("getJSON = %v apiRequests=%d; want stale rejection before API call", err, apiRequests.Load())
 				}
 			}
 		})
