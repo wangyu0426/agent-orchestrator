@@ -270,8 +270,8 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		}
 		reader = bytes.NewReader(payload)
 	}
-	url := fmt.Sprintf("http://%s:%d%s", config.LoopbackHost, info.Port, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, reader) // #nosec G704 -- daemon host is fixed loopback; path is an internal API route.
+	daemonURL := fmt.Sprintf("http://%s:%d%s", config.LoopbackHost, info.Port, path)
+	req, err := http.NewRequestWithContext(ctx, method, daemonURL, reader) // #nosec G704 -- daemon host is fixed loopback; path is an internal API route.
 	if err != nil {
 		return err
 	}
