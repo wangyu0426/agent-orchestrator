@@ -126,8 +126,12 @@ func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 	// profiles. The profile must be defined in the host's Codex config and
 	// should keep filesystem access read-only while permitting loopback HTTP.
 	// This affects only Codex reviewer TUI launches/restores, not workers.
+	proxyLoopback := ""
 	if os.Getenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE") == "1" {
 		extra = []string{"-c", `default_permissions="ao-review-loopback"`}
+		// Go bypasses standard proxy environment variables for 127.0.0.1.
+		// Tell reviewer-local AO CLI to use Codex's managed HTTP proxy.
+		proxyLoopback = "1"
 	}
 	// Shell commands inherit only Codex's core environment by default. Preserve
 	// the AO location overrides the reviewer needs to submit to this daemon.
@@ -135,8 +139,9 @@ func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 		"AO_PORT":     os.Getenv("AO_PORT"),
 		"AO_DATA_DIR": firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
 		"AO_RUN_FILE": firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
+		"AO_CLI_PROXY_LOOPBACK": proxyLoopback,
 	}
-	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE"} {
+	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE", "AO_CLI_PROXY_LOOPBACK"} {
 		value := values[name]
 		if value == "" {
 			continue
