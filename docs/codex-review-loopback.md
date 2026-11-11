@@ -201,6 +201,63 @@ do not guess: compare the run-file PID/port against the direct HTTP response
 and collect a precise Go socket denial with a diagnostic build. Never
 restart the healthy daemon to work around a client-side check.
 
+## Codex HTTP proxy for Go-based AO CLI (opt-in)
+
+On the real `yuworker` machine, the host CLI successfully listed PoR #33's
+`needs_review` state, and ordinary sandbox `curl` could reach
+`127.0.0.1:3301`. But `curl --noproxy '*'` failed, and the Go CLI was still
+blocked even with `allow_local_binding=true`. The problem is a **direct
+socket** route, not a dead daemon. Codex documents this as an expected
+limitation for Go `net/http` clients that bypass loopback proxies:
+https://github.com/openai/codex/blob/main/codex-rs/network-proxy/README.md
+
+Go's standard environment proxy selection always skips loopback. This PR
+therefore adds a **separate opt-in** `AO_CLI_PROXY_LOOPBACK=1` to the AO CLI
+when launched inside a Codex reviewer. Under that opt-in, the CLI:
+
+- reads the sandbox-injected `http_proxy` / `HTTP_PROXY`;
+- rejects any proxy endpoint outside `localhost` / loopback, or any
+  non-HTTP or authenticated proxy URL;
+- explicitly routes **only its fixed AO daemon loopback API** via the proxy
+  for both `/healthz` and `/api/v1/...` calls;
+- performs the same service-and-PID validation on the health response;
+- leaves all ordinary host CLI behavior unchanged when the switch is absent.
+
+AO's `AO_CODEX_REVIEW_LOOPBACK_PROFILE=1` launch setting injects both the
+named Codex profile and `AO_CLI_PROXY_LOOPBACK=1` for reviewer-local shell
+commands. This is a workaround only for the Codex TUI reviewer path. It
+does not change the daemon's listener or permit automatic merge.
+
+**Validation using the already-created PR #4 worktree, never replacing the
+running daemon or exiting the SSH shell:**
+
+```bash
+set +e
+(
+  cd "$HOME/ao-eval-lab/ao-pr4-check" &&
+  git fetch origin pull/4/head &&
+  git switch --detach FETCH_HEAD &&
+  cd backend &&
+  go test ./internal/cli ./internal/adapters/reviewer/codex &&
+  go build -o "$HOME/ao-eval-lab/ao-pr4-cli" ./cmd/ao &&
+  codex sandbox -P ao-review-loopback -- \
+    env AO_CLI_PROXY_LOOPBACK=1 \
+        AO_RUN_FILE="$HOME/.ao-orchestrator-test/running.json" \
+        AO_DATA_DIR="$HOME/.ao-orchestrator-test/data" \
+        "$HOME/ao-eval-lab/ao-pr4-cli" review ls path-of-reasoning-4 --json
+)
+echo "Verification exit code: $?"
+```
+
+If `AO_CLI_PROXY_LOOPBACK needs the sandbox's http_proxy or HTTP_PROXY`
+appears, inspect whether Codex actually injects a proxy into this permission
+profile. Do not hard-code an external proxy endpoint or disable isolation.
+
+A successful read-only `review ls` is **not** sufficient to claim the
+review feedback loop is working. A scratch AO instance must also validate
+reviewer `POST` submission, GitHub review ID and verdict persistence,
+duplicate handling, and restart recovery before enabling automatic review.
+
 ## Operational decisions
 
 - Keep the daemon bound to `127.0.0.1`; never bind `0.0.0.0` just for this.
