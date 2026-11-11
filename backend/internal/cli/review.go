@@ -120,14 +120,14 @@ type reviewSessionOptions struct {
 }
 
 type reviewTriggerOptions struct {
-	session  string
-	prURL    string
-	harness  string
+	session       string
+	prURL         string
+	harness       string
 	interfaceMode string
-	model    string
-	effort   string
-	rerun    bool
-	noInject bool
+	model         string
+	effort        string
+	rerun         bool
+	noInject      bool
 }
 
 // envReviewSessionID is set only inside reviewer panes (see
