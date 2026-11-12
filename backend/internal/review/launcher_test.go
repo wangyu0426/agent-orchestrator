@@ -681,6 +681,33 @@ func TestLauncherRestoreTerminalStartsIdlePane(t *testing.T) {
 	}
 }
 
+// A restored native PTY must be destroyed using the persisted *versioned*
+// runtime handle. The bare "review-..." name routes to legacy tmux on Linux,
+// leaving the native PTY reserved and causing an unintended tmux fallback.
+func TestLauncherRestoreTerminalDestroysPersistedNativeHandle(t *testing.T) {
+	reviewer := &fakeReviewer{}
+	rt := &fakeRuntime{}
+	l := NewLauncher(fakeReviewerResolver{reviewer: reviewer, ok: true}, rt, t.TempDir())
+	spec := launchSpec()
+	spec.PreviousReviewerHandleID = "ptyhost-v1:review-mer-1"
+	spec.PreviousRuns = []domain.ReviewRun{{
+		ID: "completed-run", Status: domain.ReviewRunComplete,
+		Verdict: domain.VerdictApproved,
+	}}
+
+	launch, err := l.RestoreTerminal(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RestoreTerminal: %v", err)
+	}
+	if !rt.destroyBefore || rt.destroyed != spec.PreviousReviewerHandleID {
+		t.Fatalf("stale runtime cleanup: destroyed=%q beforeCreate=%v, want versioned native handle",
+			rt.destroyed, rt.destroyBefore)
+	}
+	if !rt.created || launch.HandleID != "review-mer-1" {
+		t.Fatalf("replacement reviewer not launched: created=%v handle=%q", rt.created, launch.HandleID)
+	}
+}
+
 func TestLauncherRestoreTerminalUsesReviewerRestoreCommandWhenAvailable(t *testing.T) {
 	aoDir := t.TempDir()
 	aoExe := filepath.Join(aoDir, "ao")

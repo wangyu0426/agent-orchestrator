@@ -39,6 +39,7 @@ func (a *captureAgent) SessionInfo(context.Context, ports.SessionRef) (ports.Ses
 }
 
 func TestReviewCommandUsesReadOnlySandbox(t *testing.T) {
+	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "")
 	t.Setenv("AO_PORT", "3103")
 	t.Setenv("AO_DATA_DIR", "/wrong/data")
 	t.Setenv("AO_RUN_FILE", "/wrong/running.json")
@@ -73,6 +74,65 @@ func TestReviewCommandUsesReadOnlySandbox(t *testing.T) {
 	}
 	if agent.got.SystemPrompt != "review only" {
 		t.Fatalf("system prompt = %q", agent.got.SystemPrompt)
+	}
+}
+
+func TestReviewCommandOptInLoopbackPermissionProfile(t *testing.T) {
+	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "1")
+	// Clear ambient daemon locators: the argv assertions must be host-independent.
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_RUN_FILE", "")
+	t.Setenv("AO_PORT", "3301")
+	agent := &captureAgent{}
+	r := &Reviewer{agent: agent}
+
+	got, err := r.ReviewCommand(context.Background(), ports.ReviewInvocation{
+		Prompt: "review it",
+	})
+	if err != nil {
+		t.Fatalf("ReviewCommand: %v", err)
+	}
+	want := []string{
+		"agent",
+		"-c", `default_permissions="ao-review-loopback"`,
+		"-c", `shell_environment_policy.set.AO_PORT="3301"`,
+		"-c", `shell_environment_policy.set.AO_CLI_PROXY_LOOPBACK="1"`,
+		"--", "review it",
+	}
+	if !slices.Equal(got.Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", got.Argv, want)
+	}
+	if slices.Contains(got.Argv, "--sandbox") {
+		t.Fatal("legacy --sandbox would disable permission profile")
+	}
+}
+
+func TestReviewRestoreOptInLoopbackPermissionProfile(t *testing.T) {
+	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "1")
+	// Clear ambient daemon locators: the argv assertions must be host-independent.
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_RUN_FILE", "")
+	t.Setenv("AO_PORT", "3301")
+	agent := &captureAgent{}
+	r := &Reviewer{agent: agent}
+
+	got, ok, err := r.ReviewRestoreCommand(context.Background(), ports.ReviewInvocation{
+		ReviewerID:     "review-w1",
+		AgentSessionID: "codex-native-1",
+		WorkspacePath:  "/ws/w1",
+	})
+	if err != nil || !ok {
+		t.Fatalf("ReviewRestoreCommand: ok=%v err=%v", ok, err)
+	}
+	want := []string{
+		"agent", "resume",
+		"-c", `default_permissions="ao-review-loopback"`,
+		"-c", `shell_environment_policy.set.AO_PORT="3301"`,
+		"-c", `shell_environment_policy.set.AO_CLI_PROXY_LOOPBACK="1"`,
+		"codex-native-1",
+	}
+	if !slices.Equal(got.Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", got.Argv, want)
 	}
 }
 
@@ -134,6 +194,7 @@ func TestReviewCommandUsesHiddenSystemPromptFile(t *testing.T) {
 }
 
 func TestReviewRestoreCommandUsesNativeSessionIDAndReadOnlySandbox(t *testing.T) {
+	t.Setenv("AO_CODEX_REVIEW_LOOPBACK_PROFILE", "")
 	t.Setenv("AO_PORT", "3103")
 	t.Setenv("AO_DATA_DIR", "/wrong/data")
 	t.Setenv("AO_RUN_FILE", "/wrong/running.json")

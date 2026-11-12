@@ -8,11 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
@@ -91,6 +95,81 @@ func (e apiError) String() string {
 		msg = fmt.Sprintf("%s [request %s]", msg, e.RequestID)
 	}
 	return msg
+}
+
+// daemonHTTPClient deliberately routes AO's fixed loopback address through
+// the Codex-managed HTTP proxy only when the reviewer explicitly opts in.
+// Go's ProxyFromEnvironment always bypasses loopback, so the normal shell
+// proxy variables do not help sandboxed AO CLI calls. Refuse any proxy not
+// itself bound to a loopback address: AO's unauthenticated local control API
+// must not be forwarded to an arbitrary remote HTTP proxy.
+func (c *commandContext) daemonHTTPClient() (http.Client, error) {
+	client := *c.deps.HTTPClient
+	if os.Getenv("AO_CLI_PROXY_LOOPBACK") != "1" {
+		return client, nil
+	}
+	raw := strings.TrimSpace(os.Getenv("http_proxy"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("HTTP_PROXY"))
+	}
+	if raw == "" {
+		return client, errors.New("AO_CLI_PROXY_LOOPBACK needs the sandbox's http_proxy or HTTP_PROXY")
+	}
+	proxyURL, err := url.Parse(raw)
+	if err != nil || proxyURL.Scheme != "http" || proxyURL.User != nil || proxyURL.Hostname() == "" || proxyURL.Port() == "" {
+		return client, errors.New("AO_CLI_PROXY_LOOPBACK requires an unauthenticated HTTP proxy URL bound to loopback")
+	}
+	host := proxyURL.Hostname()
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return client, errors.New("AO_CLI_PROXY_LOOPBACK refuses a non-loopback HTTP proxy")
+	}
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return client, errors.New("AO_CLI_PROXY_LOOPBACK cannot override a custom HTTP transport")
+	}
+	copied := transport.Clone()
+	copied.Proxy = http.ProxyURL(proxyURL)
+	client.Transport = copied
+	return client, nil
+}
+
+// daemonMatchesRunFile confirms daemon ownership over loopback HTTP when the
+// local process table cannot see the recorded host PID (e.g. a Codex Linux
+// sandbox with a separate PID namespace). A successful TCP connection alone
+// is insufficient: the health response must identify AO and the exact PID
+// from the run-file. An unavailable/mismatched endpoint remains stale.
+func (c *commandContext) daemonMatchesRunFile(ctx context.Context, info *runfile.Info, client *http.Client) bool {
+	if info == nil || info.PID <= 0 || info.Port <= 0 || info.Port > 65535 {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet,
+		fmt.Sprintf("http://%s:%d/healthz", config.LoopbackHost, info.Port), http.NoBody)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var body struct {
+		Service string `json:"service"`
+		PID     int    `json:"pid"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
+		return false
+	}
+	return body.Service == daemonmeta.ServiceName && body.PID == info.PID
 }
 
 // getJSON sends GET /api/v1/<path> to the running daemon and decodes a 2xx
@@ -175,7 +254,11 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	if info == nil {
 		return daemonUnavailableError{message: "Orchestrator daemon is not running — start it with `ao start`", cause: errDaemonNotRunning}
 	}
-	if !c.deps.ProcessAlive(info.PID) {
+	client, err := c.daemonHTTPClient()
+	if err != nil {
+		return err
+	}
+	if !c.deps.ProcessAlive(info.PID) && !c.daemonMatchesRunFile(ctx, info, &client) {
 		return daemonUnavailableError{message: fmt.Sprintf("Orchestrator daemon is not running (stale run-file at %s) — start it with `ao start`", cfg.RunFilePath), cause: errDaemonNotRunning}
 	}
 
@@ -187,8 +270,8 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		}
 		reader = bytes.NewReader(payload)
 	}
-	url := fmt.Sprintf("http://%s:%d%s", config.LoopbackHost, info.Port, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, reader) // #nosec G704 -- daemon host is fixed loopback; path is an internal API route.
+	daemonURL := fmt.Sprintf("http://%s:%d%s", config.LoopbackHost, info.Port, path)
+	req, err := http.NewRequestWithContext(ctx, method, daemonURL, reader) // #nosec G704 -- daemon host is fixed loopback; path is an internal API route.
 	if err != nil {
 		return err
 	}
@@ -202,9 +285,8 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		req.Header.Set("X-AO-Side-Conversation", sideID)
 	}
 
-	// Reuse the injected client's transport (keeps it stubbable in tests) but
-	// give daemon API calls far more headroom than the 2s status-probe timeout.
-	client := *c.deps.HTTPClient
+	// Use the same transport for the ownership probe and the daemon request.
+	// The CLI's normal request timeout is longer than the health probe.
 	client.Timeout = timeout
 	resp, err := client.Do(req) // #nosec G704 -- request target is the fixed loopback daemon URL above.
 	if err != nil {

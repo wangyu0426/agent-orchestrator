@@ -69,13 +69,17 @@ type LaunchSpec struct {
 	BatchID         string
 	ReviewSessionID string
 	LaunchID        string
-	WorkerID        domain.SessionID
-	ProjectID       domain.ProjectID
-	ProjectEnv      map[string]string
-	Harness         domain.ReviewerHarness
-	AgentConfig     domain.AgentConfig
-	WorkspacePath   string
-	AgentSessionID  string
+	// PreviousReviewerHandleID is the exact persisted runtime handle when
+	// replacing a TUI. Hybrid runtime handles are versioned: dropping the
+	// "ptyhost-v1:" prefix would route teardown to legacy tmux.
+	PreviousReviewerHandleID string
+	WorkerID                 domain.SessionID
+	ProjectID                domain.ProjectID
+	ProjectEnv               map[string]string
+	Harness                  domain.ReviewerHarness
+	AgentConfig              domain.AgentConfig
+	WorkspacePath            string
+	AgentSessionID           string
 	// ProviderConversationID is the typed Chat driver's stable conversation id.
 	// Terminal reviewers continue to use AgentSessionID.
 	ProviderConversationID string
@@ -548,14 +552,18 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 		}
 	}
 	handleID := reviewerHandleID(spec.WorkerID)
-	// The reviewer handle is stable per worker, so a still-live pane from a
-	// previous pass would otherwise block `tmux new-session` (duplicate name) or,
-	// worse, keep serving under its old harness. Destroy any stale pane on this
-	// handle first so the reviewer always (re)launches under spec.Harness's
-	// sandbox/permissions/env — which are applied only here at Create, never by
-	// Notify. Destroy is idempotent when no pane exists (first spawn / dead pane).
-	if err := l.runtime.Destroy(ctx, ports.RuntimeHandle{ID: handleID}); err != nil {
-		return LaunchResult{}, fmt.Errorf("reviewer replace stale pane: %w", err)
+	// Destroy the *persisted* runtime identity when replacing a TUI.
+	// On Linux/macOS hybrid runtimes "ptyhost-v1:review-..." routes to the
+	// native PTY host, whereas bare "review-..." routes to legacy tmux.
+	// Destroying only the bare name leaves the old native PTY reservation
+	// behind, so native Create fails and silently falls back to tmux.
+	// A first launch has no persisted handle and retains legacy cleanup.
+	staleHandleID := handleID
+	if strings.TrimSpace(spec.PreviousReviewerHandleID) != "" {
+		staleHandleID = spec.PreviousReviewerHandleID
+	}
+	if err := l.runtime.Destroy(ctx, ports.RuntimeHandle{ID: staleHandleID}); err != nil {
+		return LaunchResult{}, fmt.Errorf("reviewer replace stale pane %q: %w", staleHandleID, err)
 	}
 	workingDirectory := cmd.WorkingDirectory
 	if workingDirectory == "" {

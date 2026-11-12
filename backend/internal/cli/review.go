@@ -66,6 +66,7 @@ type triggerReviewResponse struct {
 // triggerReviewRequest mirrors controllers.TriggerReviewRequest.
 type triggerReviewRequest struct {
 	Harness            string             `json:"harness,omitempty"`
+	InterfaceMode      string             `json:"interfaceMode,omitempty"`
 	AgentConfig        *reviewAgentConfig `json:"agentConfig,omitempty"`
 	PRURL              string             `json:"prUrl,omitempty"`
 	Source             string             `json:"source,omitempty"`
@@ -119,13 +120,14 @@ type reviewSessionOptions struct {
 }
 
 type reviewTriggerOptions struct {
-	session  string
-	prURL    string
-	harness  string
-	model    string
-	effort   string
-	rerun    bool
-	noInject bool
+	session       string
+	prURL         string
+	harness       string
+	interfaceMode string
+	model         string
+	effort        string
+	rerun         bool
+	noInject      bool
 }
 
 // envReviewSessionID is set only inside reviewer panes (see
@@ -364,6 +366,8 @@ session if it does not track it yet (never taking it from another active
 session) and reviews only it. The reviewer defaults to the session's reviewer
 choice, then the project's reviewer config, then the project's default worker
 agent and model; --agent, --model, and --effort override it for this pass only.
+Use --interface tui to force the native terminal Reviewer instead of the Chat
+reviewer interface (useful for explicit sandbox and proxy validation).
 
 A head that is already being reviewed, or already has a review, is not reviewed
 again: the command fails and says why. Pass --rerun to review the same commit
@@ -388,6 +392,7 @@ GitHub approval and does not authorize merging.`,
 	f.StringVar(&opts.session, "session", "", "Worker session id (or pass it positionally; default: this Orchestrator-managed session)")
 	f.StringVar(&opts.prURL, "pr", "", "Review only this pull request URL, attaching it to the session if Orchestrator does not track it yet (default: every eligible PR on the session)")
 	f.StringVar(&opts.harness, "harness", "", "Reviewer agent / --agent for this pass only (e.g. claude-code, codex)")
+	f.StringVar(&opts.interfaceMode, "interface", "", "Reviewer interface for this pass: tui or chat (default: existing reviewer interface or adapter default)")
 	f.StringVar(&opts.model, "model", "", "Reviewer model for this pass only")
 	f.StringVar(&opts.effort, "effort", "", "Reviewer reasoning effort for this pass only")
 	f.BoolVar(&opts.rerun, "rerun", false, "Review heads that already have a review again, or add another reviewer alongside a running one")
@@ -399,12 +404,17 @@ func (c *commandContext) triggerReview(cmd *cobra.Command, args []string, opts r
 	if strings.TrimSpace(os.Getenv(envReviewSessionID)) != "" {
 		return usageError{errors.New("ao review trigger cannot run inside a reviewer: reviewers review the requested PR and submit with `ao review submit`; they never start reviews")}
 	}
+	mode := strings.TrimSpace(opts.interfaceMode)
+	if mode != "" && mode != "tui" && mode != "chat" {
+		return usageError{errors.New("usage: --interface must be tui or chat")}
+	}
 	session := reviewTargetSession(args, opts.session)
 	if session == "" {
 		return usageError{errors.New("usage: worker session id is required (positional or --session) outside an Orchestrator-managed session")}
 	}
 	req := triggerReviewRequest{
 		Harness:            strings.TrimSpace(opts.harness),
+		InterfaceMode:      mode,
 		PRURL:              strings.TrimSpace(opts.prURL),
 		RejectReviewedHead: !opts.rerun,
 		Rerun:              opts.rerun,

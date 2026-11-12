@@ -675,6 +675,12 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 			return TriggerResult{}, rollbackReplacement(err)
 		}
 		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, launchAgentSessionID, launchID)
+		// Preserve the exact prior terminal backend identity across a new
+		// launch. A hybrid native PTY handle is not interchangeable with the
+		// bare legacy tmux name for runtime teardown.
+		if hasReview && previousReview.InterfaceMode == domain.ReviewerInterfaceTUI {
+			launchSpec.PreviousReviewerHandleID = previousReview.ReviewerHandleID
+		}
 		launchSpec.ProjectEnv = projectEnv
 		launchSpec.InterfaceMode = selectedMode
 		launchSpec.DeferInitialMessage = deferInitialMessage
@@ -1115,7 +1121,7 @@ func (e *Engine) restorePersistedChatReviewerLocked(ctx stdctx.Context, worker d
 		return RestoreReviewerResult{}, err
 	}
 	defer releaseHarness()
-	launch, err := e.launcher.RestoreTerminal(ctx, LaunchSpec{ReviewSessionID: review.ID, LaunchID: launchID, WorkerID: worker.ID, ProjectID: worker.ProjectID, ProjectEnv: projectEnv, Harness: review.Harness, WorkspacePath: worker.Metadata.WorkspacePath, AgentSessionID: review.AgentSessionID, ProviderConversationID: review.ProviderConversationID, PreviousRuns: previousRuns, InterfaceMode: review.InterfaceMode})
+	launch, err := e.launcher.RestoreTerminal(ctx, LaunchSpec{ReviewSessionID: review.ID, LaunchID: launchID, PreviousReviewerHandleID: review.ReviewerHandleID, WorkerID: worker.ID, ProjectID: worker.ProjectID, ProjectEnv: projectEnv, Harness: review.Harness, WorkspacePath: worker.Metadata.WorkspacePath, AgentSessionID: review.AgentSessionID, ProviderConversationID: review.ProviderConversationID, PreviousRuns: previousRuns, InterfaceMode: review.InterfaceMode})
 	if err != nil {
 		return RestoreReviewerResult{}, fmt.Errorf("restore reviewer: %w", err)
 	}
@@ -1239,19 +1245,24 @@ func (e *Engine) restoreReviewerLocked(
 		return RestoreReviewerResult{}, err
 	}
 	defer releaseHarness()
+	previousReviewerHandleID := ""
+	if reviewRow.InterfaceMode == domain.ReviewerInterfaceTUI {
+		previousReviewerHandleID = reviewRow.ReviewerHandleID
+	}
 	launch, err := e.launcher.RestoreTerminal(ctx, LaunchSpec{
-		ReviewSessionID:      reviewRow.ID,
-		LaunchID:             launchID,
-		WorkerID:             worker.ID,
-		ProjectID:            worker.ProjectID,
-		ProjectEnv:           projectEnv,
-		Harness:              harness,
-		AgentConfig:          config,
-		WorkspacePath:        worker.Metadata.WorkspacePath,
-		AgentSessionID:       agentSessionID,
-		RequireNativeHistory: harness == domain.ReviewerCodex && strings.TrimSpace(agentSessionID) != "",
-		PreviousRuns:         previousRuns,
-		InterfaceMode:        reviewRow.InterfaceMode,
+		ReviewSessionID:          reviewRow.ID,
+		LaunchID:                 launchID,
+		PreviousReviewerHandleID: previousReviewerHandleID,
+		WorkerID:                 worker.ID,
+		ProjectID:                worker.ProjectID,
+		ProjectEnv:               projectEnv,
+		Harness:                  harness,
+		AgentConfig:              config,
+		WorkspacePath:            worker.Metadata.WorkspacePath,
+		AgentSessionID:           agentSessionID,
+		RequireNativeHistory:     harness == domain.ReviewerCodex && strings.TrimSpace(agentSessionID) != "",
+		PreviousRuns:             previousRuns,
+		InterfaceMode:            reviewRow.InterfaceMode,
 	})
 	if err != nil {
 		restoreErr := fmt.Errorf("restore reviewer: %w", err)
