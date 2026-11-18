@@ -65,6 +65,16 @@ type ConversationService interface {
 	SessionHistory(ctx context.Context, session domain.SessionID, offset, limit int) ([]domain.HandoffTurn, int, error)
 }
 
+// TemporaryEscalationService is the controller-facing temporary
+// escalation contract (issue #8).
+type TemporaryEscalationService interface {
+	Start(ctx context.Context, id domain.SessionID, req domain.ProviderSwitchRequest) (*domain.TemporaryEscalation, error)
+	Get(ctx context.Context, id domain.SessionID) (*domain.TemporaryEscalation, bool, error)
+	Cancel(ctx context.Context, id domain.SessionID) error
+	RestoreNow(ctx context.Context, id domain.SessionID) error
+	RetryRevert(ctx context.Context, id domain.SessionID) error
+}
+
 type pagedConversationService interface {
 	SnapshotPage(ctx context.Context, session domain.SessionID, beforeSequence, afterSequence, limit int64) (chatsvc.Snapshot, error)
 }
@@ -94,6 +104,9 @@ type turnAutoResumeService interface {
 // even by calling these URLs directly. UI visibility is not the boundary.
 type ConversationsController struct {
 	Svc ConversationService
+	// Escalation serves temporary model escalation (issue #8). Nil
+	// answers the temporary-escalation routes 501.
+	Escalation TemporaryEscalationService
 	// UserMessages counts accepted human steers for product telemetry. Nil
 	// counts nothing.
 	UserMessages UserMessageRecorder
@@ -158,6 +171,10 @@ func (c *ConversationsController) Register(r chi.Router) {
 	r.Put("/sessions/{sessionId}/conversation/title", c.setTitle)
 	r.Post("/sessions/{sessionId}/conversation/mcp/reload", c.reloadMCPServers)
 	r.Post("/sessions/{sessionId}/provider-switch", c.switchProvider)
+	r.Get("/sessions/{sessionId}/temporary-escalation", c.temporaryEscalation)
+	r.Post("/sessions/{sessionId}/temporary-escalation/cancel", c.cancelTemporaryEscalation)
+	r.Post("/sessions/{sessionId}/temporary-escalation/restore", c.restoreTemporaryEscalation)
+	r.Post("/sessions/{sessionId}/temporary-escalation/retry", c.retryTemporaryEscalation)
 	r.Get("/sessions/{sessionId}/history", c.sessionHistory)
 	r.Post("/sessions/{sessionId}/renders", c.publishRender)
 	r.Post("/sessions/{sessionId}/renders/check", c.checkRender)

@@ -258,6 +258,14 @@ surface (`npm run sqlc`, `npm run api`).
 
 ## In flight / not yet a runtime feature
 
+- **Temporary model escalation (issue #8)**: backend + HTTP API on the
+  `feat/worker-temporary-model-escalation-8` branch (draft PR, not merged).
+  `POST /api/v1/sessions/{id}/provider-switch` with `"temporary": true`
+  snapshots the original harness/model/effort and restores it exactly once,
+  after a correlated completion report and a safe idle boundary; the override
+  persists across daemon restarts. No frontend picker yet, no `ao` CLI flag
+  yet, and same-harness TUI escalation is refused in v1 (a TUI model is
+  launch-time only).
 - **Cloud availability**: public client and desktop integration exist, but usage
   is gated by build configuration, account entitlement, and a reachable control
   plane. This is not unconditional availability in every desktop release.

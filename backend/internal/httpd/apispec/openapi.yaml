@@ -11487,6 +11487,193 @@ paths:
       summary: Send a message to a running session's agent
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/temporary-escalation:
+    get:
+      operationId: getTemporaryEscalation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryEscalationResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Read a session's temporary model escalation, if any
+      tags:
+      - conversations
+  /api/v1/sessions/{sessionId}/temporary-escalation/cancel:
+    post:
+      operationId: cancelTemporaryEscalation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryEscalationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Cancel a pending temporary model escalation's auto-restore
+      tags:
+      - conversations
+  /api/v1/sessions/{sessionId}/temporary-escalation/restore:
+    post:
+      operationId: restoreTemporaryEscalation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryEscalationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Restore the original model of a temporary escalation immediately, at
+        a safe idle point
+      tags:
+      - conversations
+  /api/v1/sessions/{sessionId}/temporary-escalation/retry:
+    post:
+      operationId: retryTemporaryEscalation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryEscalationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Retry a failed temporary escalation revert
+      tags:
+      - conversations
   /api/v1/sessions/{sessionId}/workspace/branches:
     get:
       operationId: listSessionWorkspaceBranches
@@ -19478,6 +19665,8 @@ components:
           type: string
         targetHarness:
           type: string
+        temporary:
+          type: boolean
         ultracode:
           type: boolean
       required:
@@ -19489,6 +19678,8 @@ components:
           $ref: '#/components/schemas/SendConversationMessageResponse'
         status:
           type: string
+        temporaryEscalation:
+          $ref: '#/components/schemas/TemporaryEscalationResponse'
       required:
       - status
       type: object
@@ -22297,6 +22488,44 @@ components:
       required:
       - distinctId
       - optedOut
+      type: object
+    TemporaryEscalationResponse:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        doneReportId:
+          type: string
+        lastError:
+          type: string
+        originalEffort:
+          type: string
+        originalHarness:
+          type: string
+        originalModel:
+          type: string
+        revertedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        sessionId:
+          type: string
+        state:
+          type: string
+        status:
+          type: string
+        targetEffort:
+          type: string
+        targetHarness:
+          type: string
+        targetModel:
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - status
       type: object
     TerminalShellCheckResponse:
       properties:
