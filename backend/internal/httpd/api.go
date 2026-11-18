@@ -55,6 +55,9 @@ type APIDeps struct {
 	// Conversations is nil until a Chat driver is wired; the controller then
 	// answers 501 rather than panicking, matching the other optional surfaces.
 	Conversations controllers.ConversationService
+	// TemporaryEscalation is nil until the escalation service is wired;
+	// the controller then answers the temporary-escalation routes 501.
+	TemporaryEscalation controllers.TemporaryEscalationService
 	// ConversationSearch is the chat full-text index; nil answers 501.
 	ConversationSearch controllers.ConversationSearch
 	// Settings is the daemon-owned preference surface.
@@ -215,7 +218,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		fs:            &controllers.FSController{Svc: deps.Directories},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		cues:          &controllers.CuesController{Svc: deps.Cues},
-		conversations: &controllers.ConversationsController{Svc: deps.Conversations, Renders: attachmentstore.New(cfg.DataDir), Search: deps.ConversationSearch, UserMessages: userMessageRecorder(deps.Sessions)},
+		conversations: &controllers.ConversationsController{Svc: deps.Conversations, Escalation: deps.TemporaryEscalation, Renders: attachmentstore.New(cfg.DataDir), Search: deps.ConversationSearch, UserMessages: userMessageRecorder(deps.Sessions)},
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser, Chrome: deps.BrowserChrome},

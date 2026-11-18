@@ -50,7 +50,11 @@ func (s *Service) SwitchProvider(ctx context.Context, id domain.SessionID, reque
 		return err
 	}
 	defer unlock()
-	return s.switchProvider(ctx, id, request)
+	if err := s.switchProvider(ctx, id, request); err != nil {
+		return err
+	}
+	s.notifyManualSwitch(ctx, id, request)
+	return nil
 }
 
 // SwitchProviderAndSend switches, then sends msg to the agent it switched to:
@@ -70,6 +74,7 @@ func (s *Service) SwitchProviderAndSend(ctx context.Context, id domain.SessionID
 	if err != nil {
 		return turn, false, err
 	}
+	switchedNow := false
 	if !delivered {
 		// A retry after the switch went through finds the target already active,
 		// and so does a window that picked the agent another one already brought
@@ -78,9 +83,15 @@ func (s *Service) SwitchProviderAndSend(ctx context.Context, id domain.SessionID
 			if err := s.applyPicksToActiveTarget(ctx, id, request); err != nil {
 				return turn, false, err
 			}
+			switchedNow = true
 		} else if err != nil {
 			return turn, false, err
+		} else {
+			switchedNow = true
 		}
+	}
+	if switchedNow {
+		s.notifyManualSwitch(ctx, id, request)
 	}
 	turn, err = s.Send(ctx, id, msg)
 	return turn, true, err

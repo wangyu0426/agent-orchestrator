@@ -66,6 +66,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/computeruse"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
+	escalationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/escalation"
 	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubpat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/hookprocess"
@@ -92,6 +93,11 @@ import (
 const usageReconcileTick = 3 * time.Minute
 
 const chatHibernateSweepTick = 30 * time.Second
+
+// temporaryEscalationReconcileTick paces the sweep that restores the
+// original model for escalations whose completion was recorded but whose
+// worker had not reached a safe idle boundary yet.
+const temporaryEscalationReconcileTick = 30 * time.Second
 
 // workspaceCleanupSweepTick paces the terminated-session cleanup reconcile.
 // Its work is retry and bookkeeping, not anything a user waits on.
@@ -733,10 +739,35 @@ func Run(buildVersion string) error {
 	if !ok {
 		return errors.New("wire report delivery: session manager lacks semantic send support")
 	}
+	// Temporary model escalation (issue #8): the service owns the
+	// snapshot/restore lifecycle. The chat and terminal switch paths
+	// report explicit owner switches back to it, so a newer manual choice
+	// supersedes a pending auto-restore.
+	escalationSvc := escalationsvc.New(escalationsvc.Deps{Reader: store, Store: store, Switcher: chatSvc})
+	chatSvc.SetManualSwitchObserver(escalationSvc)
+	if wired, ok := sessMgr.(interface {
+		SetManualSwitchObserver(domain.ManualSwitchObserver)
+	}); ok {
+		wired.SetManualSwitchObserver(escalationSvc)
+	}
 	var reportCoordinator *reportsvc.Coordinator
-	reportSvc := reportsvc.New(reportsvc.Deps{Store: store, Artifacts: chatSvc, OnCreated: func(domain.ReportRecord) {
+	reportSvc := reportsvc.New(reportsvc.Deps{Store: store, Artifacts: chatSvc, OnCreated: func(rec domain.ReportRecord) {
 		if reportCoordinator != nil {
 			reportCoordinator.Wake()
+		}
+		// A completion report alone never reverts anything; the
+		// escalation service records the correlated done and reverts only
+		// once the worker is safely idle. Handle it off the report path:
+		// the revert switch can take a while and the report is often the
+		// worker's last tool call. If this goroutine never runs (daemon
+		// crash after the report commit), startup recovery and the
+		// reconciler replay the persisted Done report instead, so the
+		// completion is not lost.
+		if rec.State == domain.ReportDone {
+			go func() {
+				defer sentryobs.RecoverBackground()
+				_ = escalationSvc.HandleReportDone(context.Background(), rec)
+			}()
 		}
 	}})
 	reportCoordinator = reportsvc.NewCoordinator(reportsvc.CoordinatorDeps{
@@ -745,9 +776,16 @@ func Run(buildVersion string) error {
 	})
 	chatSvc.SetReportCoordinator(reportCoordinator)
 	reportDeliveryDone := reportCoordinator.Start(ctx)
+	// Escalations that survived a daemon restart keep waiting; a revert
+	// that was in flight becomes failed instead of being silently retried.
+	if err := escalationSvc.RecoverAfterRestart(ctx); err != nil {
+		log.Warn("recover temporary escalations", "error", err)
+	}
+	escalationDone := escalationSvc.RunReconciler(ctx, temporaryEscalationReconcileTick)
 	defer func() {
 		stop()
 		<-reportDeliveryDone
+		<-escalationDone
 	}()
 	lcStack.trackerDone = startTrackerIntake(ctx, cfg, store, sessionSvc, tracker, log)
 
@@ -1114,50 +1152,51 @@ func Run(buildVersion string) error {
 	// the session's own must not replace its activity or transcript.
 	hookActivity := hookprocess.New(lcStack.LCM, store, runtimeAdapter, nil, log)
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
-		Awake:              awakeSvc,
-		Projects:           projectSvc,
-		ArtifactVersions:   lcStack.ArtifactVersions,
-		HostID:             hostIdentity.HostID,
-		Endpoints:          bs,
-		Agents:             agentSvc,
-		CodexAccounts:      agentSvc,
-		AgentAccounts:      agentAccountSvc,
-		SystemChecks:       systemChecks,
-		Installer:          systemInstall,
-		ComputerUse:        computerUse,
-		Sessions:           sessionSvc,
-		Automations:        automationSvc,
-		DesktopWorkspaces:  sessionSvc,
-		PRs:                prActions,
-		Reviews:            reviewSvc,
-		Notifications:      notifier,
-		Reports:            reportSvc,
-		NotificationStream: notificationHub,
-		Push:               pushRegistry,
-		Presence:           presenceTracker,
-		DeviceRoster:       deviceRoster,
-		DeviceLive:         presenceTracker,
-		Import:             importsvc.New(importsvc.Deps{Store: store}),
-		Directories:        fsbrowsersvc.New(),
-		ShellTerminals:     shellTermSvc,
-		Cues:               cuesvc.New(cuesvc.Deps{Store: store, Sessions: sessionSvc, Terminals: shellTermSvc}),
-		AgentAuth:          agentAuthSvc,
-		GitHub:             newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
-		Conversations:      chatSvc,
-		ConversationSearch: store,
-		Settings:           settingsSvc,
-		CDC:                store,
-		Events:             cdcPipe.Broadcaster,
-		Activity:           hookActivity,
-		PRRefresh:          reviewRefresher,
-		NativeSessions:     nativeSessions,
-		UsageHooks:         usageCollector,
-		UsageSummary:       usagesvc.NewSummaryReader(store),
-		SessionMemory:      memoryReader,
-		SessionSteps:       lcStack.LCM,
-		Telemetry:          telemetrySink,
-		TelemetryIdentity:  telemetryIdentity,
-		LifetimeSessions:   store.LifetimeSessions,
+		Awake:               awakeSvc,
+		Projects:            projectSvc,
+		ArtifactVersions:    lcStack.ArtifactVersions,
+		HostID:              hostIdentity.HostID,
+		Endpoints:           bs,
+		Agents:              agentSvc,
+		CodexAccounts:       agentSvc,
+		AgentAccounts:       agentAccountSvc,
+		SystemChecks:        systemChecks,
+		Installer:           systemInstall,
+		ComputerUse:         computerUse,
+		Sessions:            sessionSvc,
+		Automations:         automationSvc,
+		DesktopWorkspaces:   sessionSvc,
+		PRs:                 prActions,
+		Reviews:             reviewSvc,
+		Notifications:       notifier,
+		Reports:             reportSvc,
+		NotificationStream:  notificationHub,
+		Push:                pushRegistry,
+		Presence:            presenceTracker,
+		DeviceRoster:        deviceRoster,
+		DeviceLive:          presenceTracker,
+		Import:              importsvc.New(importsvc.Deps{Store: store}),
+		Directories:         fsbrowsersvc.New(),
+		ShellTerminals:      shellTermSvc,
+		Cues:                cuesvc.New(cuesvc.Deps{Store: store, Sessions: sessionSvc, Terminals: shellTermSvc}),
+		AgentAuth:           agentAuthSvc,
+		GitHub:              newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
+		Conversations:       chatSvc,
+		TemporaryEscalation: escalationSvc,
+		ConversationSearch:  store,
+		Settings:            settingsSvc,
+		CDC:                 store,
+		Events:              cdcPipe.Broadcaster,
+		Activity:            hookActivity,
+		PRRefresh:           reviewRefresher,
+		NativeSessions:      nativeSessions,
+		UsageHooks:          usageCollector,
+		UsageSummary:        usagesvc.NewSummaryReader(store),
+		SessionMemory:       memoryReader,
+		SessionSteps:        lcStack.LCM,
+		Telemetry:           telemetrySink,
+		TelemetryIdentity:   telemetryIdentity,
+		LifetimeSessions:    store.LifetimeSessions,
 		UsageFlush: func(ctx context.Context) {
 			if usage != nil {
 				usage.flush(ctx, false)

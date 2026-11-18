@@ -184,6 +184,9 @@ func (m *Manager) SwitchTUIProvider(ctx context.Context, id domain.SessionID, re
 	}
 	m.adoptTUISwitchSettings(ctx, id, request)
 	m.clearHandoffNote(ctx, id)
+	if m.manualSwitchObserver != nil {
+		_ = m.manualSwitchObserver.NoteManualSwitch(ctx, id, request)
+	}
 	return nil
 }
 

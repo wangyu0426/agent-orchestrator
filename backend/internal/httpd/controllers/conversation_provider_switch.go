@@ -47,6 +47,37 @@ func (c *ConversationsController) switchProvider(w http.ResponseWriter, r *http.
 		FastMode: req.FastMode, Ultracode: req.Ultracode, AutoCompactWindow: req.AutoCompactWindow,
 		PermissionMode: domain.PermissionMode(req.PermissionMode),
 	}
+	if req.Temporary {
+		if c.Escalation == nil {
+			apispec.NotImplemented(w, r, r.Method, "/api/v1/sessions/{sessionId}/provider-switch")
+			return
+		}
+		esc, err := c.Escalation.Start(ctx, sessionID, request)
+		if err != nil {
+			writeTemporaryEscalationError(w, r, err)
+			return
+		}
+		resp := ProviderSwitchResponse{Status: "ok", TemporaryEscalation: newTemporaryEscalationResponse(esc)}
+		if req.Message != nil {
+			turn, err := c.Svc.Send(ctx, sessionID, message)
+			if err != nil {
+				writeConversationError(w, r, err)
+				return
+			}
+			// The escalated task is this new turn, not the completed
+			// turn that was latest at Start time. Bind it now, while
+			// the send is known to have succeeded; a completion for
+			// any other turn must not arm this revert.
+			if err := c.Escalation.BindWorkItem(ctx, sessionID, turn.ID); err != nil {
+				writeTemporaryEscalationError(w, r, err)
+				return
+			}
+			response := sendConversationMessageResponse(turn)
+			resp.Message = &response
+		}
+		envelope.WriteJSON(w, http.StatusOK, resp)
+		return
+	}
 	if req.Message == nil {
 		if err := c.Svc.SwitchProvider(ctx, sessionID, request); err != nil {
 			writeProviderSwitchError(w, r, err)

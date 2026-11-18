@@ -763,6 +763,8 @@ type Session struct {
 	BranchNaming                     bool
 	TemporaryBranch                  string
 	TerminatedAt                     sql.NullTime
+	TemporaryEscalation              sql.NullString
+	TemporaryEscalationState         sql.NullString
 }
 
 type SessionAgentAccount struct {

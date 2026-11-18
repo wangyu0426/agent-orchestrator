@@ -124,6 +124,34 @@ type Service struct {
 	prewarming         sync.Map // domain.AgentHarness -> struct{}
 	providerSwitches   sync.Map // domain.SessionID -> chan struct{}, one switch at a time
 	terminalSwitcher   TerminalProviderSwitcher
+	// manualSwitchObserver hears explicit owner model/provider changes
+	// (never the escalation service's own switches) so a pending
+	// temporary escalation can be superseded by a newer choice.
+	manualSwitchObserver domain.ManualSwitchObserver
+}
+
+// SetManualSwitchObserver installs the late-bound observer for explicit
+// owner switches after daemon wiring has constructed both services.
+func (s *Service) SetManualSwitchObserver(observer domain.ManualSwitchObserver) {
+	s.manualSwitchObserver = observer
+}
+
+// notifyManualSwitch reports a completed provider switch that was not
+// performed by the temporary-escalation service itself.
+func (s *Service) notifyManualSwitch(ctx context.Context, id domain.SessionID, req domain.ProviderSwitchRequest) {
+	if s.manualSwitchObserver == nil {
+		return
+	}
+	_ = s.manualSwitchObserver.NoteManualSwitch(ctx, id, req)
+}
+
+// notifyManualTurnSettings reports a completed same-harness settings
+// change for a session conversation.
+func (s *Service) notifyManualTurnSettings(ctx context.Context, owner domain.ConversationOwner, settings domain.ConversationSettings) {
+	if s.manualSwitchObserver == nil || owner.Kind != domain.ConversationOwnerSession {
+		return
+	}
+	_ = s.manualSwitchObserver.NoteManualTurnSettings(ctx, domain.SessionID(owner.ID), settings)
 }
 
 // SetReportCoordinator installs the report piggyback hook after daemon wiring
@@ -2822,6 +2850,7 @@ func (s *Service) setTurnSettings(ctx context.Context, controller *Controller, o
 	if owner.Kind == domain.ConversationOwnerSession {
 		s.persistPickedModel(domain.SessionID(owner.ID), previous, settings)
 	}
+	s.notifyManualTurnSettings(ctx, owner, settings)
 	return controller.Settings(), nil
 }
 
