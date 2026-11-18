@@ -109,10 +109,13 @@ type TemporaryEscalation struct {
 	SessionID SessionID `json:"sessionId"`
 	// ConversationID is the AO conversation the worker runs in.
 	ConversationID string `json:"conversationId"`
-	// WorkItemID binds the escalation to the current task: the latest
-	// conversation turn at escalation time. Empty when the session had no
-	// turn yet; then any completion after creation belongs to its first
-	// task. A completion for another turn never triggers this revert.
+	// WorkItemID binds the escalation to the current task: the turn
+	// created by the first post-switch send, bound explicitly via
+	// BindWorkItem. It is empty until then; Start deliberately does
+	// NOT bind the latest completed turn at escalation time, because
+	// that turn already finished before the upgrade. A completion for
+	// another turn — or one arriving before any binding — never
+	// triggers this revert.
 	WorkItemID string `json:"workItemId,omitempty"`
 	// GenerationBefore is the controller fence at escalation time
 	// (ControllerGeneration for Chat, RuntimeLaunchID for TUI).

@@ -69,6 +69,10 @@ type ConversationService interface {
 // escalation contract (issue #8).
 type TemporaryEscalationService interface {
 	Start(ctx context.Context, id domain.SessionID, req domain.ProviderSwitchRequest) (*domain.TemporaryEscalation, error)
+	// BindWorkItem binds the escalation to the turn created by the
+	// first post-switch send. Without it, a later completion cannot
+	// be correlated to this escalation's task.
+	BindWorkItem(ctx context.Context, id domain.SessionID, turnID string) error
 	Get(ctx context.Context, id domain.SessionID) (*domain.TemporaryEscalation, bool, error)
 	Cancel(ctx context.Context, id domain.SessionID) error
 	RestoreNow(ctx context.Context, id domain.SessionID) error

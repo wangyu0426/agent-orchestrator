@@ -55,6 +55,15 @@ type Reader interface {
 	SessionLaunchOptions(ctx context.Context, id domain.SessionID) (domain.AgentLaunchOptions, error)
 }
 
+// reportLister is the optional Reader capability used to replay
+// persisted completion reports after a daemon restart (or on a
+// reconciler sweep) when the fire-and-forget HandleReportDone call
+// never ran. Readers that do not implement it simply skip replay;
+// the live SQLite store does implement it.
+type reportLister interface {
+	ListReportsBySession(ctx context.Context, id domain.SessionID) ([]domain.ReportRecord, error)
+}
+
 // Store is the durable escalation record. UpdateEscalation is a
 // compare-and-swap on the previous state: it reports false when another
 // writer moved the record first, which is what makes the automatic
@@ -269,14 +278,13 @@ func (s *Service) Start(ctx context.Context, id domain.SessionID, target domain.
 	}
 
 	now := s.now().UTC()
-	workItemID := ""
-	if conv.ID != "" {
-		if turn, err := s.reader.LatestConversationTurn(ctx, conv.ID); err == nil {
-			workItemID = turn.ID
-		} else if !errors.Is(err, domain.ErrNoConversationTurn) {
-			return nil, err
-		}
-	}
+	// The work item is NOT the latest completed turn at Start time: that
+	// turn already finished before the upgrade, and the escalated task
+	// is the next turn created after the switch (usually by the
+	// temporary switch+message call). WorkItemID therefore starts
+	// unbound; BindWorkItem binds it explicitly to that new turn. A
+	// completion arriving before any binding is ignored (fail closed),
+	// so a done for the previous task can never arm this revert.
 	permission := conv.Settings.ApprovalMode
 	if permission == "" {
 		permission = rec.Metadata.Permissions
@@ -285,7 +293,7 @@ func (s *Service) Start(ctx context.Context, id domain.SessionID, target domain.
 		ID:               s.newID(),
 		SessionID:        id,
 		ConversationID:   conv.ID,
-		WorkItemID:       workItemID,
+		WorkItemID:       "",
 		GenerationBefore: fenceFor(rec),
 		Mode:             mode,
 		Original: domain.ModelSnapshot{
@@ -338,6 +346,58 @@ func (s *Service) Start(ctx context.Context, id domain.SessionID, target domain.
 		}
 	}
 	return esc, nil
+}
+
+// BindWorkItem explicitly binds an unbound escalation to the turn
+// created by the first post-switch send. Only that turn's completion
+// can arm the auto-restore. It is idempotent for the same turn;
+// binding a different turn, binding after a completion was recorded,
+// or binding a turn that is not the latest turn all fail without
+// changing the record, so a stale or unrelated turn can never become
+// the work item.
+func (s *Service) BindWorkItem(ctx context.Context, id domain.SessionID, turnID string) error {
+	if s.reader == nil || s.store == nil {
+		return errors.New("escalation: reader and store are required")
+	}
+	if turnID == "" {
+		return fmt.Errorf("%w: work item turn id is required", ErrEscalationUnsupported)
+	}
+	unlock := s.lock(id)
+	defer unlock()
+	esc, found, err := s.store.GetEscalation(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNoEscalation
+	}
+	if esc.WorkItemID == turnID {
+		return nil
+	}
+	if esc.WorkItemID != "" {
+		// Already bound to another turn: the escalated task is fixed
+		// at the first post-switch send and cannot be rebound.
+		return ErrEscalationStateChanged
+	}
+	if esc.State != domain.TemporaryEscalationPending || esc.DoneReportID != "" {
+		return ErrEscalationStateChanged
+	}
+	if esc.ConversationID == "" {
+		return fmt.Errorf("%w: session has no conversation to bind a work item to", ErrEscalationUnsupported)
+	}
+	turn, err := s.reader.LatestConversationTurn(ctx, esc.ConversationID)
+	if err != nil {
+		return err
+	}
+	if turn.ID != turnID {
+		return ErrEscalationStateChanged
+	}
+	if !turn.RequestedAt.IsZero() && turn.RequestedAt.Before(esc.CreatedAt) {
+		return ErrEscalationStateChanged
+	}
+	esc.WorkItemID = turnID
+	esc.UpdatedAt = s.now().UTC()
+	return s.save(ctx, esc, domain.TemporaryEscalationPending)
 }
 
 // performSwitch runs one provider switch for an escalation. upgrade
@@ -455,9 +515,14 @@ func (s *Service) handleReportDoneLocked(ctx context.Context, report domain.Repo
 		return nil
 	}
 	// Fence on the work item: only a completion for the escalated turn
-	// counts. A newer turn means newer work, which must not be reverted.
-	if esc.WorkItemID != "" {
-		if esc.ConversationID == "" {
+	// counts. For a Chat session the work item must have been bound
+	// explicitly (BindWorkItem, from the first post-switch send); a
+	// completion arriving before any binding is ignored, and a newer
+	// turn means newer work, which must not be reverted. Sessions
+	// without a conversation (TUI) have no turn to bind, so they
+	// correlate on the fence and creation time only.
+	if esc.ConversationID != "" {
+		if esc.WorkItemID == "" {
 			return nil
 		}
 		if !s.turnIsWorkItem(ctx, esc) {
@@ -494,6 +559,105 @@ func (s *Service) turnIsWorkItem(ctx context.Context, esc *domain.TemporaryEscal
 	return turn.ID == esc.WorkItemID
 }
 
+// replayPersistedDoneLocked re-delivers persisted Done reports for an
+// escalation that is still pending. This is the durable backstop for
+// the daemon's fire-and-forget HandleReportDone goroutine: if the
+// daemon crashed after CreateReport committed the Done report but
+// before (or while) the goroutine ran, the completion is not lost —
+// startup recovery and the reconciler sweep replay it idempotently.
+// Reports already armed are no-ops (DoneReportID is set), stale
+// reports are ignored by handleReportDoneLocked, and a replay that
+// arms the escalation also attempts the revert when idle. Callers
+// must hold the session lock.
+func (s *Service) replayPersistedDoneLocked(ctx context.Context, esc *domain.TemporaryEscalation) error {
+	lister, ok := s.reader.(reportLister)
+	if !ok {
+		return nil
+	}
+	reports, err := lister.ListReportsBySession(ctx, esc.SessionID)
+	if err != nil {
+		return err
+	}
+	for _, rep := range reports {
+		if rep.State != domain.ReportDone {
+			continue
+		}
+		if !rep.CreatedAt.IsZero() && rep.CreatedAt.Before(esc.CreatedAt) {
+			continue
+		}
+		if err := s.handleReportDoneLocked(ctx, rep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// supersedeLocked persistently supersedes an escalation whose bound
+// work has been taken over by newer work. Callers must hold the
+// session lock; esc is re-read so the CAS is against the current state.
+func (s *Service) supersedeLocked(ctx context.Context, esc *domain.TemporaryEscalation) error {
+	fresh, found, err := s.store.GetEscalation(ctx, esc.SessionID)
+	if err != nil || !found {
+		return err
+	}
+	if fresh.State.Terminal() {
+		return nil
+	}
+	from := fresh.State
+	if err := fresh.MarkSuperseded(s.now().UTC()); err != nil {
+		return err
+	}
+	return s.save(ctx, fresh, from)
+}
+
+// validateDelayedRevert re-validates, immediately before a delayed
+// automatic restore executes, that the bound work item and the
+// controller generation are still the ones the escalation was started
+// for. It returns (true, nil) when the restore may proceed, (false,
+// nil) when it must not proceed yet (fail closed, record untouched),
+// and supersedes the record — returning (false, nil) as well — when
+// newer work has taken over ownership, so a later idle boundary can
+// never restore a new work item by accident. It never reverts.
+func (s *Service) validateDelayedRevert(ctx context.Context, esc *domain.TemporaryEscalation) (bool, error) {
+	rec, found, err := s.reader.GetSession(ctx, esc.SessionID)
+	if err != nil {
+		return false, err
+	}
+	if !found || rec.IsTerminated {
+		return false, nil
+	}
+	fence := fenceFor(rec)
+	if fence != esc.GenerationBefore && (esc.GenerationAfter == "" || fence != esc.GenerationAfter) {
+		if err := s.supersedeLocked(ctx, esc); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if esc.ConversationID == "" {
+		return true, nil
+	}
+	if esc.WorkItemID == "" {
+		// No explicit work item was ever bound: fail closed, do not
+		// revert, and do not supersede — the owner can still restore
+		// manually.
+		return false, nil
+	}
+	turn, err := s.reader.LatestConversationTurn(ctx, esc.ConversationID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNoConversationTurn) {
+			return false, nil
+		}
+		return false, err
+	}
+	if turn.ID != esc.WorkItemID {
+		if err := s.supersedeLocked(ctx, esc); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // attemptRevertLocked tries the automatic restore for an escalation that
 // has a recorded completion. It returns true when the session is back on
 // its original model.
@@ -517,8 +681,19 @@ func (s *Service) attemptRevertLocked(ctx context.Context, esc *domain.Temporary
 		if s.onOriginalModel(ctx, esc) {
 			return s.finishRevert(ctx, esc)
 		}
-		return false, s.failRevert(ctx, esc, errors.New("revert was interrupted before it could be confirmed"))
+		return false, s.failRevert(ctx, esc, errors.New("revert could not be confirmed: the session is not on the original model/settings"))
 	default:
+		return false, nil
+	}
+	// Re-validate the bound work item and generation immediately before
+	// the delayed restore executes: a newer turn or a replaced
+	// controller that started after the completion was recorded must
+	// supersede this escalation instead of being reverted.
+	ok, err := s.validateDelayedRevert(ctx, esc)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
 		return false, nil
 	}
 	idle, err := s.isSafeIdle(ctx, esc)
@@ -528,16 +703,54 @@ func (s *Service) attemptRevertLocked(ctx context.Context, esc *domain.Temporary
 	if !idle {
 		return false, nil
 	}
+	// Narrow the race between the idle check and the switch: re-check
+	// ownership once more right before reverting.
+	ok, err = s.validateDelayedRevert(ctx, esc)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
 	return s.doRevertLocked(ctx, esc)
 }
 
-// onOriginalModel reports whether the session already runs the snapshot.
+// onOriginalModel reports whether the session really runs the
+// snapshot — not just the same harness/model at session level, but
+// also the original effort and the effective Chat controller settings
+// (model, reasoning effort, approval mode, and, for Claude Code, the
+// auto-compact window). A switch that landed the session-level model
+// but left the controller on the wrong effort or settings must not be
+// declared a successful restore. FastMode/Ultracode are launch-time
+// choices passed in the revert request; they are not re-readable from
+// the session record, so they are not part of this confirmation.
 func (s *Service) onOriginalModel(ctx context.Context, esc *domain.TemporaryEscalation) bool {
 	rec, found, err := s.reader.GetSession(ctx, esc.SessionID)
 	if err != nil || !found {
 		return false
 	}
-	return rec.Harness == esc.Original.Harness && rec.Metadata.Model == esc.Original.Model
+	if rec.Harness != esc.Original.Harness ||
+		rec.Metadata.Model != esc.Original.Model ||
+		rec.Metadata.Effort != esc.Original.Effort {
+		return false
+	}
+	if esc.ConversationID == "" || domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		return true
+	}
+	conv, err := s.reader.ConversationForSession(ctx, esc.SessionID)
+	if err != nil {
+		return false
+	}
+	if conv.Settings.Model != esc.Original.ConversationModel ||
+		conv.Settings.ReasoningEffort != esc.Original.ConversationEffort ||
+		conv.Settings.ApprovalMode != esc.Original.PermissionMode {
+		return false
+	}
+	if esc.Original.Harness == domain.HarnessClaudeCode &&
+		conv.Settings.AutoCompactWindow != esc.Original.AutoCompactWindow {
+		return false
+	}
+	return true
 }
 
 // doRevertLocked moves an awaiting-idle (or owner-approved) escalation
@@ -646,6 +859,11 @@ func (s *Service) RestoreNow(ctx context.Context, id domain.SessionID) error {
 }
 
 // RetryRevert retries a failed revert once more, on explicit request.
+// Like RestoreNow it requires a safe idle boundary first: retrying
+// while the worker is still active would switch the model under
+// running work and could mark the escalation reverted while the
+// switch was still in flight. A retry that is refused stays failed
+// and retryable, and no switch is started.
 func (s *Service) RetryRevert(ctx context.Context, id domain.SessionID) error {
 	if s.reader == nil || s.store == nil {
 		return errors.New("escalation: reader and store are required")
@@ -658,6 +876,25 @@ func (s *Service) RetryRevert(ctx context.Context, id domain.SessionID) error {
 	}
 	if !found || esc.State != domain.TemporaryEscalationFailed {
 		return ErrNoEscalation
+	}
+	// Newer work that took over after the failure supersedes the
+	// retry instead of being reverted.
+	ok, err := s.validateDelayedRevert(ctx, esc)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if fresh, found, err := s.store.GetEscalation(ctx, id); err == nil && found && fresh.State == domain.TemporaryEscalationSuperseded {
+			return fmt.Errorf("%w: the escalation was superseded by newer work", ErrEscalationStateChanged)
+		}
+		return fmt.Errorf("%w: the escalation cannot be retried safely", ErrEscalationStateChanged)
+	}
+	idle, err := s.isSafeIdle(ctx, esc)
+	if err != nil {
+		return err
+	}
+	if !idle {
+		return ErrEscalationNotIdle
 	}
 	now := s.now().UTC()
 	if err := esc.RetryRevert(now); err != nil {
@@ -708,10 +945,21 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 	reverted := 0
 	var errs []error
 	for _, esc := range active {
-		if esc.State != domain.TemporaryEscalationAwaitingIdle && esc.State != domain.TemporaryEscalationReverting {
+		if esc.State != domain.TemporaryEscalationAwaitingIdle && esc.State != domain.TemporaryEscalationReverting && esc.State != domain.TemporaryEscalationPending {
 			continue
 		}
 		unlock := s.lock(esc.SessionID)
+		// A pending escalation may already have a persisted Done
+		// report whose HandleReportDone goroutine never ran (see
+		// replayPersistedDoneLocked): replay it before deciding
+		// whether a revert is due.
+		if esc.State == domain.TemporaryEscalationPending {
+			if err := s.replayPersistedDoneLocked(ctx, esc); err != nil {
+				errs = append(errs, err)
+				unlock()
+				continue
+			}
+		}
 		done, err := s.attemptRevertLocked(ctx, esc)
 		unlock()
 		if err != nil {
@@ -728,6 +976,9 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 // RecoverAfterRestart re-arms escalations that survived a daemon
 // restart. Pending and awaiting-idle escalations keep waiting; a revert
 // that was in flight becomes failed instead of being silently retried.
+// A pending escalation whose Done report was already persisted before
+// the crash is replayed here, so the completion is not lost when the
+// fire-and-forget HandleReportDone goroutine never ran.
 func (s *Service) RecoverAfterRestart(ctx context.Context) error {
 	if s.store == nil {
 		return errors.New("escalation: store is required")
@@ -738,10 +989,20 @@ func (s *Service) RecoverAfterRestart(ctx context.Context) error {
 	}
 	var errs []error
 	for _, esc := range active {
-		if esc.State != domain.TemporaryEscalationReverting {
+		unlock := s.lock(esc.SessionID)
+		if esc.State == domain.TemporaryEscalationPending {
+			// Replay a Done report that was persisted before the
+			// crash but never reached HandleReportDone.
+			if err := s.replayPersistedDoneLocked(ctx, esc); err != nil {
+				errs = append(errs, err)
+			}
+			unlock()
 			continue
 		}
-		unlock := s.lock(esc.SessionID)
+		if esc.State != domain.TemporaryEscalationReverting {
+			unlock()
+			continue
+		}
 		now := s.now().UTC()
 		if err := esc.MarkInterruptedByRestart(now); err == nil {
 			if err := s.save(ctx, esc, domain.TemporaryEscalationReverting); err != nil {

@@ -64,6 +64,14 @@ func (c *ConversationsController) switchProvider(w http.ResponseWriter, r *http.
 				writeConversationError(w, r, err)
 				return
 			}
+			// The escalated task is this new turn, not the completed
+			// turn that was latest at Start time. Bind it now, while
+			// the send is known to have succeeded; a completion for
+			// any other turn must not arm this revert.
+			if err := c.Escalation.BindWorkItem(ctx, sessionID, turn.ID); err != nil {
+				writeTemporaryEscalationError(w, r, err)
+				return
+			}
 			response := sendConversationMessageResponse(turn)
 			resp.Message = &response
 		}

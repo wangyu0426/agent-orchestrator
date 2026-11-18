@@ -20,6 +20,16 @@ type fakeReader struct {
 	pending   map[string]bool
 	activeTxn map[domain.SessionID]bool
 	launch    map[domain.SessionID]domain.AgentLaunchOptions
+	// reports are persisted Done (and other) reports, as CreateReport
+	// would have stored them, whether or not HandleReportDone ran.
+	reports map[domain.SessionID][]domain.ReportRecord
+}
+
+func (f *fakeReader) ListReportsBySession(_ context.Context, id domain.SessionID) ([]domain.ReportRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]domain.ReportRecord(nil), f.reports[id]...)
+	return out, nil
 }
 
 func (f *fakeReader) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -89,7 +99,13 @@ func (f *fakeReader) setGeneration(id domain.SessionID, gen string) {
 func (f *fakeReader) setTurn(conversationID, turnID string, state domain.TurnState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.turns[conversationID] = domain.ConversationTurn{ID: turnID, ConversationID: conversationID, State: state}
+	// Turns created after an escalation starts are requested after it:
+	// the fixed timestamp is after newTestEnv's Start time (12:00) so
+	// BindWorkItem's creation-time check passes for them.
+	f.turns[conversationID] = domain.ConversationTurn{
+		ID: turnID, ConversationID: conversationID, State: state,
+		RequestedAt: time.Date(2026, 11, 18, 12, 30, 0, 0, time.UTC),
+	}
 }
 
 type fakeStore struct {
@@ -162,6 +178,10 @@ type fakeSwitcher struct {
 	settingsSets []domain.ConversationSettings
 	failNext     int
 	preflightErr error
+	// preserveConvSettings simulates a switch that lands the
+	// session-level model but leaves the Chat controller settings
+	// untouched (wrong effort/settings after revert).
+	preserveConvSettings bool
 }
 
 func (s *fakeSwitcher) SwitchProvider(_ context.Context, id domain.SessionID, req domain.ProviderSwitchRequest) error {
@@ -181,6 +201,18 @@ func (s *fakeSwitcher) SwitchProvider(_ context.Context, id domain.SessionID, re
 	rec.Metadata.Effort = req.Effort
 	rec.Metadata.ControllerGeneration = "gen-2"
 	s.reader.sessions[id] = rec
+	if !s.preserveConvSettings {
+		// A real cross-harness switch saves the target's settings
+		// with the switch, so the conversation reflects the new
+		// controller.
+		conv := s.reader.convs[id]
+		conv.Settings.Model = req.Model
+		conv.Settings.ReasoningEffort = req.Effort
+		if req.PermissionMode != "" {
+			conv.Settings.ApprovalMode = req.PermissionMode
+		}
+		s.reader.convs[id] = conv
+	}
 	return nil
 }
 
@@ -192,11 +224,13 @@ func (s *fakeSwitcher) SetTurnSettings(_ context.Context, id domain.SessionID, s
 	rec.Metadata.Model = settings.Model
 	rec.Metadata.Effort = settings.ReasoningEffort
 	s.reader.sessions[id] = rec
-	conv := s.reader.convs[id]
-	conv.Settings.Model = settings.Model
-	conv.Settings.ReasoningEffort = settings.ReasoningEffort
-	conv.Settings.ApprovalMode = settings.ApprovalMode
-	s.reader.convs[id] = conv
+	if !s.preserveConvSettings {
+		conv := s.reader.convs[id]
+		conv.Settings.Model = settings.Model
+		conv.Settings.ReasoningEffort = settings.ReasoningEffort
+		conv.Settings.ApprovalMode = settings.ApprovalMode
+		s.reader.convs[id] = conv
+	}
 	return settings, nil
 }
 
@@ -267,6 +301,20 @@ func startUpgrade(t *testing.T, env *testEnv) *domain.TemporaryEscalation {
 	return esc
 }
 
+// startUpgradeWithTask starts an escalation and binds it to a new turn,
+// the way the temporary switch+message controller path does: the
+// escalated task is the turn created after the switch, not the
+// completed turn that was latest at Start time.
+func startUpgradeWithTask(t *testing.T, env *testEnv, turnID string) *domain.TemporaryEscalation {
+	t.Helper()
+	esc := startUpgrade(t, env)
+	env.reader.setTurn("conv-1", turnID, domain.TurnStateRunning)
+	if err := env.svc.BindWorkItem(context.Background(), "sess-1", turnID); err != nil {
+		t.Fatalf("BindWorkItem() = %v", err)
+	}
+	return esc
+}
+
 func doneReport(env *testEnv, id string) domain.ReportRecord {
 	return domain.ReportRecord{
 		ID: id, SessionID: "sess-1", ProjectID: "proj-1",
@@ -283,8 +331,10 @@ func TestStartCrossHarnessSnapshotsOriginal(t *testing.T) {
 	if esc.Original.Harness != domain.HarnessCodex || esc.Original.Model != "mai-code-2" || esc.Original.Effort != "medium" {
 		t.Fatalf("snapshot = %+v, want codex/mai-code-2/medium", esc.Original)
 	}
-	if esc.WorkItemID != "turn-1" || esc.GenerationBefore != "gen-1" || esc.GenerationAfter != "gen-2" {
-		t.Fatalf("esc = %+v, want workItem turn-1 gen-1->gen-2", esc)
+	// Start leaves the work item unbound: the completed turn-1
+	// predates the upgrade, and the escalated task is the next turn.
+	if esc.WorkItemID != "" || esc.GenerationBefore != "gen-1" || esc.GenerationAfter != "gen-2" {
+		t.Fatalf("esc = %+v, want unbound workItem gen-1->gen-2", esc)
 	}
 	rec, _, _ := env.reader.GetSession(context.Background(), "sess-1")
 	if rec.Harness != domain.HarnessClaudeCode || rec.Metadata.Model != "sol-6.2" {
@@ -399,10 +449,10 @@ func TestStartSwitchFailurePreservesWorker(t *testing.T) {
 
 func TestDoneThenIdleRevertsExactlyOnce(t *testing.T) {
 	env := newTestEnv(t)
-	startUpgrade(t, env)
+	startUpgradeWithTask(t, env, "turn-2")
 	// The worker is still finishing: done arrives but the turn is running.
 	env.reader.setActivity("sess-1", domain.ActivityActive)
-	env.reader.setTurn("conv-1", "turn-1", domain.TurnStateRunning)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
 	env.advance(time.Minute)
 	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
 		t.Fatalf("HandleReportDone() = %v", err)
@@ -418,7 +468,7 @@ func TestDoneThenIdleRevertsExactlyOnce(t *testing.T) {
 	// Idle without a new done must not revert on its own... except the
 	// done is already recorded, so reaching idle does revert.
 	env.reader.setActivity("sess-1", domain.ActivityIdle)
-	env.reader.setTurn("conv-1", "turn-1", domain.TurnStateCompleted)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
 	reverted, err := env.svc.MaybeRevert(context.Background(), "sess-1")
 	if err != nil || !reverted {
 		t.Fatalf("MaybeRevert() = %v, %v, want true, nil", reverted, err)
@@ -578,7 +628,8 @@ func TestCancelAndRestoreNow(t *testing.T) {
 
 func TestRevertFailureKeepsWorkerAndRetries(t *testing.T) {
 	env := newTestEnv(t)
-	startUpgrade(t, env)
+	startUpgradeWithTask(t, env, "turn-2")
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
 	env.switcher.failNext = 1
 	env.advance(time.Minute)
 	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
@@ -608,9 +659,9 @@ func TestRevertFailureKeepsWorkerAndRetries(t *testing.T) {
 
 func TestReconcilePicksUpAwaitingIdle(t *testing.T) {
 	env := newTestEnv(t)
-	startUpgrade(t, env)
+	startUpgradeWithTask(t, env, "turn-2")
 	env.reader.setActivity("sess-1", domain.ActivityActive)
-	env.reader.setTurn("conv-1", "turn-1", domain.TurnStateRunning)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
 	env.advance(time.Minute)
 	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
 		t.Fatalf("HandleReportDone() = %v", err)
@@ -619,7 +670,7 @@ func TestReconcilePicksUpAwaitingIdle(t *testing.T) {
 		t.Fatalf("Reconcile() while busy = %d, want 0", n)
 	}
 	env.reader.setActivity("sess-1", domain.ActivityIdle)
-	env.reader.setTurn("conv-1", "turn-1", domain.TurnStateCompleted)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
 	if n, err := env.svc.Reconcile(context.Background()); err != nil || n != 1 {
 		t.Fatalf("Reconcile() = %d, %v, want 1, nil", n, err)
 	}
@@ -660,12 +711,18 @@ func TestRevertingAlreadyOnOriginalModel(t *testing.T) {
 	env := newTestEnv(t)
 	esc := startUpgrade(t, env)
 	// The revert switch committed, then the daemon died before marking
-	// it reverted. The session is already back on the original model.
+	// it reverted. The session and its Chat controller settings are
+	// already back on the original model/effort/approval.
 	rec, _, _ := env.reader.GetSession(context.Background(), "sess-1")
 	rec.Harness = domain.HarnessCodex
 	rec.Metadata.Model = "mai-code-2"
 	rec.Metadata.Effort = "medium"
 	env.reader.sessions["sess-1"] = rec
+	conv, _ := env.reader.ConversationForSession(context.Background(), "sess-1")
+	conv.Settings.Model = "mai-code-2"
+	conv.Settings.ReasoningEffort = "medium"
+	conv.Settings.ApprovalMode = domain.PermissionModeAuto
+	env.reader.convs["sess-1"] = conv
 	if err := esc.BeginRevert(env.now); err != nil {
 		t.Fatalf("BeginRevert() = %v", err)
 	}
@@ -676,4 +733,264 @@ func TestRevertingAlreadyOnOriginalModel(t *testing.T) {
 	if err != nil || !reverted {
 		t.Fatalf("MaybeRevert() = %v, %v, want true, nil", reverted, err)
 	}
+}
+
+func TestBindWorkItemBindsNewTurn(t *testing.T) {
+	env := newTestEnv(t)
+	esc := startUpgrade(t, env)
+	if esc.WorkItemID != "" {
+		t.Fatalf("WorkItemID = %q, want unbound at Start", esc.WorkItemID)
+	}
+	// A completion arriving before any binding is ignored: the
+	// completed turn-1 predates the upgrade.
+	env.advance(time.Minute)
+	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-early")); err != nil {
+		t.Fatalf("HandleReportDone() = %v", err)
+	}
+	got, _, _ := env.svc.Get(context.Background(), "sess-1")
+	if got.State != domain.TemporaryEscalationPending {
+		t.Fatalf("state = %q, want pending after unbound done", got.State)
+	}
+	// The first post-switch send creates turn-2; bind it.
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+	if err := env.svc.BindWorkItem(context.Background(), "sess-1", "turn-2"); err != nil {
+		t.Fatalf("BindWorkItem(turn-2) = %v", err)
+	}
+	got, _, _ = env.svc.Get(context.Background(), "sess-1")
+	if got.WorkItemID != "turn-2" {
+		t.Fatalf("WorkItemID = %q, want turn-2", got.WorkItemID)
+	}
+	// Re-binding the same turn is idempotent; binding a different turn
+	// is refused — the escalated task is fixed at the first send.
+	if err := env.svc.BindWorkItem(context.Background(), "sess-1", "turn-2"); err != nil {
+		t.Errorf("BindWorkItem(turn-2) again = %v, want nil", err)
+	}
+	if err := env.svc.BindWorkItem(context.Background(), "sess-1", "turn-3"); err == nil {
+		t.Error("BindWorkItem(turn-3) after binding turn-2 = nil, want error")
+	}
+	got, _, _ = env.svc.Get(context.Background(), "sess-1")
+	if got.WorkItemID != "turn-2" {
+		t.Fatalf("WorkItemID = %q after refused bind, want turn-2", got.WorkItemID)
+	}
+	// Full path: the bound turn's done, then idle, restores.
+	env.advance(time.Minute)
+	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+		t.Fatalf("HandleReportDone() = %v", err)
+	}
+	got, _, _ = env.svc.Get(context.Background(), "sess-1")
+	if got.State != domain.TemporaryEscalationAwaitingIdle {
+		t.Fatalf("state = %q, want awaiting_idle", got.State)
+	}
+	env.reader.setActivity("sess-1", domain.ActivityIdle)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+	if reverted, err := env.svc.MaybeRevert(context.Background(), "sess-1"); err != nil || !reverted {
+		t.Fatalf("MaybeRevert() = %v, %v, want true, nil", reverted, err)
+	}
+}
+
+func TestPersistedDoneReplayedAfterRestart(t *testing.T) {
+	t.Run("RecoverAfterRestart replays a persisted done", func(t *testing.T) {
+		env := newTestEnv(t)
+		startUpgradeWithTask(t, env, "turn-2")
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+		// Crash window: the report was committed to storage but the
+		// fire-and-forget HandleReportDone goroutine never ran.
+		env.reader.reports = map[domain.SessionID][]domain.ReportRecord{
+			"sess-1": {doneReport(env, "rpt-1")},
+		}
+		if err := env.svc.RecoverAfterRestart(context.Background()); err != nil {
+			t.Fatalf("RecoverAfterRestart() = %v", err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationReverted {
+			t.Fatalf("state = %q, want reverted after replay", esc.State)
+		}
+		rec, _, _ := env.reader.GetSession(context.Background(), "sess-1")
+		if rec.Harness != domain.HarnessCodex || rec.Metadata.Model != "mai-code-2" {
+			t.Fatalf("session = %s/%s, want codex/mai-code-2", rec.Harness, rec.Metadata.Model)
+		}
+		// Replay is idempotent: a second restart recovery is a no-op.
+		if err := env.svc.RecoverAfterRestart(context.Background()); err != nil {
+			t.Fatalf("second RecoverAfterRestart() = %v", err)
+		}
+	})
+	t.Run("Reconcile replays a persisted done", func(t *testing.T) {
+		env := newTestEnv(t)
+		startUpgradeWithTask(t, env, "turn-2")
+		env.reader.setActivity("sess-1", domain.ActivityActive)
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+		// Crash window: the report was committed to storage but the
+		// fire-and-forget HandleReportDone goroutine never ran.
+		env.reader.reports = map[domain.SessionID][]domain.ReportRecord{
+			"sess-1": {doneReport(env, "rpt-1")},
+		}
+		// The sweep replays the persisted done (arming it) but does
+		// not revert while the worker is busy.
+		if n, err := env.svc.Reconcile(context.Background()); err != nil || n != 0 {
+			t.Fatalf("Reconcile() while busy = %d, %v, want 0, nil", n, err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationAwaitingIdle {
+			t.Fatalf("state = %q, want awaiting_idle after replay", esc.State)
+		}
+		env.reader.setActivity("sess-1", domain.ActivityIdle)
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+		if n, err := env.svc.Reconcile(context.Background()); err != nil || n != 1 {
+			t.Fatalf("Reconcile() once idle = %d, %v, want 1, nil", n, err)
+		}
+	})
+}
+
+func TestRetryRevertRequiresIdle(t *testing.T) {
+	env := newTestEnv(t)
+	startUpgradeWithTask(t, env, "turn-2")
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+	env.switcher.failNext = 1
+	env.advance(time.Minute)
+	if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+		t.Fatalf("HandleReportDone() = %v", err)
+	}
+	esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+	if esc.State != domain.TemporaryEscalationFailed {
+		t.Fatalf("state = %q, want failed", esc.State)
+	}
+	switches := len(env.switcher.switches)
+	// Retry while the worker is active: refused, still failed, no switch.
+	env.reader.setActivity("sess-1", domain.ActivityActive)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+	if err := env.svc.RetryRevert(context.Background(), "sess-1"); !errors.Is(err, ErrEscalationNotIdle) {
+		t.Errorf("RetryRevert() while active = %v, want ErrEscalationNotIdle", err)
+	}
+	// Retry with a pending interaction: refused the same way.
+	env.reader.setActivity("sess-1", domain.ActivityIdle)
+	env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+	env.reader.pending["conv-1"] = true
+	if err := env.svc.RetryRevert(context.Background(), "sess-1"); !errors.Is(err, ErrEscalationNotIdle) {
+		t.Errorf("RetryRevert() with pending interaction = %v, want ErrEscalationNotIdle", err)
+	}
+	esc, _, _ = env.svc.Get(context.Background(), "sess-1")
+	if esc.State != domain.TemporaryEscalationFailed {
+		t.Errorf("state = %q after refused retries, want failed", esc.State)
+	}
+	if got := len(env.switcher.switches); got != switches {
+		t.Errorf("switches = %d, want %d (no switch started)", got, switches)
+	}
+	// Once idle, the explicit retry succeeds and stays retryable before.
+	delete(env.reader.pending, "conv-1")
+	if err := env.svc.RetryRevert(context.Background(), "sess-1"); err != nil {
+		t.Fatalf("RetryRevert() once idle = %v", err)
+	}
+	esc, _, _ = env.svc.Get(context.Background(), "sess-1")
+	if esc.State != domain.TemporaryEscalationReverted {
+		t.Fatalf("state = %q, want reverted", esc.State)
+	}
+}
+
+func TestDelayedRevertSupersededByNewerWork(t *testing.T) {
+	t.Run("newer turn takes over before the sweep", func(t *testing.T) {
+		env := newTestEnv(t)
+		startUpgradeWithTask(t, env, "turn-2")
+		env.reader.setActivity("sess-1", domain.ActivityActive)
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+		env.advance(time.Minute)
+		if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+			t.Fatalf("HandleReportDone() = %v", err)
+		}
+		// A newer turn starts and finishes before the reconciler runs.
+		env.reader.setActivity("sess-1", domain.ActivityIdle)
+		env.reader.setTurn("conv-1", "turn-3", domain.TurnStateCompleted)
+		if n, err := env.svc.Reconcile(context.Background()); err != nil || n != 0 {
+			t.Fatalf("Reconcile() = %d, %v, want 0, nil", n, err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationSuperseded {
+			t.Fatalf("state = %q, want superseded", esc.State)
+		}
+		rec, _, _ := env.reader.GetSession(context.Background(), "sess-1")
+		if rec.Harness != domain.HarnessClaudeCode || rec.Metadata.Model != "sol-6.2" {
+			t.Fatalf("session = %s/%s, want it still on claude-code/sol-6.2", rec.Harness, rec.Metadata.Model)
+		}
+		if got := len(env.switcher.switches); got != 1 {
+			t.Errorf("switches = %d, want 1 (upgrade only)", got)
+		}
+	})
+	t.Run("replaced controller generation takes over", func(t *testing.T) {
+		env := newTestEnv(t)
+		startUpgradeWithTask(t, env, "turn-2")
+		env.reader.setActivity("sess-1", domain.ActivityActive)
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+		env.advance(time.Minute)
+		if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+			t.Fatalf("HandleReportDone() = %v", err)
+		}
+		env.reader.setGeneration("sess-1", "gen-99")
+		env.reader.setActivity("sess-1", domain.ActivityIdle)
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+		if n, err := env.svc.Reconcile(context.Background()); err != nil || n != 0 {
+			t.Fatalf("Reconcile() = %d, %v, want 0, nil", n, err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationSuperseded {
+			t.Fatalf("state = %q, want superseded", esc.State)
+		}
+	})
+}
+
+func TestRestoreConfirmationChecksControllerSettings(t *testing.T) {
+	t.Run("cross-harness revert with wrong controller settings is not reverted", func(t *testing.T) {
+		env := newTestEnv(t)
+		startUpgradeWithTask(t, env, "turn-2")
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+		env.advance(time.Minute)
+		// The revert switch lands the session-level model but leaves
+		// the Chat controller on the upgraded settings.
+		env.switcher.preserveConvSettings = true
+		if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+			t.Fatalf("HandleReportDone() = %v", err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationFailed || esc.LastError == "" {
+			t.Fatalf("state = %q lastError = %q, want failed/nonempty", esc.State, esc.LastError)
+		}
+		// With the settings fixed, the explicit retry restores.
+		env.switcher.preserveConvSettings = false
+		if err := env.svc.RetryRevert(context.Background(), "sess-1"); err != nil {
+			t.Fatalf("RetryRevert() = %v", err)
+		}
+		esc, _, _ = env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationReverted {
+			t.Fatalf("state = %q, want reverted", esc.State)
+		}
+	})
+	t.Run("same-harness revert with wrong effort is not reverted", func(t *testing.T) {
+		env := newTestEnv(t)
+		if _, err := env.svc.Start(context.Background(), "sess-1", domain.ProviderSwitchRequest{
+			TargetHarness: domain.HarnessCodex, Model: "mai-code-3", Effort: "high",
+		}); err != nil {
+			t.Fatalf("Start() = %v", err)
+		}
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateRunning)
+		if err := env.svc.BindWorkItem(context.Background(), "sess-1", "turn-2"); err != nil {
+			t.Fatalf("BindWorkItem() = %v", err)
+		}
+		env.reader.setTurn("conv-1", "turn-2", domain.TurnStateCompleted)
+		env.advance(time.Minute)
+		// The revert leaves the Chat controller on the wrong effort.
+		env.switcher.preserveConvSettings = true
+		if err := env.svc.HandleReportDone(context.Background(), doneReport(env, "rpt-1")); err != nil {
+			t.Fatalf("HandleReportDone() = %v", err)
+		}
+		esc, _, _ := env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationFailed {
+			t.Fatalf("state = %q, want failed", esc.State)
+		}
+		env.switcher.preserveConvSettings = false
+		if err := env.svc.RetryRevert(context.Background(), "sess-1"); err != nil {
+			t.Fatalf("RetryRevert() = %v", err)
+		}
+		esc, _, _ = env.svc.Get(context.Background(), "sess-1")
+		if esc.State != domain.TemporaryEscalationReverted {
+			t.Fatalf("state = %q, want reverted", esc.State)
+		}
+	})
 }

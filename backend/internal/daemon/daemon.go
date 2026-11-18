@@ -759,7 +759,10 @@ func Run(buildVersion string) error {
 		// escalation service records the correlated done and reverts only
 		// once the worker is safely idle. Handle it off the report path:
 		// the revert switch can take a while and the report is often the
-		// worker's last tool call.
+		// worker's last tool call. If this goroutine never runs (daemon
+		// crash after the report commit), startup recovery and the
+		// reconciler replay the persisted Done report instead, so the
+		// completion is not lost.
 		if rec.State == domain.ReportDone {
 			go func() {
 				defer sentryobs.RecoverBackground()

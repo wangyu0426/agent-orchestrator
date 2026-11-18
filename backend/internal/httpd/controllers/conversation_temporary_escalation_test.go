@@ -27,6 +27,8 @@ type fakeTemporaryEscalationService struct {
 	cancelled bool
 	restored  bool
 	retried   bool
+	boundTurn string
+	bindErr   error
 }
 
 func (f *fakeTemporaryEscalationService) Start(_ context.Context, _ domain.SessionID, req domain.ProviderSwitchRequest) (*domain.TemporaryEscalation, error) {
@@ -36,6 +38,11 @@ func (f *fakeTemporaryEscalationService) Start(_ context.Context, _ domain.Sessi
 		return nil, f.startErr
 	}
 	return f.esc, nil
+}
+
+func (f *fakeTemporaryEscalationService) BindWorkItem(_ context.Context, _ domain.SessionID, turnID string) error {
+	f.boundTurn = turnID
+	return f.bindErr
 }
 
 func (f *fakeTemporaryEscalationService) Get(_ context.Context, _ domain.SessionID) (*domain.TemporaryEscalation, bool, error) {
@@ -157,6 +164,10 @@ func TestTemporaryProviderSwitchWithMessageSendsAfterStart(t *testing.T) {
 	}
 	if !esc.started || svc.sent.Text != "continue" {
 		t.Fatalf("started=%v sent=%+v", esc.started, svc.sent)
+	}
+	// The new turn created by the send is the escalated work item.
+	if esc.boundTurn != "turn-1" {
+		t.Fatalf("boundTurn = %q, want turn-1", esc.boundTurn)
 	}
 }
 
