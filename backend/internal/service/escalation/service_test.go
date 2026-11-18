@@ -353,7 +353,11 @@ func TestStartRefusals(t *testing.T) {
 			t.Errorf("Start() = %v, want ErrEscalationUnsupported", err)
 		}
 	})
-	t.Run("same-harness TUI", func(t *testing.T) {
+	// Same-harness TUI (including Codex exec workers) is unsupported in
+	// v1: a TUI model's launch choices only take effect at start and AO
+	// has no relaunch-with-new-model path. An Orchestrator call cannot
+	// bypass this; the gap is tracked as follow-up #11, not fixed here.
+	t.Run("same-harness TUI (Codex exec) is unsupported in v1", func(t *testing.T) {
 		env := newTestEnv(t)
 		env.reader.sessions["sess-1"] = func() domain.SessionRecord {
 			rec, _, _ := env.reader.GetSession(context.Background(), "sess-1")

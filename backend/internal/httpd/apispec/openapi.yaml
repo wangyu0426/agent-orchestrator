@@ -10554,6 +10554,12 @@ paths:
       - sessions
   /api/v1/sessions/{sessionId}/provider-switch:
     post:
+      description: 'With temporary=true this starts a backend-only slice of issue
+        #8: a one-shot temporary escalation that restores the original model after
+        correlated completion plus safe idle. Same-harness TUI/exec escalation is
+        unsupported, and there is no Orchestrator-driven integration yet — the endpoint
+        alone does not let a project Orchestrator request an escalation (follow-ups
+        #10, #11).'
       operationId: switchSessionProvider
       parameters:
       - description: Session identifier, e.g. project-1.
@@ -11489,6 +11495,9 @@ paths:
       - sessions
   /api/v1/sessions/{sessionId}/temporary-escalation:
     get:
+      description: 'Backend-only slice of issue #8. Same-harness TUI/exec escalation
+        is unsupported and Orchestrator-driven escalation is not integrated yet (follow-ups
+        #10, #11).'
       operationId: getTemporaryEscalation
       parameters:
       - description: Session identifier, e.g. project-1.
@@ -19666,6 +19675,11 @@ components:
         targetHarness:
           type: string
         temporary:
+          description: 'Backend-only slice of issue #8: temporary model escalation
+            for the current task only. Same-harness TUI/exec escalation is unsupported,
+            and no Orchestrator-driven integration exists yet — the endpoint alone
+            does not let a project Orchestrator request an escalation (follow-ups
+            #10, #11).'
           type: boolean
         ultracode:
           type: boolean

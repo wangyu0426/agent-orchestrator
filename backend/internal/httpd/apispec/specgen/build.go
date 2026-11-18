@@ -112,6 +112,9 @@ func Build() ([]byte, error) {
 		}
 		oc.SetID(op.id)
 		oc.SetSummary(op.summary)
+		if op.description != "" {
+			oc.SetDescription(op.description)
+		}
 		oc.SetTags(op.tag)
 		for _, param := range op.pathParams {
 			oc.AddReqStructure(param)
@@ -748,9 +751,13 @@ type respUnit struct {
 
 type operation struct {
 	method, path, id, summary string
-	tag                       string
-	pathParams                []any // path/query param containers (e.g. ProjectIDParam)
-	reqBody                   any   // JSON request body struct, nil when the op takes none
+	// description is the optional long-form operation description. Only set
+	// it where a summary cannot carry a scope/limitation the caller must
+	// see (for example, the temporary-escalation backend-only slice).
+	description string
+	tag         string
+	pathParams  []any // path/query param containers (e.g. ProjectIDParam)
+	reqBody     any   // JSON request body struct, nil when the op takes none
 	// optionalReqBody declares the body without marking it required, for the
 	// handlers that accept an empty body as a meaningful default.
 	optionalReqBody bool
@@ -1295,9 +1302,10 @@ func shellTerminalOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/provider-switch", id: "switchSessionProvider", tag: "conversations",
-			summary:    "Switch an idle Chat session to another provider",
-			pathParams: []any{controllers.SessionIDParam{}},
-			reqBody:    controllers.ProviderSwitchRequest{},
+			summary:     "Switch an idle Chat session to another provider",
+			description: "With temporary=true this starts a backend-only slice of issue #8: a one-shot temporary escalation that restores the original model after correlated completion plus safe idle. Same-harness TUI/exec escalation is unsupported, and there is no Orchestrator-driven integration yet — the endpoint alone does not let a project Orchestrator request an escalation (follow-ups #10, #11).",
+			pathParams:  []any{controllers.SessionIDParam{}},
+			reqBody:     controllers.ProviderSwitchRequest{},
 			resps: []respUnit{
 				{http.StatusOK, controllers.ProviderSwitchResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
@@ -1309,8 +1317,9 @@ func shellTerminalOperations() []operation {
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/temporary-escalation", id: "getTemporaryEscalation", tag: "conversations",
-			summary:    "Read a session's temporary model escalation, if any",
-			pathParams: []any{controllers.SessionIDParam{}},
+			summary:     "Read a session's temporary model escalation, if any",
+			description: "Backend-only slice of issue #8. Same-harness TUI/exec escalation is unsupported and Orchestrator-driven escalation is not integrated yet (follow-ups #10, #11).",
+			pathParams:  []any{controllers.SessionIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.TemporaryEscalationResponse{}},
 				{http.StatusInternalServerError, envelope.APIError{}},

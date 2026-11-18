@@ -3574,7 +3574,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Switch an idle Chat session to another provider */
+        /**
+         * Switch an idle Chat session to another provider
+         * @description With temporary=true this starts a backend-only slice of issue #8: a one-shot temporary escalation that restores the original model after correlated completion plus safe idle. Same-harness TUI/exec escalation is unsupported, and there is no Orchestrator-driven integration yet — the endpoint alone does not let a project Orchestrator request an escalation (follow-ups #10, #11).
+         */
         post: operations["switchSessionProvider"];
         delete?: never;
         options?: never;
@@ -3895,7 +3898,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read a session's temporary model escalation, if any */
+        /**
+         * Read a session's temporary model escalation, if any
+         * @description Backend-only slice of issue #8. Same-harness TUI/exec escalation is unsupported and Orchestrator-driven escalation is not integrated yet (follow-ups #10, #11).
+         */
         get: operations["getTemporaryEscalation"];
         put?: never;
         post?: never;
@@ -6872,6 +6878,7 @@ export interface components {
             /** @enum {string} */
             permissionMode?: "default" | "accept-edits" | "auto" | "bypass-permissions";
             targetHarness: string;
+            /** @description Backend-only slice of issue #8: temporary model escalation for the current task only. Same-harness TUI/exec escalation is unsupported, and no Orchestrator-driven integration exists yet — the endpoint alone does not let a project Orchestrator request an escalation (follow-ups #10, #11). */
             temporary?: boolean;
             ultracode?: boolean;
         };

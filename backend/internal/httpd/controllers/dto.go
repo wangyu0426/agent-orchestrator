@@ -2922,8 +2922,12 @@ type ProviderSwitchRequest struct {
 	// Temporary marks a manual temporary model escalation (issue #8): the
 	// session switches for the current task only and AO restores the
 	// original model automatically once the task completes and the worker
-	// is safely idle. A permanent switch leaves this unset.
-	Temporary bool `json:"temporary,omitempty"`
+	// is safely idle. A permanent switch leaves this unset. This is a
+	// backend-only slice of #8: same-harness TUI/exec escalation is
+	// unsupported, and there is no Orchestrator-driven integration yet —
+	// the endpoint alone does not let a project Orchestrator request an
+	// escalation (follow-ups #10 and #11).
+	Temporary bool `json:"temporary,omitempty" description:"Backend-only slice of issue #8: temporary model escalation for the current task only. Same-harness TUI/exec escalation is unsupported, and no Orchestrator-driven integration exists yet — the endpoint alone does not let a project Orchestrator request an escalation (follow-ups #10, #11)."`
 	// Message is sent to the new agent as its first turn once the switch
 	// completes, in the same request. Attachments are sent separately.
 	Message *SendConversationMessageRequest `json:"message,omitempty"`
@@ -2940,9 +2944,11 @@ type ProviderSwitchResponse struct {
 }
 
 // TemporaryEscalationResponse is the read model for one manual temporary
-// model escalation (issue #8). Status is "none" when the session never
-// had one; otherwise it is the escalation state (pending, awaiting_idle,
-// reverting, reverted, failed, superseded, cancelled).
+// model escalation (issue #8, backend-only slice). Status is "none" when
+// the session never had one; otherwise it is the escalation state (pending,
+// awaiting_idle, reverting, reverted, failed, superseded, cancelled).
+// Same-harness TUI/exec escalation is unsupported and there is no
+// Orchestrator-driven integration yet (follow-ups #10 and #11).
 type TemporaryEscalationResponse struct {
 	Status          string     `json:"status"`
 	SessionID       string     `json:"sessionId,omitempty"`
