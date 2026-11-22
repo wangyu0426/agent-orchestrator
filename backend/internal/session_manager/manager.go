@@ -404,6 +404,10 @@ type Manager struct {
 	store     Store
 	// agentReadiness is late-bound by SetAgentReadiness.
 	agentReadiness ports.AgentReadinessProvider
+	// manualSwitchObserver hears explicit owner provider switches (never
+	// the escalation service's own switches) so a pending temporary
+	// escalation can be superseded by a newer choice.
+	manualSwitchObserver domain.ManualSwitchObserver
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -581,6 +585,12 @@ func (m *Manager) workspaceGate(projectID domain.ProjectID) *sync.Mutex {
 // Spawn rollback must release its project's gate before untimed cleanup.
 // OnceFunc makes the enclosing spawn's deferred release safe after that handoff.
 type spawnWorkspaceGateKey struct{}
+
+// SetManualSwitchObserver installs the late-bound observer for explicit
+// owner provider switches after daemon wiring.
+func (m *Manager) SetManualSwitchObserver(observer domain.ManualSwitchObserver) {
+	m.manualSwitchObserver = observer
+}
 
 // SetHarnessUseGate late-binds the installer interlock after daemon wiring.
 func (m *Manager) SetHarnessUseGate(gate HarnessUseGate) {
