@@ -162,3 +162,16 @@ Commit `openapi.yaml` and `frontend/src/api/schema.ts` together with the Go chan
 - Use conventional commit messages (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
 - Explain intentional omissions in the PR body, especially when the TypeScript original had more behavior than the Go rewrite domain currently supports.
 - Run the narrowest relevant tests first, then the repo/CI commands that match the touched area.
+
+## Engineering memory and review scope
+
+- Read the root instructions and any applicable nested AGENTS.md before changing a module; explicitly read them if the worker provider does not discover nested guidance.
+- Preserve existing contracts, mandatory checks, and security/approval boundaries. A review finding is blocking only when it identifies a material defect, an explicit acceptance criterion violation, or a required failing check, with concrete evidence. Keep ordinary cleanup, preferences, optional additional coverage, and proposed engineering-memory rules advisory; do not hold a PR in Draft or stop unrelated queued work solely for them.
+- When a failure is recurring or high impact, propose a short scoped rule with its rationale, issue/PR/test/contract evidence (or explicit owner decision), and verification method. Prefer executable regressions where feasible. Submit memory changes separately for owner review; do not automatically modify instructions, merge, or expand the feature's scope.
+- Keep instructions compact and remove obsolete rules when the source contract changes. No credentials or private context in instructions; do not unintentionally package developer-only files in releases.
+
+### Orchestrator-specific guidance
+
+- Respect the existing lifecycle rule: failed or unknown runtime probes are not proof of death. Distinguish idle, waiting, probe unavailable, and confirmed exit using durable lifecycle evidence; do not reap on inference alone. Exercise a regression for any newly identified false-death path.
+- Keep provider capabilities and lifecycle adapters behind existing ports. Do not move orchestration or review policy into the frontend, or refactor provider interfaces merely to adopt engineering-memory guidance.
+- Record advisory findings without changing runtime review gates, dispatch authority, or session state. Changes to automated review behavior require a separately scoped implementation task and verification.
