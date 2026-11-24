@@ -16,29 +16,30 @@ func automaticQuotaWorker(cfg ports.SpawnConfig) bool {
 		cfg.AgentConfig.Mode == "" && cfg.AgentConfig.Effort == "" && !cfg.EffortOverride && !cfg.AgentConfigResolved
 }
 
-func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectConfig) ([]workerquota.Target, error) {
+func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectRecord) ([]workerquota.Target, error) {
 	policy := m.workerQuota
 	if policy == nil || !automaticQuotaWorker(*cfg) {
 		return nil, nil
 	}
-	harness := effectiveHarness("", cfg.Kind, *project)
-	base := effectiveAgentConfig(harness, cfg.Kind, *project)
+	harness := effectiveHarness("", cfg.Kind, project.Config)
+	base := effectiveAgentConfig(harness, cfg.Kind, project.Config)
 	primary := workerquota.Target{Harness: harness, Model: base.Model, Effort: base.Effort}
 	targets := policy.Targets(primary)
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	windows := m.workerQuotaWindows(ctx, targets)
+	defaults := policy.DefaultModels(ctx, *project, targets)
+	windows := m.workerQuotaWindows(ctx, targets, defaults)
 	var selected workerquota.Target
 	var remaining []workerquota.Target
 	var blocked bool
-	for i, target := range targets {
-		if _, ok := workerquota.Select([]workerquota.Target{target}, windows, m.clock()); !ok {
+	for i, route := range targets {
+		if _, ok := workerquota.Select([]workerquota.Target{route}, windows, m.clock()); !ok {
 			blocked = true
 			continue
 		}
-		if target == primary || m.quotaTargetReady(ctx, target, *project, *cfg) {
-			selected, remaining = target, targets[i+1:]
+		if route == primary || m.quotaTargetReady(ctx, route, project.Config, *cfg) {
+			selected, remaining = route, targets[i+1:]
 			break
 		}
 	}
@@ -57,14 +58,18 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 		cfg.EffortOverride = selected.Effort != ""
 		// Remove provider-specific inherited tuning from this copy of the
 		// project while preserving worker permissions and other project rules.
-		project.AgentConfig.Model, project.AgentConfig.Effort, project.AgentConfig.Mode = "", "", ""
-		project.Worker.AgentConfig.Model, project.Worker.AgentConfig.Effort, project.Worker.AgentConfig.Mode = "", "", ""
+		project.Config.AgentConfig.Model, project.Config.AgentConfig.Effort, project.Config.AgentConfig.Mode = "", "", ""
+		project.Config.Worker.AgentConfig.Model, project.Config.Worker.AgentConfig.Effort, project.Config.Worker.AgentConfig.Mode = "", "", ""
 		m.logger.Info("worker quota selected configured route", "project", cfg.ProjectID, "harness", selected.Harness, "model", selected.Model, "effort", selected.Effort)
+	}
+	if selected.Model == "" && defaults[selected.Harness] != "" {
+		cfg.AgentConfig.Model = defaults[selected.Harness]
+		cfg.AgentConfig.Effort = selected.Effort
 	}
 	return remaining, nil
 }
 
-func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.Target) map[workerquota.Target][]workerquota.Window {
+func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.Target, defaults map[domain.AgentHarness]string) map[workerquota.Target][]workerquota.Window {
 	now := m.clock()
 	var failures []workerquota.Failure
 	if store, ok := m.store.(interface {
@@ -76,7 +81,7 @@ func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.
 			m.logger.Warn("worker quota failure records unavailable", "error", err)
 		}
 	}
-	windows, err := m.workerQuota.Windows(ctx, targets, failures, now)
+	windows, err := m.workerQuota.Windows(ctx, targets, failures, now, defaults)
 	if err != nil {
 		m.logger.Debug("worker quota source unavailable", "error", err)
 	}

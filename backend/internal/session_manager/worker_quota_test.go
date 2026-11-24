@@ -38,8 +38,9 @@ func TestWorkerQuotaSpawnPreservesExplicitOverrides(t *testing.T) {
 	automatic := ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", IssueID: "github:org/repo#14", CreatedBy: domain.SessionCreatedByAutomation}
 	apply := func(cfg ports.SpawnConfig) (ports.SpawnConfig, domain.ProjectConfig, []workerquota.Target, error) {
 		settings := project
-		remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &settings)
-		return cfg, settings, remaining, err
+		record := domain.ProjectRecord{ID: "project", Config: settings}
+		remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &record)
+		return cfg, record.Config, remaining, err
 	}
 	if cfg, _, remaining, err := apply(automatic); err != nil || remaining != nil || cfg.Harness != automatic.Harness || cfg.IssueID != automatic.IssueID {
 		t.Fatalf("disabled policy changed spawn: %+v, %v, %v", cfg, remaining, err)
@@ -66,4 +67,62 @@ func TestWorkerQuotaSpawnPreservesExplicitOverrides(t *testing.T) {
 	if cfg, _, remaining, err := apply(automatic); err != nil || !slices.Equal(remaining, []workerquota.Target{agy, codexFallback}) || cfg.Harness != "" {
 		t.Fatalf("primary not restored: %+v, %v, %v", cfg, remaining, err)
 	}
+}
+
+type quotaEvidenceStore struct {
+	Store
+	failures []workerquota.Failure
+}
+
+func (s quotaEvidenceStore) WorkerQuotaFailures(context.Context, time.Time) ([]workerquota.Failure, error) {
+	return s.failures, nil
+}
+
+func TestWorkerQuotaOmittedModelUsesResolvedNativeEvidence(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(time.Minute)
+	codexModel := "codex-concrete-default"
+	computerLogin := true
+	fallback := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini"}
+	policy := &workerquota.Policy{
+		Fallbacks:     []workerquota.Target{fallback},
+		ComputerLogin: func(context.Context, domain.AgentHarness) bool { return computerLogin },
+		DiscoverDefaultModel: func(_ context.Context, project domain.ProjectRecord, harness domain.AgentHarness) string {
+			if project.ID != "project" || harness != domain.HarnessCodex {
+				t.Fatalf("default discovery has wrong scope: %s/%s", project.ID, harness)
+			}
+			return codexModel
+		},
+	}
+	manager := &Manager{
+		workerQuota: policy, clock: func() time.Time { return now }, logger: slog.New(slog.DiscardHandler), agents: fakeAgents{},
+		store: quotaEvidenceStore{failures: []workerquota.Failure{{
+			Target: workerquota.Target{Harness: domain.HarnessCodex, Model: codexModel},
+			At:     now.Add(-time.Minute), ResetAt: reset, Scope: "computer login",
+		}}},
+	}
+	selectRoute := func(wantHarness domain.AgentHarness, wantModel string) {
+		t.Helper()
+		cfg := ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", CreatedBy: domain.SessionCreatedByAutomation}
+		project := domain.ProjectRecord{ID: "project", Config: domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex}}}
+		if remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &project); err != nil || remaining == nil {
+			t.Fatalf("admission: remaining=%v err=%v", remaining, err)
+		}
+		harness := effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
+		if harness != wantHarness || cfg.AgentConfig.Model != wantModel {
+			t.Fatalf("selected harness/model %s/%q, want %s/%q", harness, cfg.AgentConfig.Model, wantHarness, wantModel)
+		}
+	}
+
+	selectRoute(domain.HarnessAgy, fallback.Model)
+	computerLogin = false
+	selectRoute(domain.HarnessCodex, codexModel)
+	computerLogin = true
+	codexModel = ""
+	selectRoute(domain.HarnessCodex, "")
+	codexModel = "different-default"
+	selectRoute(domain.HarnessCodex, codexModel)
+	codexModel = "codex-concrete-default"
+	now = reset
+	selectRoute(domain.HarnessCodex, codexModel)
 }

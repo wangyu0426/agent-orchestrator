@@ -50,10 +50,11 @@ func Select(targets []Target, windows map[Target][]Window, now time.Time) (Targe
 
 // Policy applies one ordered worker configuration across projects.
 type Policy struct {
-	Primary       *Target
-	Fallbacks     []Target
-	Source        Source
-	ComputerLogin func(context.Context, domain.AgentHarness) bool
+	Primary              *Target
+	Fallbacks            []Target
+	Source               Source
+	ComputerLogin        func(context.Context, domain.AgentHarness) bool
+	DiscoverDefaultModel func(context.Context, domain.ProjectRecord, domain.AgentHarness) string
 }
 
 // Targets preserves the first occurrence of each launch choice.
@@ -91,10 +92,24 @@ type Failure struct {
 	Scope   string // durable AO account scope; empty disables new-worker admission evidence
 }
 
+// DefaultModels resolves each omitted model at most once per decision.
+func (p *Policy) DefaultModels(ctx context.Context, project domain.ProjectRecord, targets []Target) map[domain.AgentHarness]string {
+	if p.DiscoverDefaultModel == nil {
+		return nil
+	}
+	defaults := make(map[domain.AgentHarness]string)
+	for _, target := range targets {
+		if _, seen := defaults[target.Harness]; target.Model == "" && !seen {
+			defaults[target.Harness] = p.DiscoverDefaultModel(ctx, project, target.Harness)
+		}
+	}
+	return defaults
+}
+
 // Windows reads the optional Quotum snapshot and durable native reset evidence.
 // Quotum bindings describe the computer login only. Saved accounts may use the
 // same model name while consuming a different quota.
-func (p *Policy) Windows(ctx context.Context, targets []Target, failures []Failure, now time.Time) (map[Target][]Window, error) {
+func (p *Policy) Windows(ctx context.Context, targets []Target, failures []Failure, now time.Time, defaults map[domain.AgentHarness]string) (map[Target][]Window, error) {
 	bound := make([]Target, 0, len(targets))
 	for _, target := range targets {
 		if p.ComputerLogin == nil || p.ComputerLogin(ctx, target.Harness) {
@@ -113,8 +128,12 @@ func (p *Policy) Windows(ctx context.Context, targets []Target, failures []Failu
 		}
 	}
 	for _, target := range bound {
+		model := target.Model
+		if model == "" {
+			model = defaults[target.Harness]
+		}
 		for _, f := range failures {
-			if f.Scope != "" && f.Target.Harness == target.Harness && f.Target.Model == target.Model && f.ResetAt.After(now) {
+			if f.Scope != "" && model != "" && f.Target.Harness == target.Harness && f.Target.Model == model && f.ResetAt.After(now) {
 				windows[target] = append(windows[target], Window{ObservedAt: f.At, ValidUntil: f.ResetAt, ResetAt: f.ResetAt, Exhausted: true})
 			}
 		}

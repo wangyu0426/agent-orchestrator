@@ -103,12 +103,22 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 			eligible = append(eligible, t)
 		}
 	}
+	var defaults map[domain.AgentHarness]string
+	if s.policy.DiscoverDefaultModel != nil && len(eligible) > 0 {
+		project, found, err := s.store.GetProject(ctx, string(rec.ProjectID))
+		if err != nil {
+			return err
+		}
+		if found {
+			defaults = s.policy.DefaultModels(ctx, project, eligible)
+		}
+	}
 	now := time.Now()
 	failures, err := s.store.WorkerQuotaFailures(ctx, now)
 	if err != nil {
 		return err
 	}
-	windows, err := s.policy.Windows(ctx, eligible, failures, now)
+	windows, err := s.policy.Windows(ctx, eligible, failures, now, defaults)
 	if err != nil {
 		s.log.Debug("worker quota source unavailable", "error", err)
 	}
@@ -124,6 +134,9 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 	}
 	if target.Harness == "" {
 		return s.park(ctx, rec, turn, failure.At, "no eligible fallback provider")
+	}
+	if target.Model == "" {
+		target.Model = defaults[target.Harness]
 	}
 	attempt := "worker-quota:" + string(rec.ID)
 	claimed, err := s.store.ClaimWorkerQuotaAttempt(ctx, rec.ID, attempt, target)

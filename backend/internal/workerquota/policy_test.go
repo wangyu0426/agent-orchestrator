@@ -51,7 +51,7 @@ func TestWorkerQuotaNativeEvidenceUsesItsAccountAndReset(t *testing.T) {
 		return nil, errors.New("unreachable")
 	})}
 	evidence := []Failure{{Target: Target{Harness: domain.HarnessCodex, Model: "a"}, At: now.Add(-time.Minute), ResetAt: now.Add(time.Minute), Scope: "computer login"}}
-	windows, err := policy.Windows(context.Background(), []Target{target}, evidence, now)
+	windows, err := policy.Windows(context.Background(), []Target{target}, evidence, now, nil)
 	if err == nil {
 		t.Fatal("source outage was hidden")
 	}
@@ -59,7 +59,7 @@ func TestWorkerQuotaNativeEvidenceUsesItsAccountAndReset(t *testing.T) {
 		t.Fatal("native evidence was lost during outage")
 	}
 	policy.ComputerLogin = func(context.Context, domain.AgentHarness) bool { return false }
-	windows, _ = policy.Windows(context.Background(), []Target{target}, evidence, now)
+	windows, _ = policy.Windows(context.Background(), []Target{target}, evidence, now, nil)
 	if _, ok := Select([]Target{target}, windows, now); !ok {
 		t.Fatal("computer login quota blocked a different account")
 	}

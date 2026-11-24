@@ -1143,7 +1143,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		cfg.AgentConfig.Permissions = permissions
 	}
-	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project.Config)
+	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project)
 	if quotaErr != nil {
 		return domain.SessionRecord{}, 0, 0, quotaErr
 	}

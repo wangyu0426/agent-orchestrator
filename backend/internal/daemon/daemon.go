@@ -714,6 +714,23 @@ func Run(buildVersion string) (retErr error) {
 		cfg.WorkerQuota.ComputerLogin = func(ctx context.Context, harness domain.AgentHarness) bool {
 			return agentAccountSvc.RunsOnComputerLogin(ctx, harness, "")
 		}
+		cfg.WorkerQuota.DiscoverDefaultModel = func(ctx context.Context, project domain.ProjectRecord, harness domain.AgentHarness) string {
+			if harness != domain.HarnessCodex || project.Path == "" {
+				return ""
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			login, err := agentAccountSvc.DefaultLaunchEnv(probeCtx, harness)
+			if err != nil {
+				return ""
+			}
+			env := agentlaunch.MergeEnv(project.Config.Env, login)
+			model, err := codexModelDriver.DiscoverDefaultModel(probeCtx, project.Path, env)
+			if err != nil {
+				log.Debug("worker quota default model unavailable", "project", project.ID, "harness", harness)
+			}
+			return model
+		}
 	}
 	chatSvc.SetUsageLimitAccounts(agentAccountSvc)
 	if mover, ok := wiredSessMgr.(chatsvc.AccountHandoffMover); ok {

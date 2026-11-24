@@ -24,7 +24,10 @@ export AO_WORKER_QUOTA_PRIMARY='{"harness":"codex","model":"your-codex-model-id"
 
 AO can run without Quotum. A confirmed Codex Chat refusal with a known
 rolling reset can defer new work for the same model on the computer login.
-With no confirmed quota evidence a route remains eligible. A missing reading,
+For an omitted Codex model, AO reads the configured default from an ephemeral
+read-only thread and pins that concrete model for the launch. If discovery
+cannot identify the model, native evidence for a specific model leaves that
+route eligible. With no confirmed quota evidence a route remains eligible. A missing reading,
 stale snapshot, expired window, authentication error, transport error, or
 transient throttle is treated as unknown quota.
 
