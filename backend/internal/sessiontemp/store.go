@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	manifestName      = ".ao-session-temp.json"
-	manifestVersion   = 1
+	manifestName    = ".ao-session-temp.json"
+	manifestVersion = 1
+	// DefaultBatchLimit bounds the number of directories collected per GC pass.
 	DefaultBatchLimit = 64
 	maxBatchLimit     = 256
 	DefaultRetention  = 7 * 24 * time.Hour

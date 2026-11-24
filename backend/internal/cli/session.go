@@ -1276,6 +1276,9 @@ func (c *commandContext) collectSessionTemp(ctx context.Context, cmd *cobra.Comm
 	if err := printSessionTempGC(cmd, result); err != nil {
 		return err
 	}
+	if result.ReclaimedBytes < 0 {
+		return fmt.Errorf("session temp GC returned negative reclaimed bytes: %d", result.ReclaimedBytes)
+	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Reclaimed %s from %d session temp director%s.\n", formatBytes(uint64(result.ReclaimedBytes)), result.Removed, pluralY(result.Removed))
 	return err
 }
