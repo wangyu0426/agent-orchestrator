@@ -28,7 +28,8 @@ const (
 	// DefaultBatchLimit bounds the number of directories collected per GC pass.
 	DefaultBatchLimit = 64
 	maxBatchLimit     = 256
-	DefaultRetention  = 7 * 24 * time.Hour
+	// DefaultRetention is the minimum age of confirmed-exited session temp data before collection.
+	DefaultRetention = 7 * 24 * time.Hour
 )
 
 // Owner is the durable identity and age of one session temp directory.
