@@ -74,6 +74,7 @@ async function heldHarness(page: Page, platform: (typeof PLATFORMS)[number] = PL
 		};
 	});
 	const chunks = new Map(sessions.map((session) => [session.id, 1]));
+	let streamingSessionId = sessions[0].id;
 	const drafts: { sessionId: string; text: string }[] = [];
 	const requests: { sessionId: string; sent: number; answered?: number }[] = [];
 	await page.route("**/api/v1/sessions/held-*/**", async (route) => {
@@ -105,13 +106,18 @@ async function heldHarness(page: Page, platform: (typeof PLATFORMS)[number] = PL
 	return {
 		drafts,
 		requests,
-		/** Grows every session's reply and tells the app, as the daemon does while agents stream. */
+		/** Selects the visible session that keeps streaming while its replacement renders. */
+		streamSession(sessionId: string) {
+			streamingSessionId = sessionId;
+		},
+		/** Grows the held session's reply and tells the app, as the daemon does while agents stream. */
 		startStreaming() {
 			streaming = setInterval(() => {
 				// Bound CDP delivery while the throttled page is busy.
 				if (dispatching) return;
 				dispatching = true;
-				for (const session of sessions) chunks.set(session.id, (chunks.get(session.id) ?? 1) + 1);
+				const sessionId = streamingSessionId;
+				chunks.set(sessionId, (chunks.get(sessionId) ?? 1) + 1);
 				void page.evaluate((ids) => {
 					const sources = (window as unknown as { __heldSources: { url: string; readyState: number; _dispatch: (type: string, data: string) => void }[] }).__heldSources;
 					for (const source of sources) {
@@ -120,7 +126,7 @@ async function heldHarness(page: Page, platform: (typeof PLATFORMS)[number] = PL
 							source._dispatch("session_updated", JSON.stringify({ seq: Date.now(), projectId: "fake-proj", sessionId: id, type: "session_updated", payload: { conversationId: `conversation-${id}` }, createdAt: new Date().toISOString() }));
 						}
 					}
-				}, sessions.map((session) => session.id)).catch(() => undefined).finally(() => { dispatching = false; });
+				}, [sessionId]).catch(() => undefined).finally(() => { dispatching = false; });
 			}, 120);
 		},
 		stop() {
@@ -245,6 +251,7 @@ test("renderer: streaming replies keep updating through rapid session switches @
 			const shownAt = frames.find((frame) => frame.log === session.title)?.at ?? Infinity;
 			expect(frames.filter((frame) => frame.at > shownAt && frame.log === previous.title), report).toEqual([]);
 			previous = session;
+			harness.streamSession(previous.id);
 			// The shown session keeps streaming after the switch. Its reply grows
 			// faster than a throttled dev build repaints it, so wait for the
 			// shown reply to advance rather than to catch up with the stream.
