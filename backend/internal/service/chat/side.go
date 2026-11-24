@@ -878,19 +878,22 @@ func (s *Service) RetrySideConnection(ctx context.Context, session domain.Sessio
 }
 
 func (m *sideManager) restore(ctx context.Context, side domain.SideConversation) {
+	connected := false
+	failure := errors.New("side provider could not resume; retry the connection")
 	defer func() {
+		if !connected && m.ctx.Err() == nil {
+			m.failOpen(side, failure)
+		}
+	}()
+	defer func() {
+		// Make a failed side retryable before publishing its failed state. The
+		// failure announcement can wake a caller that immediately retries.
 		m.mu.Lock()
 		if cancel := m.restoring[side.ID]; cancel != nil {
 			cancel()
 		}
 		delete(m.restoring, side.ID)
 		m.mu.Unlock()
-	}()
-	connected := false
-	defer func() {
-		if !connected && m.ctx.Err() == nil {
-			m.failOpen(side, errors.New("side provider could not resume; retry the connection"))
-		}
 	}()
 	var source *Controller
 	var err error
@@ -927,8 +930,7 @@ func (m *sideManager) restore(ctx context.Context, side domain.SideConversation)
 	}
 	if err := m.reconcileRestoredTurns(ctx, side, conv); err != nil {
 		_ = conv.Close()
-		m.failOpen(side, err)
-		connected = true
+		failure = err
 		return
 	}
 	if activator, ok := conv.(ports.ChatLiveReconnectActivator); ok {
@@ -943,9 +945,7 @@ func (m *sideManager) restore(ctx context.Context, side domain.SideConversation)
 		if err := activator.ActivateLiveReconnect(ctx, activeProviderID); err != nil {
 			_ = conv.Close()
 			m.service.log.Warn("side provider replay activation failed", "side", side.ID, "error", err)
-			_ = m.store.SetSideFailed(context.Background(), side.ID, side.Generation,
-				"Side provider could not resume; close and reopen the side chat.", m.service.now())
-			m.announce(side.ID)
+			failure = errors.New("Side provider could not resume; close and reopen the side chat.")
 			return
 		}
 	}
