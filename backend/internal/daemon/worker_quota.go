@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,7 +22,7 @@ type workerQuotaChat interface {
 	QuotaFailure(context.Context, domain.SessionRecord) (domain.ConversationTurn, error)
 	SupportsChat(domain.AgentHarness) bool
 	QuotaTargetReady(context.Context, domain.SessionID, domain.AgentHarness) bool
-	SwitchProviderAndSend(context.Context, domain.SessionID, domain.ProviderSwitchRequest, ports.ChatUserMessage) (domain.ConversationTurn, bool, error)
+	SwitchQuotaProviderAndSend(context.Context, domain.SessionID, domain.ProviderSwitchRequest, ports.ChatUserMessage, func(context.Context) error) (domain.ConversationTurn, bool, error)
 	ParkQuotaChat(context.Context, domain.SessionRecord, string) (bool, error)
 }
 
@@ -140,8 +141,11 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 		target.Model = defaults[target.Harness]
 	}
 	attempt := "worker-quota:" + string(rec.ID)
-	claimed, err := s.store.ClaimWorkerQuotaAttempt(ctx, rec.ID, attempt, target)
-	if err != nil || !claimed {
+	reserve := func(ctx context.Context) error {
+		claimed, err := s.store.ClaimWorkerQuotaAttempt(ctx, rec.ID, attempt, target, rec.Metadata.Model)
+		if err == nil && !claimed {
+			return domain.ErrQuotaSourceChanged
+		}
 		return err
 	}
 	owner := rec.ControllerOwner()
@@ -149,10 +153,14 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 		TargetHarness: target.Harness, Model: target.Model, Effort: target.Effort, IdempotencyKey: attempt, ExpectedSource: &owner,
 	}
 	request.ExpectedQuotaTurnID = turn.ID
-	_, switched, err := s.chat.SwitchProviderAndSend(ctx, rec.ID, request, ports.ChatUserMessage{
+	request.ExpectedSourceModel = rec.Metadata.Model
+	_, switched, err := s.chat.SwitchQuotaProviderAndSend(ctx, rec.ID, request, ports.ChatUserMessage{
 		ClientMessageID: attempt, Origin: domain.MessageOriginAutomation,
 		Text: "Continue the current task using the handoff context and the existing workspace. Inspect the work already done before making changes.",
-	})
+	}, reserve)
+	if errors.Is(err, domain.ErrQuotaSourceChanged) {
+		return nil
+	}
 	if err != nil && switched {
 		return s.reason(context.WithoutCancel(ctx), rec.ID, "fallback selected; send a continuation message to resume")
 	}
@@ -196,6 +204,9 @@ func (s workerQuotaSweep) park(ctx context.Context, rec domain.SessionRecord, tu
 		parked, err = s.chat.ParkQuotaChat(ctx, rec, turn.ID)
 	} else if s.terminal != nil {
 		parked, err = s.terminal.ParkQuotaTUI(ctx, rec, at)
+	}
+	if errors.Is(err, domain.ErrQuotaSourceChanged) {
+		return nil
 	}
 	action := "left at its failed turn"
 	if parked {

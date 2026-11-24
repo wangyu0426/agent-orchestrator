@@ -29,7 +29,9 @@ read-only thread and pins that concrete model for the launch. If discovery
 cannot identify the model, native evidence for a specific model leaves that
 route eligible. With no confirmed quota evidence a route remains eligible. A missing reading,
 stale snapshot, expired window, authentication error, transport error, or
-transient throttle is treated as unknown quota.
+transient throttle is treated as unknown quota. If none of the configured routes can launch, AO
+reports that no route is ready. An AO-wide primary override replaces the
+project default in the admission policy.
 
 ### Optional Quotum hub
 

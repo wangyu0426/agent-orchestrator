@@ -34,9 +34,9 @@ func (s *Store) WorkerQuotaSessions(ctx context.Context) ([]workerquota.Session,
 }
 
 // ClaimWorkerQuotaAttempt atomically reserves the worker's automatic handoff.
-func (s *Store) ClaimWorkerQuotaAttempt(ctx context.Context, id domain.SessionID, attempt string, target workerquota.Target) (bool, error) {
+func (s *Store) ClaimWorkerQuotaAttempt(ctx context.Context, id domain.SessionID, attempt string, target workerquota.Target, expectedModel string) (bool, error) {
 	rows, err := s.qw.ClaimWorkerQuotaAttempt(ctx, gen.ClaimWorkerQuotaAttemptParams{
-		SessionID: string(id), AttemptOwner: attempt, TargetHarness: string(target.Harness), TargetModel: target.Model,
+		SessionID: string(id), AttemptOwner: attempt, TargetHarness: string(target.Harness), TargetModel: target.Model, ExpectedModel: expectedModel,
 	})
 	return rows != 0, err
 }

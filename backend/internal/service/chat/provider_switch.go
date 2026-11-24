@@ -50,14 +50,24 @@ func (s *Service) SwitchProvider(ctx context.Context, id domain.SessionID, reque
 		return err
 	}
 	defer unlock()
-	return s.switchProvider(ctx, id, request)
+	return s.switchProvider(ctx, id, request, nil)
 }
 
 // SwitchProviderAndSend switches, then sends msg to the agent it switched to:
 // no other switch runs between the two. A message already delivered is not
 // switched for again, so its retry cannot take the chat back from a later
 // switch. switched says the chat is on the target, so a failure is the send's.
-func (s *Service) SwitchProviderAndSend(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest, msg ports.ChatUserMessage) (turn domain.ConversationTurn, switched bool, err error) {
+func (s *Service) SwitchProviderAndSend(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest, msg ports.ChatUserMessage) (domain.ConversationTurn, bool, error) {
+	return s.switchProviderAndSend(ctx, id, request, msg, nil)
+}
+
+// SwitchQuotaProviderAndSend reserves the automatic attempt after fencing the
+// source and rechecking its model, immediately before stopping the provider.
+func (s *Service) SwitchQuotaProviderAndSend(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest, msg ports.ChatUserMessage, reserve func(context.Context) error) (domain.ConversationTurn, bool, error) {
+	return s.switchProviderAndSend(ctx, id, request, msg, reserve)
+}
+
+func (s *Service) switchProviderAndSend(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest, msg ports.ChatUserMessage, reserve func(context.Context) error) (turn domain.ConversationTurn, switched bool, err error) {
 	if err := validateFileReferenceContent(msg, string(id)); err != nil {
 		return turn, false, err
 	}
@@ -74,7 +84,7 @@ func (s *Service) SwitchProviderAndSend(ctx context.Context, id domain.SessionID
 		// A retry after the switch went through finds the target already active,
 		// and so does a window that picked the agent another one already brought
 		// in. Either way the message runs with what its sender picked.
-		if err := s.switchProvider(ctx, id, request); errors.Is(err, domain.ErrProviderAlreadyActive) {
+		if err := s.switchProvider(ctx, id, request, reserve); reserve == nil && errors.Is(err, domain.ErrProviderAlreadyActive) {
 			if err := s.applyPicksToActiveTarget(ctx, id, request); err != nil {
 				return turn, false, err
 			}
@@ -143,12 +153,14 @@ func (s *Service) messageDelivered(ctx context.Context, id domain.SessionID, cli
 	return found, err
 }
 
-func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest) error {
+func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, request domain.ProviderSwitchRequest, reserve func(context.Context) error) error {
 	if request.TargetHarness == "" {
 		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnsupported, Detail: "target provider is required"}
 	}
 	if record, found, err := s.sessions.GetSession(ctx, id); err != nil {
 		return err
+	} else if reserve != nil && (!found || domain.NormalizeSessionMode(record.Mode) != domain.SessionModeChat || record.HibernatedAt != nil) {
+		return domain.ErrQuotaSourceChanged
 	} else if found && domain.NormalizeSessionMode(record.Mode) == domain.SessionModeTUI && s.terminalSwitcher != nil {
 		// One builder writes the note for both UIs.
 		started := time.Now()
@@ -169,7 +181,7 @@ func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, reque
 	}
 	// A chat asleep, or still waking, has no source agent to hand over from
 	// yet. It is woken first, as a message to it would be.
-	if !s.HasLiveChatController(id) {
+	if reserve == nil && !s.HasLiveChatController(id) {
 		if err := s.wakeHibernated(ctx, id); err != nil && !errors.Is(err, ErrNoController) {
 			return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalRecoveryRequired, Detail: "the chat's agent could not be woken: " + err.Error(), Cause: err}
 		}
@@ -186,8 +198,9 @@ func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, reque
 	if err != nil {
 		return err
 	}
-	if request.ExpectedSource != nil && record.ControllerOwner() != *request.ExpectedSource {
-		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalBusy, Detail: "quota failure belongs to a previous controller"}
+	if (request.ExpectedSource != nil && record.ControllerOwner() != *request.ExpectedSource) ||
+		(request.ExpectedQuotaTurnID != "" && (record.Metadata.Model != request.ExpectedSourceModel || record.HibernatedAt != nil)) {
+		return domain.ErrQuotaSourceChanged
 	}
 	if record.IsTerminated {
 		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalRecoveryRequired, Detail: "terminated sessions must be restored before switching"}
@@ -290,6 +303,20 @@ func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, reque
 	activeBranch, err := s.store.ConversationBranch(ctx, conversation.ID, conversation.ActiveBranchID)
 	if err != nil {
 		return err
+	}
+	if request.ExpectedQuotaTurnID != "" {
+		fresh, err := s.requireChatSession(ctx, id)
+		if err != nil {
+			return err
+		}
+		if fresh.ControllerOwner() != record.ControllerOwner() || fresh.Metadata.Model != request.ExpectedSourceModel {
+			return domain.ErrQuotaSourceChanged
+		}
+		if reserve != nil {
+			if err := reserve(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	// The outgoing provider's model, for the handoff marker. Read before it is stopped.
 	sourceModel := cmp.Or(source.Settings().Model, record.Metadata.Model)

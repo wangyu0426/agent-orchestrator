@@ -38,7 +38,7 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 			blocked = true
 			continue
 		}
-		if route == primary || m.quotaTargetReady(ctx, route, project.Config, *cfg) {
+		if (policy.Primary == nil && route == primary) || m.quotaTargetReady(ctx, route, project.Config, *cfg) {
 			selected, remaining = route, targets[i+1:]
 			break
 		}
@@ -50,7 +50,7 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 		if blocked {
 			return nil, workerquota.ErrDeferred
 		}
-		return nil, nil
+		return nil, workerquota.ErrNoReadyRoute
 	}
 	if selected != primary {
 		cfg.Harness = selected.Harness

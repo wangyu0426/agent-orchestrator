@@ -15,7 +15,8 @@ WHERE session_id = sqlc.arg(session_id) AND reason != sqlc.arg(reason);
 UPDATE worker_quota_session
 SET attempt_owner = sqlc.arg(attempt_owner), target_harness = sqlc.arg(target_harness),
     target_model = sqlc.arg(target_model), reason = 'handoff started'
-WHERE session_id = sqlc.arg(session_id) AND attempt_owner = '';
+WHERE session_id = sqlc.arg(session_id) AND attempt_owner = ''
+  AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = sqlc.arg(session_id) AND sessions.model = sqlc.arg(expected_model));
 
 -- name: RecordWorkerQuotaFailure :exec
 UPDATE worker_quota_session

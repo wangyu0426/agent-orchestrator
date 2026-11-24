@@ -3436,12 +3436,11 @@ func (m *Manager) ExitAgent(ctx context.Context, id domain.SessionID) (domain.Se
 
 // ParkQuotaTUI exits the failed terminal agent while retaining its workspace.
 func (m *Manager) ParkQuotaTUI(ctx context.Context, rec domain.SessionRecord, at time.Time) (bool, error) {
-	owner := rec.ControllerOwner()
-	exited, err := m.exitAgent(ctx, rec.ID, &owner, at)
+	exited, err := m.exitAgent(ctx, rec.ID, &rec, at)
 	return exited.Activity.State == domain.ActivityExited, err
 }
 
-func (m *Manager) exitAgent(ctx context.Context, id domain.SessionID, expected *domain.SessionControllerOwner, failedAt time.Time) (domain.SessionRecord, error) {
+func (m *Manager) exitAgent(ctx context.Context, id domain.SessionID, expected *domain.SessionRecord, failedAt time.Time) (domain.SessionRecord, error) {
 	if err := m.beginAgentOperation(ctx, id, agentOperationExit); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
 			err = ErrAgentExitInProgress
@@ -3469,7 +3468,10 @@ func (m *Manager) exitAgent(ctx context.Context, id domain.SessionID, expected *
 		return domain.SessionRecord{}, fmt.Errorf("exit agent %s: %w", id, ErrAgentExited)
 	}
 	if expected != nil {
-		if rec.ControllerOwner() != *expected || rec.Activity.State != domain.ActivityIdle ||
+		if rec.ControllerOwner() != expected.ControllerOwner() || rec.Metadata.Model != expected.Metadata.Model {
+			return domain.SessionRecord{}, domain.ErrQuotaSourceChanged
+		}
+		if rec.Activity.State != domain.ActivityIdle ||
 			rec.Activity.LastActivityAt.After(failedAt) || rec.Metadata.LatestUserPromptAt.After(failedAt) {
 			return domain.SessionRecord{}, nil
 		}

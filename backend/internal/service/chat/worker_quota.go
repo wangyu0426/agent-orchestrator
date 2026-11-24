@@ -39,7 +39,7 @@ func (s *Service) QuotaFailure(ctx context.Context, rec domain.SessionRecord) (d
 
 // ParkQuotaChat stops a quiescent provider using the durable hibernation fence.
 func (s *Service) ParkQuotaChat(ctx context.Context, rec domain.SessionRecord, turnID string) (bool, error) {
-	return s.hibernateChat(ctx, rec.ID, hibernateOptions{quotaTurnID: turnID, quotaOwner: rec.ControllerOwner(), ignoreViews: true})
+	return s.hibernateChat(ctx, rec.ID, hibernateOptions{quotaTurnID: turnID, quotaOwner: rec.ControllerOwner(), quotaModel: rec.Metadata.Model, ignoreViews: true})
 }
 
 // QuotaTargetReady checks that an unattended switch can preserve approvals.

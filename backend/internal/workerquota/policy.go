@@ -12,6 +12,9 @@ import (
 // ErrDeferred indicates that quota blocked every otherwise eligible route.
 var ErrDeferred = errors.New("automatic worker deferred: all eligible providers have exhausted quota")
 
+// ErrNoReadyRoute indicates that no configured provider could be launched.
+var ErrNoReadyRoute = errors.New("no configured worker quota route is ready to launch")
+
 // Target describes a worker launch choice.
 type Target = domain.WorkerQuotaTarget
 

@@ -28,11 +28,14 @@ func TestWorkerQuotaAdmissionAndAttemptSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ok, err := st.ClaimWorkerQuotaAttempt(ctx, rec.ID, "stale-model", workerquota.Target{Harness: domain.HarnessAgy}, ""); err != nil || ok {
+		t.Fatalf("reservation for a stale model = %v, %v", ok, err)
+	}
 	var claimed atomic.Int32
 	var attempts sync.WaitGroup
 	for range 8 {
 		attempts.Go(func() {
-			ok, err := st.ClaimWorkerQuotaAttempt(ctx, rec.ID, "quota:one", workerquota.Target{Harness: domain.HarnessAgy})
+			ok, err := st.ClaimWorkerQuotaAttempt(ctx, rec.ID, "quota:one", workerquota.Target{Harness: domain.HarnessAgy}, "codex-model")
 			if err != nil {
 				t.Error(err)
 			}
@@ -63,7 +66,7 @@ func TestWorkerQuotaAdmissionAndAttemptSurviveRestart(t *testing.T) {
 	if err != nil || len(sessions) != 1 || sessions[0].ID != rec.ID || sessions[0].Attempt != "quota:one" || !slices.Equal(sessions[0].Remaining, remaining) {
 		t.Fatalf("restored sessions %+v, %v", sessions, err)
 	}
-	if ok, err := restored.ClaimWorkerQuotaAttempt(ctx, rec.ID, "quota:two", workerquota.Target{Harness: domain.HarnessAgy}); err != nil || ok {
+	if ok, err := restored.ClaimWorkerQuotaAttempt(ctx, rec.ID, "quota:two", workerquota.Target{Harness: domain.HarnessAgy}, "codex-model"); err != nil || ok {
 		t.Fatalf("duplicate attempt = %v, %v", ok, err)
 	}
 	if f, err := restored.WorkerQuotaFailures(ctx, now); err != nil || len(f) != 1 || !f[0].At.Equal(now) {

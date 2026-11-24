@@ -126,3 +126,23 @@ func TestWorkerQuotaOmittedModelUsesResolvedNativeEvidence(t *testing.T) {
 	now = reset
 	selectRoute(domain.HarnessCodex, codexModel)
 }
+
+func TestWorkerQuotaGlobalRoutesUnavailableDoNotLaunchProjectProvider(t *testing.T) {
+	manager := &Manager{
+		workerQuota: &workerquota.Policy{
+			Primary:   &workerquota.Target{Harness: domain.HarnessAgy},
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessClaudeCode}},
+		},
+		clock: time.Now, logger: slog.New(slog.DiscardHandler),
+		agents: testAgentRegistry{domain.HarnessCodex: fakeAgent{}},
+	}
+	cfg := ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", CreatedBy: domain.SessionCreatedByAutomation}
+	project := domain.ProjectRecord{ID: string(cfg.ProjectID), Config: domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex}}}
+	remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &project)
+	if !errors.Is(err, workerquota.ErrNoReadyRoute) || remaining != nil {
+		t.Fatalf("expected no launchable policy route, got remaining=%v err=%v", remaining, err)
+	}
+	if cfg.Harness != "" || project.Config.Worker.Harness != domain.HarnessCodex {
+		t.Fatalf("failed admission changed spawn config: %+v, %+v", cfg, project.Config.Worker)
+	}
+}

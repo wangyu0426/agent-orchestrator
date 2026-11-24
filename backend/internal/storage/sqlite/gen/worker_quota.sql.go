@@ -15,6 +15,7 @@ UPDATE worker_quota_session
 SET attempt_owner = ?1, target_harness = ?2,
     target_model = ?3, reason = 'handoff started'
 WHERE session_id = ?4 AND attempt_owner = ''
+  AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = ?4 AND sessions.model = ?5)
 `
 
 type ClaimWorkerQuotaAttemptParams struct {
@@ -22,6 +23,7 @@ type ClaimWorkerQuotaAttemptParams struct {
 	TargetHarness string
 	TargetModel   string
 	SessionID     string
+	ExpectedModel string
 }
 
 func (q *Queries) ClaimWorkerQuotaAttempt(ctx context.Context, arg ClaimWorkerQuotaAttemptParams) (int64, error) {
@@ -30,6 +32,7 @@ func (q *Queries) ClaimWorkerQuotaAttempt(ctx context.Context, arg ClaimWorkerQu
 		arg.TargetHarness,
 		arg.TargetModel,
 		arg.SessionID,
+		arg.ExpectedModel,
 	)
 	if err != nil {
 		return 0, err

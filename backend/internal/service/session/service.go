@@ -2151,6 +2151,8 @@ func toSpawnAPIError(err error) error {
 		return apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupErr.Error(), nil)
 	}
 	switch {
+	case errors.Is(err, workerquota.ErrNoReadyRoute):
+		return apierr.Unavailable("WORKER_QUOTA_NO_READY_ROUTE", err.Error())
 	case errors.Is(err, workerquota.ErrDeferred):
 		return apierr.Unavailable("WORKER_QUOTA_DEFERRED", err.Error())
 

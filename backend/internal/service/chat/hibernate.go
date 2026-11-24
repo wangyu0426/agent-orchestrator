@@ -180,6 +180,7 @@ func (s *Service) liveViewLeasesLocked(id domain.SessionID) map[string]time.Time
 type hibernateOptions struct {
 	quotaTurnID    string
 	quotaOwner     domain.SessionControllerOwner
+	quotaModel     string
 	versionRefresh bool
 	// forUpdate stops an idle provider so an installer can replace its
 	// executable; the session wakes on its next message or once the update ends.
@@ -201,9 +202,6 @@ func (o hibernateOptions) enabled(s *Service) bool {
 // eligible is the durable-fact check, read before and again after the
 // provider confirms it has no background work.
 func (o hibernateOptions) eligible(s *Service, rec domain.SessionRecord) bool {
-	if o.quotaTurnID != "" && rec.ControllerOwner() != o.quotaOwner {
-		return false
-	}
 	candidate := rec
 	if (o.forUpdate || o.versionRefresh) && candidate.Kind == domain.KindOrchestrator {
 		// Idle hibernation keeps orchestrators running. An update or a move to
@@ -268,6 +266,10 @@ func (s *Service) hibernateChat(ctx context.Context, id domain.SessionID, opts h
 	if err != nil {
 		gate.unlock()
 		return false, err
+	}
+	if opts.quotaTurnID != "" && (rec.ControllerOwner() != opts.quotaOwner || rec.Metadata.Model != opts.quotaModel) {
+		gate.unlock()
+		return false, domain.ErrQuotaSourceChanged
 	}
 	if !opts.eligible(s, rec) || opts.viewed(s, id) {
 		gate.unlock()
@@ -363,6 +365,10 @@ func (s *Service) hibernateChat(ctx context.Context, id domain.SessionID, opts h
 	if err != nil {
 		controller.sendMu.Unlock()
 		return false, err
+	}
+	if opts.quotaTurnID != "" && (fresh.ControllerOwner() != opts.quotaOwner || fresh.Metadata.Model != opts.quotaModel) {
+		controller.sendMu.Unlock()
+		return false, domain.ErrQuotaSourceChanged
 	}
 	if !opts.eligible(s, fresh) {
 		controller.sendMu.Unlock()

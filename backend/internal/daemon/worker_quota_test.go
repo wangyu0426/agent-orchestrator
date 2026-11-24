@@ -14,9 +14,10 @@ import (
 )
 
 type quotaChatStub struct {
-	failedAt time.Time
-	switches []domain.ProviderSwitchRequest
-	parks    int
+	failedAt      time.Time
+	switches      []domain.ProviderSwitchRequest
+	parks         int
+	beforeReserve func(context.Context) error
 }
 
 func (c *quotaChatStub) QuotaFailure(context.Context, domain.SessionRecord) (domain.ConversationTurn, error) {
@@ -28,7 +29,15 @@ func (*quotaChatStub) QuotaTargetReady(context.Context, domain.SessionID, domain
 	return true
 }
 
-func (c *quotaChatStub) SwitchProviderAndSend(_ context.Context, _ domain.SessionID, req domain.ProviderSwitchRequest, _ ports.ChatUserMessage) (domain.ConversationTurn, bool, error) {
+func (c *quotaChatStub) SwitchQuotaProviderAndSend(ctx context.Context, _ domain.SessionID, req domain.ProviderSwitchRequest, _ ports.ChatUserMessage, reserve func(context.Context) error) (domain.ConversationTurn, bool, error) {
+	if c.beforeReserve != nil {
+		if err := c.beforeReserve(ctx); err != nil {
+			return domain.ConversationTurn{}, false, err
+		}
+	}
+	if err := reserve(ctx); err != nil {
+		return domain.ConversationTurn{}, false, err
+	}
 	c.switches = append(c.switches, req)
 	return domain.ConversationTurn{}, true, nil
 }
@@ -86,7 +95,7 @@ func TestWorkerQuotaReconcilesRemainingRoutesInAdmissionOrder(t *testing.T) {
 			}
 			req := chat.switches[0]
 			if req.TargetHarness != tc.want.Harness || req.Model != tc.want.Model || req.Effort != tc.want.Effort ||
-				req.ExpectedSource == nil || *req.ExpectedSource != record.ControllerOwner() || req.ExpectedQuotaTurnID != "failed-turn" {
+				req.ExpectedSource == nil || *req.ExpectedSource != record.ControllerOwner() || req.ExpectedQuotaTurnID != "failed-turn" || req.ExpectedSourceModel != tc.admitted.Model {
 				t.Fatalf("handoff request = %+v, target want %+v", req, tc.want)
 			}
 			sessions, err := store.WorkerQuotaSessions(ctx)
@@ -133,6 +142,24 @@ func TestWorkerQuotaPreservesManualModelChoiceAfterDefaultAdmission(t *testing.T
 		t.Fatalf("manual model choice consumed the handoff reservation: %+v, %v", sessions, err)
 	}
 
+	if err := manager.PersistChatModel(ctx, record.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	chat.beforeReserve = func(ctx context.Context) error {
+		return manager.PersistChatModel(ctx, record.ID, "manual-model-during-sweep")
+	}
+	if err := sweep.reconcile(ctx, sessions[0]); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.switches) != 0 || chat.parks != 0 {
+		t.Fatalf("late manual choice triggered quota recovery: switches=%v parks=%d", chat.switches, chat.parks)
+	}
+	sessions, err = store.WorkerQuotaSessions(ctx)
+	if err != nil || len(sessions) != 1 || sessions[0].Attempt != "" || sessions[0].Reason != "" {
+		t.Fatalf("stale reservation changed the handoff or diagnostic: %+v, %v", sessions, err)
+	}
+
+	chat.beforeReserve = nil
 	if err := manager.PersistChatModel(ctx, record.ID, ""); err != nil {
 		t.Fatal(err)
 	}
