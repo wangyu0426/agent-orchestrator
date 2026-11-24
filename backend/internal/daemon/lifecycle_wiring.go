@@ -26,7 +26,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/deliverytelemetry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
-	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 	activityobserver "github.com/aoagents/agent-orchestrator/backend/internal/observe/activity"
 	artifactsobserver "github.com/aoagents/agent-orchestrator/backend/internal/observe/artifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/reaper"
@@ -38,6 +37,7 @@ import (
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 const startupReconcileWorkers = 4
