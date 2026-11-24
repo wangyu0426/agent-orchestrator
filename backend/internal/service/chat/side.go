@@ -945,7 +945,7 @@ func (m *sideManager) restore(ctx context.Context, side domain.SideConversation)
 		if err := activator.ActivateLiveReconnect(ctx, activeProviderID); err != nil {
 			_ = conv.Close()
 			m.service.log.Warn("side provider replay activation failed", "side", side.ID, "error", err)
-			failure = errors.New("Side provider could not resume; close and reopen the side chat.")
+			failure = errors.New("side provider could not resume; close and reopen the side chat")
 			return
 		}
 	}
