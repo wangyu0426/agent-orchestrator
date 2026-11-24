@@ -523,26 +523,21 @@ func TestWorkerQuotaOmittedModePreflightTransitions(t *testing.T) {
 		source := &quotaScriptedSource{now: now, blocked: map[domain.AgentHarness]bool{domain.HarnessCodex: true}}
 		chat := &quotaScriptedChat{
 			preflightSeq: map[domain.AgentHarness][]error{
-				// First check fails with auth required; any duplicate second check would return nil.
-				domain.HarnessAgy: {ports.ErrChatAuthRequired, nil},
+				// Seed preflight passes cleanly so all 3 StartChat attempts reach the breaker.
+				domain.HarnessAgy: {nil, nil, nil},
+			},
+			startErrs: map[domain.AgentHarness]error{
+				domain.HarnessAgy: ports.ErrChatAuthRequired,
 			},
 		}
 		policy := &workerquota.Policy{
-			Fallbacks: []workerquota.Target{
-				{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"},
-				{Harness: domain.HarnessClaudeCode, Model: "sonnet", Mode: domain.SessionModeChat},
-			},
-			Source: source,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeChat}},
+			Source:    source,
 		}
 		stack := newQuotaTestStack(t, policy, chat, &quotaReadinessSpy{})
 		stack.rt.created = 0
 
-		// Pre-pause AGY Chat to verify an omitted-mode TUI fallback is not blocked by a paused Chat route.
-		chat.mu.Lock()
-		chat.startErrs = map[domain.AgentHarness]error{domain.HarnessAgy: ports.ErrChatAuthRequired}
-		chat.mu.Unlock()
-		// Seed 3 AGY/Chat failures directly using an explicit Chat route before testing omitted mode.
-		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeChat}}
+		// Pre-pause AGY/Chat to verify an omitted-mode TUI fallback is not blocked by a paused Chat route.
 		intakeCfg := ports.SpawnConfig{
 			ProjectID: "ao", IssueID: "github:acme/ao#40", Kind: domain.KindWorker,
 			Prompt: "Pause chat first", CreatedBy: domain.SessionCreatedByAutomation,
@@ -552,8 +547,13 @@ func TestWorkerQuotaOmittedModePreflightTransitions(t *testing.T) {
 				t.Fatal("expected AGY chat auth failure")
 			}
 		}
+		project, _, _ := stack.store.GetProject(t.Context(), "ao")
+		pauses := stack.svc.AutoSpawnPauses(t.Context(), project)
+		if len(pauses) != 1 || pauses[0].Harness != domain.HarnessAgy || pauses[0].Mode != domain.SessionModeChat {
+			t.Fatalf("pauses before omitted-mode test = %+v, want single agy/chat pause", pauses)
+		}
 
-		// Now switch fallback back to omitted mode, where preflight #1 fails and preflight #2 would succeed.
+		// Now switch fallback to omitted mode, where preflight #1 fails and any duplicate check would succeed.
 		chat.mu.Lock()
 		chat.startErrs[domain.HarnessAgy] = nil
 		chat.preflightCalls = nil
@@ -576,12 +576,7 @@ func TestWorkerQuotaOmittedModePreflightTransitions(t *testing.T) {
 			t.Fatalf("preflight calls=%v chat starts=%d, want single preflight and zero chat starts", chat.preflightCalls, len(chat.startCalls))
 		}
 
-		// Conversely, if AGY/TUI is paused and preflight resolves to TUI, admission re-selects the healthy next route.
-		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeTUI}}
-		// Fail AGY/TUI 3 times via an unsupported model? Actually use binary-missing runtime error on TUI?
-		// Wait: AGENT_BINARY_NOT_FOUND pauses AGY/TUI. Use a failing runtime? LookPath isn't enough if stubAgent returns ["launch"].
-		// Better: pause AGY/TUI cleanly via explicit TUI with failing model? ValidateSpawnModel rejects before admission? No, admitter runs before validateSpawnModel!
-		// Wait: agy accepts any model in modelcatalog, so use an unknown/unsupported effort to trip UNSUPPORTED_EFFORT on AGY/TUI!
+		// Trip the AGY/TUI breaker via three UNSUPPORTED_EFFORT failures, then confirm omitted mode skips the paused TUI route.
 		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Effort: "invalid-effort", Mode: domain.SessionModeTUI}}
 		for range 3 {
 			if _, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg); err == nil {

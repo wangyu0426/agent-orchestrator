@@ -191,7 +191,7 @@ func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Targe
 			return false, false
 		}
 		if readiness.Authentication.State == domain.AgentAuthenticationUnauthorized && readiness.Authentication.Freshness == domain.AgentReadinessFresh {
-			if !(target.Harness == domain.HarnessAgy && target.Mode == domain.SessionModeTUI) {
+			if target.Harness != domain.HarnessAgy || target.Mode != domain.SessionModeTUI {
 				return false, false
 			}
 		}
