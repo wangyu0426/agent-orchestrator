@@ -1922,6 +1922,31 @@ func TestWriteSCMObservationMergeUpdatesFetchedReviewWindow(t *testing.T) {
 	}
 }
 
+func TestWritePRPersistsObservedAtAndPreservesItWhenOmitted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	r, _ := s.CreateSession(ctx, sampleRecord("mer"))
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	pr := domain.PullRequest{URL: "https://github.com/o/r/pull/2", SessionID: r.ID, Number: 2, Merged: true, Closed: true, UpdatedAt: observedAt, ObservedAt: observedAt}
+	if err := s.WritePR(ctx, pr, nil, nil); err != nil {
+		t.Fatalf("write fetched PR observation: %v", err)
+	}
+	updated := pr
+	updated.ObservedAt = time.Time{}
+	updated.UpdatedAt = observedAt.Add(time.Minute)
+	if err := s.WritePR(ctx, updated, nil, nil); err != nil {
+		t.Fatalf("write legacy observation without timestamp: %v", err)
+	}
+	got, ok, err := s.GetPR(ctx, pr.URL)
+	if err != nil || !ok {
+		t.Fatalf("read PR: ok=%v err=%v", ok, err)
+	}
+	if !got.ObservedAt.Equal(observedAt) {
+		t.Fatalf("observed_at = %s, want preserved fetched timestamp %s", got.ObservedAt, observedAt)
+	}
+}
+
 func TestWritePRPreservesSCMReviewThreads(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

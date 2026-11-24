@@ -58,7 +58,7 @@ func TestApplyObservation_WritesPRChecksAndComments(t *testing.T) {
 	if err := m.ApplyObservation(context.Background(), "mer-1", o); err != nil {
 		t.Fatal(err)
 	}
-	if got := fw.pr["mer-1"]; got.URL != o.URL || got.CI != domain.CIFailing {
+	if got := fw.pr["mer-1"]; got.URL != o.URL || got.CI != domain.CIFailing || !got.ObservedAt.Equal(time.Unix(1, 0).UTC()) {
 		t.Fatalf("pr not written: %+v", got)
 	}
 	if len(fw.checks) != 1 || fw.checks[0].CreatedAt.IsZero() {

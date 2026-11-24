@@ -1815,6 +1815,12 @@ func (s *Service) Stop(ctx context.Context, id domain.SessionID) error {
 		return err
 	}
 	defer gate.unlock()
+	return s.stopLocked(ctx, id)
+}
+
+// stopLocked requires the session's controller gate to be held.
+func (s *Service) stopLocked(ctx context.Context, id domain.SessionID) error {
+	owner := domain.SessionConversationOwner(id)
 	// Each side is marked closed before its host stops, and a host that fails to
 	// stop stays queued for the periodic cleanup retry. Stopping the main chat
 	// (Exit agent, agent switch, spawn rollback) must not depend on it.

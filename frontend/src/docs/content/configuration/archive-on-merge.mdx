@@ -1,0 +1,66 @@
+---
+title: Archive workers after merge
+description: Configure archive-on-merge defaults and safely reclaim existing merged workers.
+---
+
+New local worker sessions archive automatically after Orchestrator authoritatively observes that at least one tracked pull request merged and every tracked pull request is terminal. The worker must also be idle or have a confirmed process exit, its owned process state must be known, and its worktree must be clean. A busy worker, open or unknown pull request, active handoff, unknown process, or unpreserved workspace work is deferred and retried by the normal observer.
+
+Chat workers additionally require a live, quiescent controller, a settled turn, an empty queue, no pending interactions or independent side chats, and a provider that can confirm it has no background work. Chat input is fenced through automatic teardown. Sleeping or detached Chat controllers and providers without a background-work probe are deferred rather than stopped on uncertain evidence.
+
+Archiving releases the worker's owned agent runtime and related session resources, then applies the existing workspace cleanup rules. Session history and metadata remain available. A dirty or otherwise unsafe workspace is preserved for recovery.
+
+## Set defaults for new workers
+
+The default is enabled for new workers. Change it in **Settings → General → Archive workers after merge**. This is a user-wide default for local workers, including workers started by tracker intake. Turning it off affects new workers only.
+
+Project Settings can override the user default for workers in one project:
+
+- **Use user default** removes the project override.
+- **Archive after merge** enables it for new workers in the project.
+- **Keep workers open** disables it for new workers in the project.
+
+The CLI has matching project controls:
+
+```bash
+# Enable the project default.
+ao project set-config <project-id> --archive-on-merge-default
+
+# Explicitly disable it for this project.
+ao project set-config <project-id> --archive-on-merge-default=false
+
+# Inherit the user default again.
+ao project set-config <project-id> --inherit-archive-on-merge-default
+```
+
+An individual new task can override both defaults in the task composer or with `ao spawn`:
+
+```bash
+ao spawn --project <project-id> --agent codex --archive-on-merge=false
+ao spawn --project <project-id> --agent codex --archive-on-merge=true
+```
+
+When the flag is omitted, resolution is session override → project default → user default. The resolved value is stored on the new session. Changing a default never rewrites existing sessions, and an existing session's explicit `false` remains false after upgrade.
+
+## Reclaim existing merged workers on yuworker
+
+This is an explicit two-step action. First inspect a project-scoped preview:
+
+```bash
+ao session archive-merged --project <project-id> --json
+```
+
+The preview is read-only. Review every candidate and its `eligible` result or `reason`. It includes workers with an observed merged pull request, including sessions whose saved merge policy is off; it does not change those saved policies. Unknown PR state, another open PR, active work, a handoff, uncertain process ownership, or a dirty workspace should be resolved before retrying.
+
+After reviewing the preview, explicitly apply it:
+
+```bash
+ao session archive-merged --project <project-id> --apply --json
+```
+
+Apply rechecks every selected session before teardown. A session that became active or unsafe is deferred with a reason and can be retried after the blocker is resolved. The action is idempotent; it does not delete session history. If workspace cleanup is pending, inspect it before reclaiming storage:
+
+```bash
+ao session cleanup --project <project-id> --dry-run
+```
+
+`ao session cleanup` keeps the existing dirty-worktree protections. Do not kill processes by executable name or PID when diagnosing a deferred worker; use the session preview and its reported ownership/state reason.

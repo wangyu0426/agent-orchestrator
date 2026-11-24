@@ -484,6 +484,12 @@ type SessionModeDefaults interface {
 	DefaultSessionMode(ctx context.Context) domain.SessionMode
 }
 
+// SessionMergePolicyDefaults is an optional capability on the daemon settings
+// provider. It supplies the global default for new worker sessions.
+type SessionMergePolicyDefaults interface {
+	TerminateOnPRMergeDefault(context.Context) (bool, error)
+}
+
 // resolveSessionMode applies startSessionMode with the daemon-owned default,
 // read here, at spawn time, so changing the preference affects only sessions
 // created afterwards. An existing session changes only through an explicit,

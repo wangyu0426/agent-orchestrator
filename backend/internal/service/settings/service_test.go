@@ -31,6 +31,9 @@ func (*hibernationSettingsStore) SetSessionRetentionDays(context.Context, int, t
 func (*hibernationSettingsStore) SetAccountHandoff(context.Context, bool, time.Time) error {
 	return nil
 }
+func (*hibernationSettingsStore) SetTerminateOnPRMergeDefault(context.Context, bool, time.Time) error {
+	return nil
+}
 
 func TestChatHibernationGateResetsOnDaemonBoot(t *testing.T) {
 	ctx := context.Background()
@@ -99,6 +102,38 @@ func TestOfferingCloudEnabled(t *testing.T) {
 
 func (*hibernationSettingsStore) SetHarnessDefault(context.Context, domain.AgentHarness, domain.HarnessDefault, time.Time) error {
 	return nil
+}
+
+type mergeArchiveDefaultStore struct {
+	hibernationSettingsStore
+	enabled bool
+	writes  int
+}
+
+func (s *mergeArchiveDefaultStore) GetAppSettings(context.Context) (Snapshot, error) {
+	return Snapshot{TerminateOnPRMergeDefault: s.enabled}, nil
+}
+
+func (s *mergeArchiveDefaultStore) SetTerminateOnPRMergeDefault(_ context.Context, enabled bool, _ time.Time) error {
+	s.enabled = enabled
+	s.writes++
+	return nil
+}
+
+func TestTerminateOnPRMergeDefaultPersistsExplicitFalse(t *testing.T) {
+	ctx := context.Background()
+	store := &mergeArchiveDefaultStore{enabled: true}
+	svc := New(store, nil, Offering{}, nil)
+	if got, err := svc.TerminateOnPRMergeDefault(ctx); err != nil || !got {
+		t.Fatalf("initial default = %v, %v; want true", got, err)
+	}
+	snapshot, err := svc.SetTerminateOnPRMergeDefault(ctx, false)
+	if err != nil || snapshot.TerminateOnPRMergeDefault || store.enabled || store.writes != 1 {
+		t.Fatalf("set false = %+v, %v; store=%+v", snapshot, err, store)
+	}
+	if got, err := svc.TerminateOnPRMergeDefault(ctx); err != nil || got {
+		t.Fatalf("read explicit false = %v, %v; want false", got, err)
+	}
 }
 
 type versionRefreshStore struct {

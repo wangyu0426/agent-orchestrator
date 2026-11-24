@@ -138,3 +138,38 @@ func TestSettingsSessionRetentionRequiresDays(t *testing.T) {
 		t.Fatalf("status=%d response=%+v err=%v", w.Code, got, err)
 	}
 }
+
+type mergeArchiveDefaultSettingsService struct {
+	hibernationSettingsService
+	enabled bool
+}
+
+func (s *mergeArchiveDefaultSettingsService) SetTerminateOnPRMergeDefault(_ context.Context, enabled bool) (settingssvc.Snapshot, error) {
+	s.enabled = enabled
+	s.calls++
+	return settingssvc.Snapshot{TerminateOnPRMergeDefault: enabled}, nil
+}
+
+func TestSettingsTerminateOnPRMergeDefaultRequiresBoolean(t *testing.T) {
+	svc := &mergeArchiveDefaultSettingsService{}
+	c := &SettingsController{Svc: svc}
+	for _, body := range []string{`{}`, `{"enabled":null}`, `{"enabled":"false"}`} {
+		w := httptest.NewRecorder()
+		c.setTerminateOnPRMergeDefault(w, httptest.NewRequest(http.MethodPatch, "/api/v1/settings/terminate-on-pr-merge", strings.NewReader(body)))
+		if w.Code != http.StatusBadRequest || svc.calls != 0 {
+			t.Fatalf("body=%s status=%d calls=%d", body, w.Code, svc.calls)
+		}
+	}
+	for _, enabled := range []bool{true, false} {
+		body := `{"enabled":false}`
+		if enabled {
+			body = `{"enabled":true}`
+		}
+		w := httptest.NewRecorder()
+		c.setTerminateOnPRMergeDefault(w, httptest.NewRequest(http.MethodPatch, "/api/v1/settings/terminate-on-pr-merge", strings.NewReader(body)))
+		var got SettingsResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK || got.TerminateOnPRMergeDefault != enabled || svc.enabled != enabled {
+			t.Fatalf("body=%s status=%d response=%+v service=%+v err=%v", body, w.Code, got, svc, err)
+		}
+	}
+}

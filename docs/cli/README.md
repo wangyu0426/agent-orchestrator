@@ -103,6 +103,7 @@ See the [command reference](../../backend/internal/skillassets/using-ao/commands
 | `ao session resume-agent <id>`      | `POST /api/v1/sessions/{id}/resume-agent`      |
 | `ao session rename <id> <name>`     | `PATCH /api/v1/sessions/{id}`                  |
 | `ao session cleanup`                | `POST /api/v1/sessions/cleanup`                |
+| `ao session archive-merged`          | `POST /api/v1/sessions/archive-merged/preview`, then `POST /api/v1/sessions/archive-merged/apply` with `--apply` |
 | `ao session delete <id>`            | `DELETE /api/v1/sessions/{id}`                 |
 | `ao session claim-pr [<id>] <pr-ref>` | `POST /api/v1/sessions/{id}/pr/claim`        |
 | `ao session fork <id> [--check]` | `POST /api/v1/sessions/{id}/fork`             |

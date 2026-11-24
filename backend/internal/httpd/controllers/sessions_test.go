@@ -123,6 +123,25 @@ type fakeSessionService struct {
 	autoInjectCIEnabled        bool
 }
 
+type fakeMergeArchiveSessionService struct {
+	*fakeSessionService
+	candidates     []sessionmanager.MergeArchiveCandidate
+	previewErr     error
+	previewProject domain.ProjectID
+	applyResults   []sessionmanager.MergeArchiveApplyResult
+	applyIDs       []domain.SessionID
+}
+
+func (f *fakeMergeArchiveSessionService) PreviewMergedArchive(_ context.Context, project domain.ProjectID) ([]sessionmanager.MergeArchiveCandidate, error) {
+	f.previewProject = project
+	return f.candidates, f.previewErr
+}
+
+func (f *fakeMergeArchiveSessionService) ApplyMergedArchive(_ context.Context, ids []domain.SessionID) []sessionmanager.MergeArchiveApplyResult {
+	f.applyIDs = append([]domain.SessionID(nil), ids...)
+	return f.applyResults
+}
+
 type fakeInterfaceTransitionSessionService struct {
 	*fakeSessionService
 	transition             domain.SessionInterfaceTransition
@@ -1207,7 +1226,7 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 		t.Fatalf("list leaked prompt: %s", body)
 	}
 
-	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","issueId":"ISS-1","kind":"worker","harness":"codex","prompt":"fix","displayName":"my worker"}`)
+	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","issueId":"ISS-1","kind":"worker","harness":"codex","prompt":"fix","displayName":"my worker","terminateOnPrMerge":false}`)
 	if status != http.StatusCreated {
 		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
 	}
@@ -1222,6 +1241,9 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	}
 	if spawned.Session.DisplayName != "my worker" {
 		t.Fatalf("spawned displayName = %q, want %q", spawned.Session.DisplayName, "my worker")
+	}
+	if svc.lastSpawn.TerminateOnPRMerge == nil || *svc.lastSpawn.TerminateOnPRMerge {
+		t.Fatalf("manual spawn merge policy = %v, want explicit false", svc.lastSpawn.TerminateOnPRMerge)
 	}
 	if spawned.PromptBytes == nil || *spawned.PromptBytes != len("fix") {
 		t.Fatalf("spawned promptBytes = %v, want %d", spawned.PromptBytes, len("fix"))
@@ -4767,7 +4789,7 @@ func TestSessionsAPI_DelegateTask(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)
 
-	body, status, _ := doRequest(t, srv, "POST", "/api/v1/orchestrators/delegate", `{"projectId":"ao","brief":"Fix\u0000 it","branch":" ao/new-task ","agent":"cursor","model":" sonnet-custom ","effort":" high ","mode":"chat","approvalMode":"bypass-permissions","taskPreparation":" prep-token ","attachments":[{"mimeType":"image/png","data":"AQID"}]}`)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/orchestrators/delegate", `{"projectId":"ao","brief":"Fix\u0000 it","branch":" ao/new-task ","agent":"cursor","model":" sonnet-custom ","effort":" high ","mode":"chat","approvalMode":"bypass-permissions","taskPreparation":" prep-token ","terminateOnPrMerge":false,"attachments":[{"mimeType":"image/png","data":"AQID"}]}`)
 	if status != http.StatusAccepted {
 		t.Fatalf("delegate = %d, want 202; body=%s", status, body)
 	}
@@ -4780,7 +4802,7 @@ func TestSessionsAPI_DelegateTask(t *testing.T) {
 	if !got.OK || got.WorkerID != "ao-worker" || got.OrchestratorID != "ao-orch" {
 		t.Fatalf("response = %#v", got)
 	}
-	if svc.delegationInput.ProjectID != "ao" || svc.delegationInput.Brief != "Fix it" || svc.delegationInput.Branch != "ao/new-task" || svc.delegationInput.RequestedAgent != domain.HarnessCursor || svc.delegationInput.Model != "sonnet-custom" || svc.delegationInput.Effort == nil || *svc.delegationInput.Effort != "high" || svc.delegationInput.RequestedMode != domain.SessionModeChat || svc.delegationInput.ApprovalMode != domain.PermissionModeBypassPermissions || svc.delegationInput.TaskPreparation != "prep-token" {
+	if svc.delegationInput.ProjectID != "ao" || svc.delegationInput.Brief != "Fix it" || svc.delegationInput.Branch != "ao/new-task" || svc.delegationInput.RequestedAgent != domain.HarnessCursor || svc.delegationInput.Model != "sonnet-custom" || svc.delegationInput.Effort == nil || *svc.delegationInput.Effort != "high" || svc.delegationInput.RequestedMode != domain.SessionModeChat || svc.delegationInput.ApprovalMode != domain.PermissionModeBypassPermissions || svc.delegationInput.TaskPreparation != "prep-token" || svc.delegationInput.TerminateOnPRMerge == nil || *svc.delegationInput.TerminateOnPRMerge {
 		t.Fatalf("delegation input = %#v", svc.delegationInput)
 	}
 	if len(svc.delegationInput.Attachments) != 1 {
@@ -5559,5 +5581,52 @@ func TestSessionsAPI_DeleteSessionRefusal(t *testing.T) {
 	body, status, _ := doRequest(t, srv, http.MethodDelete, "/api/v1/sessions/ao-1", "")
 	if status != http.StatusConflict || !strings.Contains(string(body), "WORKSPACE_NOT_RELEASED") {
 		t.Fatalf("delete = %d %s, want 409 WORKSPACE_NOT_RELEASED", status, body)
+	}
+}
+
+func TestSessionsAPI_MergedArchivePreviewAndExplicitApply(t *testing.T) {
+	svc := &fakeMergeArchiveSessionService{
+		fakeSessionService: newFakeSessionService(),
+		candidates: []sessionmanager.MergeArchiveCandidate{
+			{SessionID: "ao-ready", ProjectID: "ao", DisplayName: "Ready", Eligible: true},
+			{SessionID: "ao-active", ProjectID: "ao", Eligible: false, Reason: "worker_not_idle"},
+		},
+		applyResults: []sessionmanager.MergeArchiveApplyResult{{SessionID: "ao-ready", Archived: true, WorkspaceFreed: true}},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Sessions: svc}, httpd.ControlDeps{})
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	preview := request(http.MethodPost, "/api/v1/sessions/archive-merged/preview", `{"projectId":"ao"}`)
+	if preview.Code != http.StatusOK || svc.previewProject != "ao" {
+		t.Fatalf("preview status=%d project=%q body=%s", preview.Code, svc.previewProject, preview.Body.String())
+	}
+	var previewBody controllers.MergeArchivePreviewResponse
+	mustJSON(t, preview.Body.Bytes(), &previewBody)
+	if len(previewBody.Candidates) != 2 || !previewBody.Candidates[0].Eligible || previewBody.Candidates[1].Reason != "worker_not_idle" {
+		t.Fatalf("preview candidates = %+v", previewBody.Candidates)
+	}
+	if len(svc.applyIDs) != 0 {
+		t.Fatalf("preview unexpectedly applied sessions: %v", svc.applyIDs)
+	}
+
+	apply := request(http.MethodPost, "/api/v1/sessions/archive-merged/apply", `{"sessionIds":["ao-ready"]}`)
+	if apply.Code != http.StatusOK || !slices.Equal(svc.applyIDs, []domain.SessionID{"ao-ready"}) {
+		t.Fatalf("apply status=%d ids=%v body=%s", apply.Code, svc.applyIDs, apply.Body.String())
+	}
+	var applyBody controllers.ApplyMergedArchiveResponse
+	mustJSON(t, apply.Body.Bytes(), &applyBody)
+	if len(applyBody.Results) != 1 || !applyBody.Results[0].Archived || !applyBody.Results[0].WorkspaceFreed {
+		t.Fatalf("apply results = %+v", applyBody.Results)
+	}
+	invalid := request(http.MethodPost, "/api/v1/sessions/archive-merged/apply", `{"sessionIds":[]}`)
+	if invalid.Code != http.StatusBadRequest || !slices.Equal(svc.applyIDs, []domain.SessionID{"ao-ready"}) {
+		t.Fatalf("empty apply status=%d ids=%v body=%s", invalid.Code, svc.applyIDs, invalid.Body.String())
 	}
 }

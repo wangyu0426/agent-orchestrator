@@ -28,20 +28,21 @@ const (
 // may be empty to open an idle worker that the user can instruct later. Empty
 // RequestedAgent means the spawn uses the project's worker-agent default.
 type DelegateTaskInput struct {
-	ProjectID         domain.ProjectID
-	Brief             string
-	BaseBranch        string
-	RequestedAgent    domain.AgentHarness
-	Branch            string
-	Model             string
-	Effort            *string
-	ApprovalMode      domain.PermissionMode
-	RequestedMode     domain.SessionMode
-	AccountID         string
-	Attachments       []ports.SpawnAttachment
-	TaskPreparation   domain.TaskPreparationToken
-	ClientRequestID   string
-	ClientRequestHash string
+	ProjectID          domain.ProjectID
+	Brief              string
+	BaseBranch         string
+	RequestedAgent     domain.AgentHarness
+	Branch             string
+	Model              string
+	Effort             *string
+	ApprovalMode       domain.PermissionMode
+	RequestedMode      domain.SessionMode
+	AccountID          string
+	TerminateOnPRMerge *bool
+	Attachments        []ports.SpawnAttachment
+	TaskPreparation    domain.TaskPreparationToken
+	ClientRequestID    string
+	ClientRequestHash  string
 }
 
 // DelegateTaskOutcome identifies the spawned worker. OrchestratorID remains
@@ -114,10 +115,11 @@ func (s *Service) DelegateTask(ctx context.Context, in DelegateTaskInput) (Deleg
 			Effort:      effort,
 			Permissions: in.ApprovalMode,
 		},
-		EffortOverride: effortOverride,
-		RequestedMode:  in.RequestedMode,
-		AgentAccountID: in.AccountID,
-		Attachments:    in.Attachments,
+		EffortOverride:     effortOverride,
+		RequestedMode:      in.RequestedMode,
+		AgentAccountID:     in.AccountID,
+		TerminateOnPRMerge: in.TerminateOnPRMerge,
+		Attachments:        in.Attachments,
 		// This is the desktop's new-task path: there is a UI waiting to navigate
 		// to the session. A Chat worker answers as soon as it is addressable and
 		// finishes starting in the background.

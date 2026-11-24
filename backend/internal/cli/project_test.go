@@ -158,6 +158,29 @@ func TestBuildProjectConfigTrackerIntakeFlags(t *testing.T) {
 	}
 }
 
+func TestBuildProjectConfigArchiveOnMergeProjectDefaultPreservesFalseAndInheritance(t *testing.T) {
+	current := func() (projectConfig, error) { return projectConfig{}, nil }
+	changed := func(names ...string) func(string) bool {
+		set := map[string]bool{}
+		for _, name := range names {
+			set[name] = true
+		}
+		return func(name string) bool { return set[name] }
+	}
+	got, err := buildProjectConfig(projectSetConfigOptions{archiveOnMergeDefault: false}, changed("archive-on-merge-default"), current)
+	if err != nil || got.TerminateOnPRMerge == nil || *got.TerminateOnPRMerge {
+		t.Fatalf("explicit false project default = %#v, %v", got.TerminateOnPRMerge, err)
+	}
+	got, err = buildProjectConfig(projectSetConfigOptions{inheritArchiveOnMerge: true}, changed("inherit-archive-on-merge-default"), current)
+	if err != nil || got.TerminateOnPRMerge != nil {
+		t.Fatalf("inherit project default = %#v, %v; want nil", got.TerminateOnPRMerge, err)
+	}
+	_, err = buildProjectConfig(projectSetConfigOptions{}, changed("archive-on-merge-default", "inherit-archive-on-merge-default"), current)
+	if err == nil || ExitCode(err) != 2 {
+		t.Fatalf("conflicting archive default flags error = %v, want usage error", err)
+	}
+}
+
 // TestProjectConfigMirrorsDomainJSONKeys fails when the CLI's hand-written
 // projectConfig drifts from domain.ProjectConfig. A key the CLI does not model
 // is silently dropped by every set-config round trip.
@@ -223,7 +246,8 @@ func TestProjectConfigFlagsListsEveryFieldFlag(t *testing.T) {
 
 // storedProjectConfig carries fields set in the desktop app that no
 // set-config flag manages (effort, preRemove, workersRequestReview).
-const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],` +
+
+const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],"terminateOnPrMerge":false,` +
 	`"agentConfig":{"model":"m1","effort":"high"},"worker":{"agent":"codex","agentConfig":{"effort":"medium"}},` +
 	`"reviewers":[{"harness":"claude-code","agentConfig":{"effort":"max"}}],"workersRequestReview":true}`
 

@@ -41,7 +41,7 @@ type stubRuntime struct {
 
 func (s *stubRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	s.created++
-	return ports.RuntimeHandle{ID: "h1"}, nil
+	return ports.RuntimeHandle{ID: string(cfg.SessionID)}, nil
 }
 func (s *stubRuntime) Destroy(_ context.Context, h ports.RuntimeHandle) error {
 	s.destroyed++
@@ -65,6 +65,9 @@ func (s *stubRuntime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRu
 		return ports.FencedProbeResult{Liveness: ports.FencedAlive, Reason: ports.FencedReasonExactMatch}
 	}
 	return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
+}
+func (*stubRuntime) RunningWorkloadCommands(context.Context, ports.RuntimeHandle, ports.SupervisedProcessRef) (int, error) {
+	return 0, nil
 }
 func (s *stubRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int) (string, error) {
 	return "", nil
@@ -129,6 +132,20 @@ func (s *stubWorkspace) ApplyPreserved(_ context.Context, _ ports.WorkspaceInfo,
 
 func (s *stubWorkspace) AddExclude(_ context.Context, _ ports.WorkspaceInfo, _ ...string) error {
 	return nil
+}
+
+func (*stubWorkspace) ObserveWorkspace(_ context.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
+	return ports.WorkspaceObservation{Path: info.Path, Branch: info.Branch}, nil
+}
+
+type integrationTerminalInputGate struct{}
+
+func (integrationTerminalInputGate) BeginInputDrain(string) (time.Time, func()) {
+	return time.Time{}, func() {}
+}
+func (integrationTerminalInputGate) LastInputAt(string) time.Time { return time.Time{} }
+func (integrationTerminalInputGate) HoldInput(string) (time.Time, func()) {
+	return time.Time{}, func() {}
 }
 
 type captureMessenger struct{ msgs []string }
@@ -209,6 +226,7 @@ func newStack(t *testing.T) *stack {
 	rt := &stubRuntime{}
 	ws := &stubWorkspace{}
 	mgr := sessionmanager.New(sessionmanager.Deps{Runtime: rt, Agents: stubAgents{}, Workspace: ws, Store: store, Messenger: msg, Lifecycle: lcm, LookPath: func(string) (string, error) { return "/usr/bin/true", nil }})
+	mgr.SetTerminalInputGate(integrationTerminalInputGate{})
 	lcm.SetCompletionTerminator(mgr)
 	sm := sessionsvc.New(mgr, store)
 	return &stack{store: store, sm: sm, mgr: mgr, lcm: lcm, prm: prm, rt: rt, ws: ws, msg: msg}
@@ -311,41 +329,45 @@ func TestDelegateEndpointDoesNotDependOnCodexDeviceReconciliation(t *testing.T) 
 	}
 }
 
-func TestMergedPRUsesSessionManagerOnlyWhenOptedIn(t *testing.T) {
+func TestMergedPRUsesDefaultPolicyAndHonorsSessionOptOut(t *testing.T) {
 	ctx := context.Background()
 	st := newStack(t)
 	sess, _, _, err := st.sm.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Branch: "b", Prompt: "do it"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !sess.TerminateOnPRMerge {
+		t.Fatal("new worker did not inherit the enabled archive-on-merge default")
+	}
 
 	if err := st.prm.ApplyObservation(ctx, sess.ID, ports.PRObservation{Fetched: true, URL: "pr1", Number: 1, Merged: true}); err != nil {
 		t.Fatal(err)
 	}
-	if st.rt.destroyed != 0 || st.ws.destroyed != 0 {
-		t.Fatalf("default policy tore down resources: runtime=%d workspace=%d", st.rt.destroyed, st.ws.destroyed)
+	if st.rt.destroyed != 1 || st.ws.destroyed != 1 {
+		t.Fatalf("default archive did not release worker resources: runtime=%d workspace=%d, want 1/1", st.rt.destroyed, st.ws.destroyed)
 	}
 	rec, _, _ := st.store.GetSession(ctx, sess.ID)
-	if rec.IsTerminated {
-		t.Fatalf("default policy terminated merged session: %+v", rec)
+	if !rec.IsTerminated {
+		t.Fatalf("default policy left merged worker live: %+v", rec)
 	}
 
-	sess2, _, _, err := st.sm.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Branch: "c", Prompt: "do more"})
+	archiveOff := false
+	sess2, _, _, err := st.sm.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Branch: "c", Prompt: "do more", TerminateOnPRMerge: &archiveOff})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := st.store.SetSessionTerminateOnPRMerge(ctx, sess2.ID, true, time.Now().UTC()); err != nil || !ok {
-		t.Fatalf("enable terminate-on-merge: ok=%v err=%v", ok, err)
+	if sess2.TerminateOnPRMerge {
+		t.Fatal("explicit false session override did not opt out")
 	}
 	if err := st.prm.ApplyObservation(ctx, sess2.ID, ports.PRObservation{Fetched: true, URL: "pr2", Number: 2, Merged: true}); err != nil {
 		t.Fatal(err)
 	}
 	if st.rt.destroyed != 1 || st.ws.destroyed != 1 {
-		t.Fatalf("opted-in merge teardown: runtime=%d workspace=%d, want 1/1", st.rt.destroyed, st.ws.destroyed)
+		t.Fatalf("explicit false session override released resources: runtime=%d workspace=%d, want unchanged 1/1", st.rt.destroyed, st.ws.destroyed)
 	}
 	rec, _, _ = st.store.GetSession(ctx, sess2.ID)
-	if !rec.IsTerminated {
-		t.Fatalf("opted-in merged session remained live: %+v", rec)
+	if rec.IsTerminated {
+		t.Fatalf("explicit false session override terminated the worker: %+v", rec)
 	}
 }
 
@@ -360,7 +382,7 @@ func TestSpawnPRKillRoundTrip(t *testing.T) {
 		t.Fatalf("spawn got %+v", sess)
 	}
 	rec, ok, _ := st.store.GetSession(ctx, sess.ID)
-	if !ok || rec.Metadata.RuntimeHandleID != "h1" || rec.IsTerminated {
+	if !ok || rec.Metadata.RuntimeHandleID != "mer-1" || rec.IsTerminated {
 		t.Fatalf("post-spawn row wrong: %+v", rec)
 	}
 	if err := st.prm.ApplyObservation(ctx, sess.ID, ports.PRObservation{Fetched: true, URL: "pr1", Number: 1, CI: domain.CIFailing, Checks: []ports.PRCheckObservation{{Name: "build", CommitHash: "c1", Status: domain.PRCheckFailed, LogTail: "boom"}}}); err != nil {

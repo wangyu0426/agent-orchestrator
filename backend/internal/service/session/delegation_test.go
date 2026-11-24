@@ -44,10 +44,12 @@ func TestDelegateTaskSpawnsWorkerAndRefinesTitleThroughBackgroundHarness(t *test
 			}
 			svc := &Service{store: st, manager: cmd, runBackground: runInline}
 			brief := "  Fix the renderer\nwithout changing the API.  "
+			archiveOnMerge := false
 
 			out, err := svc.DelegateTask(context.Background(), DelegateTaskInput{
 				ProjectID: "ao", Brief: brief, RequestedAgent: tt.agent, Model: tt.model,
 				Effort: effort, RequestedMode: tt.mode, TaskPreparation: "prep-token",
+				TerminateOnPRMerge: &archiveOnMerge,
 			})
 			if err != nil {
 				t.Fatalf("DelegateTask: %v", err)
@@ -63,6 +65,9 @@ func TestDelegateTaskSpawnsWorkerAndRefinesTitleThroughBackgroundHarness(t *test
 			}
 			if cmd.spawnedCfg.EffortOverride != (effort != nil) || cmd.spawnedCfg.RequestedMode != tt.mode {
 				t.Fatalf("spawn tuning presence/mode = %#v/%q", cmd.spawnedCfg, cmd.spawnedCfg.RequestedMode)
+			}
+			if cmd.spawnedCfg.TerminateOnPRMerge == nil || *cmd.spawnedCfg.TerminateOnPRMerge {
+				t.Fatalf("spawn archive-on-merge override = %v, want explicit false", cmd.spawnedCfg.TerminateOnPRMerge)
 			}
 			if len(cmd.backgroundCalls) != 1 {
 				t.Fatalf("background calls = %#v, want one", cmd.backgroundCalls)

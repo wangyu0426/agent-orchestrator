@@ -23,13 +23,14 @@ func (s settingsStore) GetAppSettings(ctx context.Context) (settingssvc.Snapshot
 		return settingssvc.Snapshot{}, err
 	}
 	return settingssvc.Snapshot{
-		DefaultSessionMode:   row.DefaultSessionMode,
-		HarnessDefaults:      row.HarnessDefaults,
-		VersionRefresh:       row.VersionRefresh,
-		ComputerUse:          row.ComputerUse,
-		SessionRetentionDays: row.SessionRetentionDays,
-		AccountHandoff:       row.AccountHandoff,
-		UpdatedAt:            row.UpdatedAt,
+		DefaultSessionMode:        row.DefaultSessionMode,
+		HarnessDefaults:           row.HarnessDefaults,
+		VersionRefresh:            row.VersionRefresh,
+		ComputerUse:               row.ComputerUse,
+		SessionRetentionDays:      row.SessionRetentionDays,
+		AccountHandoff:            row.AccountHandoff,
+		TerminateOnPRMergeDefault: row.TerminateOnPRMergeDefault,
+		UpdatedAt:                 row.UpdatedAt,
 	}, nil
 }
 
@@ -51,6 +52,10 @@ func (s settingsStore) SetComputerUse(ctx context.Context, enabled bool, now tim
 
 func (s settingsStore) SetSessionRetentionDays(ctx context.Context, days int, now time.Time) error {
 	return s.store.SetSessionRetentionDays(ctx, days, now)
+}
+
+func (s settingsStore) SetTerminateOnPRMergeDefault(ctx context.Context, enabled bool, now time.Time) error {
+	return s.store.SetTerminateOnPRMergeDefault(ctx, enabled, now)
 }
 
 func (s settingsStore) SetAccountHandoff(ctx context.Context, enabled bool, now time.Time) error {

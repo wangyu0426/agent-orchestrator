@@ -22,7 +22,7 @@ import { SettingsSection } from "./SettingsSection";
 import { ThemePaletteSwatch } from "./ThemePaletteSwatch";
 import { Switch } from "../ui/switch";
 import { cn } from "../../lib/utils";
-import { useSettings, useUpdateSessionInterface, useUpdateSessionRetention, useUpdateVersionRefresh } from "../../hooks/useSettings";
+import { useSettings, useUpdateSessionInterface, useUpdateSessionRetention, useUpdateTerminateOnPRMergeDefault, useUpdateVersionRefresh } from "../../hooks/useSettings";
 import { useEditorPreference, useSetPreferredEditor } from "../../hooks/useEditorHandoff";
 import { TargetIcon } from "../TopbarOpenEditorButton";
 import type { EditorId } from "../../../shared/editor-handoff";
@@ -172,6 +172,27 @@ function SessionRetentionRow() {
 				disabled={isLoading || saving}
 			/>
 		</SettingsRow>
+	);
+}
+
+function ArchiveOnMergeDefaultRow() {
+	const { t } = useTranslation();
+	const { settings, isLoading } = useSettings();
+	const { update, saving, error } = useUpdateTerminateOnPRMergeDefault();
+	const enabled = settings?.terminateOnPRMergeDefault;
+	if (enabled === undefined) return null;
+	return (
+		<div className="flex w-full flex-col">
+			<SettingsRow className="rounded-none" label={t("settings.archiveOnMergeDefault.label")} description={t("settings.archiveOnMergeDefault.description")}>
+				<Switch
+					aria-label={t("settings.archiveOnMergeDefault.label")}
+					checked={enabled}
+					disabled={isLoading || saving}
+					onCheckedChange={update}
+				/>
+			</SettingsRow>
+			{error ? <p role="alert" className="px-3 pb-2 text-caption leading-4 text-error">{error}</p> : null}
+		</div>
 	);
 }
 
@@ -459,6 +480,7 @@ export function GeneralSettingsSection({
 					/>
 				</SettingsRow>
 				<VersionRefreshRow />
+				<ArchiveOnMergeDefaultRow />
 				<SessionRetentionRow />
 				<TerminalShellRows />
 				<SettingsRow label={t("settings.terminalCopyOnSelect")}>

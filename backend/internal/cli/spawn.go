@@ -38,6 +38,7 @@ type spawnOptions struct {
 	claimPR         string
 	noTakeover      bool
 	review          bool
+	archiveOnMerge  bool
 	skipAgentCheck  bool
 	trackerProvider string
 }
@@ -50,6 +51,7 @@ type spawnRequest struct {
 	ParentSessionID     string `json:"parentSessionId,omitempty"`
 	TrackerProvider     string `json:"trackerProvider,omitempty"`
 	Kind                string `json:"kind,omitempty"`
+	TerminateOnPRMerge  *bool  `json:"terminateOnPrMerge,omitempty"`
 	Mode                string `json:"mode,omitempty"`
 	Harness             string `json:"harness,omitempty"`
 	Branch              string `json:"branch,omitempty"`
@@ -116,6 +118,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			}
 			if opts.kind != "" && opts.kind != "worker" && opts.kind != "orchestrator" {
 				return usageError{fmt.Errorf(`--kind must be "worker" or "orchestrator"`)}
+			}
+			if cmd.Flags().Changed("archive-on-merge") && opts.kind == "orchestrator" {
+				return usageError{fmt.Errorf("--archive-on-merge is supported for worker sessions only")}
 			}
 			if opts.output != "" && opts.output != "artifact" {
 				return usageError{fmt.Errorf(`--output must be "artifact"`)}
@@ -185,6 +190,11 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 			}
+			var terminateOnPRMerge *bool
+			if cmd.Flags().Changed("archive-on-merge") {
+				value := opts.archiveOnMerge
+				terminateOnPRMerge = &value
+			}
 			req := spawnRequest{
 				ProjectID:           opts.project,
 				IssueID:             opts.issue,
@@ -203,6 +213,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				DisplayName:         name,
 				DisplayNameExplicit: true,
 				Async:               !opts.standalone,
+				TerminateOnPRMerge:  terminateOnPRMerge,
 			}
 			var res spawnResult
 			if err := ctx.postSetupJSON(cmd.Context(), "sessions", req, &res); err != nil {
@@ -275,6 +286,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	f.BoolVar(&opts.standalone, "standalone", false, "Spawn a projectless worker in an Orchestrator-managed plain directory (requires --agent)")
 	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent: claude-code, codex, aider, opencode, opencode-v2, grok, droid, amp, agy, crush, cursor, qwen, gemini, copilot, goose, auggie, continue, devin, cline, kimi, muse, kiro, kilocode, vibe, pi, kimchi, prime-agent, autohand, omp, fx, unreal-agent, mimo-code, deepseek-harness, openhands, command-code, docker-agent,minimax-code, memcode, hermes, stakpak (default: project worker.agent; orchestrator spawns default to project orchestrator.agent; required if the project has none)")
 	f.StringVar(&opts.kind, "kind", "", "Session role: worker or orchestrator (default: worker)")
+	f.BoolVar(&opts.archiveOnMerge, "archive-on-merge", false, "Override the worker default: archive after all tracked PRs close with at least one merged; pass --archive-on-merge=false to opt out")
 	f.StringVar(&opts.mode, "mode", "", "Initial session interface: chat (structured agent connection) or tui (the agent's native terminal). Omitted uses the daemon default; compatible sessions can switch later.")
 	f.StringVar(&opts.branch, "branch", "", "Branch for git project sessions (default: ao/<session-id>/root; unsupported for standalone or Scratch sessions)")
 	f.StringVar(&opts.baseBranch, "base", "", "Start the session's branch from this branch, to stack on its pull request (default: the project's default branch); with --branch, that branch must be new")

@@ -39,6 +39,12 @@ type sessionCleanupOptions struct {
 	dryRun  bool
 }
 
+type sessionArchiveMergedOptions struct {
+	project string
+	apply   bool
+	json    bool
+}
+
 type sessionDeleteOptions struct {
 	project string
 	yes     bool
@@ -178,6 +184,29 @@ type cleanupSessionsResponse struct {
 	Skipped     []cleanupSkippedSession `json:"skipped"`
 }
 
+type mergeArchiveCandidateDTO struct {
+	SessionID   string `json:"sessionId"`
+	ProjectID   string `json:"projectId,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Eligible    bool   `json:"eligible"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+type mergeArchivePreviewResponse struct {
+	Candidates []mergeArchiveCandidateDTO `json:"candidates"`
+}
+
+type mergeArchiveApplyResultDTO struct {
+	SessionID      string `json:"sessionId"`
+	Archived       bool   `json:"archived"`
+	WorkspaceFreed bool   `json:"workspaceFreed"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+type mergeArchiveApplyResponse struct {
+	Results []mergeArchiveApplyResultDTO `json:"results"`
+}
+
 type claimPRRequest struct {
 	PR            string `json:"pr"`
 	AllowTakeover bool   `json:"allowTakeover"`
@@ -248,6 +277,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionResumeAgentCommand(ctx))
 	cmd.AddCommand(newSessionRenameCommand(ctx))
 	cmd.AddCommand(newSessionCleanupCommand(ctx))
+	cmd.AddCommand(newSessionArchiveMergedCommand(ctx))
 	cmd.AddCommand(newSessionDeleteCommand(ctx))
 	cmd.AddCommand(newSessionClaimPRCommand(ctx))
 	cmd.AddCommand(newSessionHistoryCommand(ctx))
@@ -420,6 +450,24 @@ func newSessionCleanupCommand(ctx *commandContext) *cobra.Command {
 	addSessionProjectFlag(cmd.Flags(), &opts.project, "Filter by project ID")
 	cmd.Flags().BoolVarP(&opts.yes, "yes", "y", false, "Skip confirmation prompt")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Preview which sessions would be cleaned without removing anything")
+	return cmd
+}
+
+func newSessionArchiveMergedCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionArchiveMergedOptions
+	cmd := &cobra.Command{
+		Use:   "archive-merged",
+		Short: "Preview or explicitly archive merged worker sessions",
+		Long: "Preview existing worker sessions with merged pull requests and see why unsafe sessions are deferred. " +
+			"Pass --apply to archive only the eligible sessions from that preview; every session is rechecked before teardown.",
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return ctx.archiveMergedSessions(cmd.Context(), cmd, opts)
+		},
+	}
+	addSessionProjectFlag(cmd.Flags(), &opts.project, "Filter by project ID")
+	cmd.Flags().BoolVar(&opts.apply, "apply", false, "Explicitly archive the sessions reported as eligible by this preview")
+	cmd.Flags().BoolVar(&opts.json, "json", false, "Output preview and apply results as JSON")
 	return cmd
 }
 
@@ -974,6 +1022,79 @@ func (c *commandContext) renameSession(ctx context.Context, cmd *cobra.Command, 
 	}
 	_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s renamed to %q\n", sessionID, name)
 	return err
+}
+
+func (c *commandContext) archiveMergedSessions(ctx context.Context, cmd *cobra.Command, opts sessionArchiveMergedOptions) error {
+	var preview mergeArchivePreviewResponse
+	if err := c.postJSON(ctx, "sessions/archive-merged/preview", struct {
+		ProjectID string `json:"projectId,omitempty"`
+	}{ProjectID: opts.project}, &preview); err != nil {
+		return err
+	}
+	eligible := make([]string, 0, len(preview.Candidates))
+	for _, candidate := range preview.Candidates {
+		if candidate.Eligible {
+			eligible = append(eligible, candidate.SessionID)
+		}
+	}
+	var applied *mergeArchiveApplyResponse
+	if opts.apply && len(eligible) > 0 {
+		var result mergeArchiveApplyResponse
+		if err := c.postJSON(ctx, "sessions/archive-merged/apply", struct {
+			SessionIDs []string `json:"sessionIds"`
+		}{SessionIDs: eligible}, &result); err != nil {
+			return err
+		}
+		applied = &result
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), struct {
+			Preview mergeArchivePreviewResponse `json:"preview"`
+			Apply   *mergeArchiveApplyResponse  `json:"apply,omitempty"`
+		}{Preview: preview, Apply: applied})
+	}
+	out := cmd.OutOrStdout()
+	if len(preview.Candidates) == 0 {
+		if _, err := fmt.Fprintln(out, "No active worker sessions with an observed merged pull request."); err != nil {
+			return err
+		}
+		return nil
+	}
+	for _, candidate := range preview.Candidates {
+		label := candidate.SessionID
+		if candidate.DisplayName != "" {
+			label += " " + fmt.Sprintf("%q", candidate.DisplayName)
+		}
+		if candidate.Eligible {
+			if _, err := fmt.Fprintf(out, "  Eligible: %s\n", label); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintf(out, "  Deferred: %s (%s)\n", label, candidate.Reason); err != nil {
+			return err
+		}
+	}
+	if !opts.apply {
+		_, err := fmt.Fprintf(out, "\n%d eligible, %d deferred. Use --apply to archive eligible sessions.\n", len(eligible), len(preview.Candidates)-len(eligible))
+		return err
+	}
+	if len(eligible) == 0 {
+		_, err := fmt.Fprintln(out, "\nNo eligible sessions to archive.")
+		return err
+	}
+	for _, result := range applied.Results {
+		if result.Archived {
+			status := "archived"
+			if !result.WorkspaceFreed {
+				status += "; workspace cleanup remains pending or preserved"
+			}
+			if _, err := fmt.Fprintf(out, "  %s: %s\n", result.SessionID, status); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintf(out, "  %s: deferred: %s\n", result.SessionID, result.Reason); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *commandContext) cleanupSessions(ctx context.Context, cmd *cobra.Command, opts sessionCleanupOptions) error {

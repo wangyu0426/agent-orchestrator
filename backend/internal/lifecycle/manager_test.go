@@ -276,6 +276,21 @@ func (f *fakeCompletionTerminator) Kill(_ context.Context, _ domain.SessionID) (
 	return true, f.err
 }
 
+type mergeAwareCompletionTerminator struct {
+	killCalls    int
+	archiveCalls int
+}
+
+func (f *mergeAwareCompletionTerminator) Kill(context.Context, domain.SessionID) (bool, error) {
+	f.killCalls++
+	return true, nil
+}
+
+func (f *mergeAwareCompletionTerminator) ArchiveMergedSession(context.Context, domain.SessionID) (bool, error) {
+	f.archiveCalls++
+	return true, nil
+}
+
 type fixedSessionOperationGate bool
 
 func (g fixedSessionOperationGate) SessionMutationInProgress(domain.SessionID) bool {
@@ -3347,6 +3362,42 @@ func TestPRObservation_MergedUsesConfiguredTerminator(t *testing.T) {
 	}
 	if terminator.calls != 1 {
 		t.Fatalf("terminator calls = %d, want 1", terminator.calls)
+	}
+}
+
+func TestPRObservation_MergedKeepsNonWorkerTerminationBehavior(t *testing.T) {
+	m, st, _ := newManager()
+	terminator := &mergeAwareCompletionTerminator{}
+	m.SetCompletionTerminator(terminator)
+	rec := exited("mer-1")
+	rec.Kind = domain.KindOrchestrator
+	rec.TerminateOnPRMerge = true
+	st.sessions[rec.ID] = rec
+	st.prs[rec.ID] = []domain.PullRequest{{URL: "pr1", Merged: true}}
+
+	if err := m.ApplyPRObservation(ctx, rec.ID, ports.PRObservation{Fetched: true, URL: "pr1", Merged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if terminator.killCalls != 1 || terminator.archiveCalls != 0 {
+		t.Fatalf("non-worker merge termination calls: kill=%d archive=%d; want Kill only", terminator.killCalls, terminator.archiveCalls)
+	}
+}
+
+func TestPRObservation_MergedWorkerUsesArchiveWithoutTelemetryRecorder(t *testing.T) {
+	m, st, _ := newManager()
+	terminator := &mergeAwareCompletionTerminator{}
+	m.SetCompletionTerminator(terminator)
+	rec := exited("mer-1")
+	rec.Kind = domain.KindWorker
+	rec.TerminateOnPRMerge = true
+	st.sessions[rec.ID] = rec
+	st.prs[rec.ID] = []domain.PullRequest{{URL: "pr1", Merged: true}}
+
+	if err := m.ApplyPRObservation(ctx, rec.ID, ports.PRObservation{Fetched: true, URL: "pr1", Merged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if terminator.archiveCalls != 1 || terminator.killCalls != 0 {
+		t.Fatalf("worker merge termination calls: kill=%d archive=%d; want archive only", terminator.killCalls, terminator.archiveCalls)
 	}
 }
 

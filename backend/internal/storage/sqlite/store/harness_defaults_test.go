@@ -46,3 +46,26 @@ func TestHarnessDefaultsPersistIndependentlyAndReset(t *testing.T) {
 		t.Fatal("harness defaults changed unrelated settings")
 	}
 }
+
+func TestTerminateOnPRMergeDefaultStartsEnabledAndPersistsFalse(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	initial, err := s.GetAppSettings(ctx)
+	if err != nil || !initial.TerminateOnPRMergeDefault {
+		t.Fatalf("initial merge archive default = %+v, %v; want enabled", initial, err)
+	}
+	if err := s.SetTerminateOnPRMergeDefault(ctx, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := s.GetAppSettings(ctx)
+	if err != nil || saved.TerminateOnPRMergeDefault {
+		t.Fatalf("saved explicit false = %+v, %v", saved, err)
+	}
+	if err := s.SetTerminateOnPRMergeDefault(ctx, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = s.GetAppSettings(ctx)
+	if err != nil || !saved.TerminateOnPRMergeDefault {
+		t.Fatalf("saved true = %+v, %v", saved, err)
+	}
+}

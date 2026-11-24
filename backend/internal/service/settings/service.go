@@ -30,6 +30,7 @@ type Store interface {
 	SetComputerUse(ctx context.Context, enabled bool, now time.Time) error
 	SetSessionRetentionDays(ctx context.Context, days int, now time.Time) error
 	SetAccountHandoff(ctx context.Context, enabled bool, now time.Time) error
+	SetTerminateOnPRMergeDefault(ctx context.Context, enabled bool, now time.Time) error
 }
 
 // Snapshot is the current preference set.
@@ -48,7 +49,10 @@ type Snapshot struct {
 	// default, keeps it.
 	SessionRetentionDays int
 	AccountHandoff       bool
-	UpdatedAt            time.Time
+	// TerminateOnPRMergeDefault applies only to worker sessions created after
+	// the preference is changed.
+	TerminateOnPRMergeDefault bool
+	UpdatedAt                 time.Time
 }
 
 // Offering reports which AO offerings this daemon exposes to clients. It is
@@ -251,6 +255,25 @@ func (s *Service) SetSessionRetentionDays(ctx context.Context, days int) (Snapsh
 		return Snapshot{}, apierr.Invalid("SESSION_RETENTION_INVALID", fmt.Sprintf("days must be between 0 and %d", maxSessionRetentionDays), nil)
 	}
 	if err := s.store.SetSessionRetentionDays(ctx, days, s.now()); err != nil {
+		return Snapshot{}, err
+	}
+	return s.Get(ctx)
+}
+
+// TerminateOnPRMergeDefault returns the durable default for newly spawned
+// worker sessions. Spawn fails closed if the preference cannot be read.
+func (s *Service) TerminateOnPRMergeDefault(ctx context.Context) (bool, error) {
+	snapshot, err := s.store.GetAppSettings(ctx)
+	if err != nil {
+		return false, err
+	}
+	return snapshot.TerminateOnPRMergeDefault, nil
+}
+
+// SetTerminateOnPRMergeDefault changes the merge archive policy for future
+// worker sessions. Existing sessions keep their current value.
+func (s *Service) SetTerminateOnPRMergeDefault(ctx context.Context, enabled bool) (Snapshot, error) {
+	if err := s.store.SetTerminateOnPRMergeDefault(ctx, enabled, s.now()); err != nil {
 		return Snapshot{}, err
 	}
 	return s.Get(ctx)

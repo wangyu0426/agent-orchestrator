@@ -93,7 +93,8 @@ type CreateTaskInput = {
 	effort?: string;
 	mode?: "chat" | "tui";
 	approvalMode?: ApprovalMode;
-	accountId?: string;
+    accountId?: string;
+    terminateOnPrMerge?: boolean;
 	attachments?: FileAttachmentPayload[];
 	taskPreparation?: string;
 };
@@ -159,6 +160,7 @@ export type TaskComposerProps = {
 export type TaskLaunchOptions = {
 	interfaceMode?: "chat" | "tui";
 	approvalMode?: ApprovalMode;
+	archiveOnMerge?: "inherit" | "enabled" | "disabled";
 	/** Idempotency key; a retry with the same key cannot create a second session. */
 	clientRequestId?: string;
 	/** Send exactly this request instead of the current picks, e.g. a retry of a send whose response was lost. */
@@ -174,7 +176,8 @@ export type LaunchReplay = {
 	effort?: string;
 	approvalMode?: ApprovalMode;
 	mode?: "chat" | "tui";
-	accountId?: string;
+    accountId?: string;
+    terminateOnPrMerge?: boolean;
 };
 
 /**
@@ -193,6 +196,7 @@ export function useTaskLaunch({ projectId, hostId }: {
 	const [model, setModel] = useState("");
 	const [mode, setMode] = useState("");
 	const [effort, setEffort] = useState("");
+	const [archiveOnMerge, setArchiveOnMerge] = useState<TaskLaunchOptions["archiveOnMerge"]>("inherit");
 	const [agent, setAgent] = useState("");
 	const [agentTouched, setAgentTouched] = useState(false);
 	const [modelTouched, setModelTouched] = useState(false);
@@ -363,7 +367,8 @@ export function useTaskLaunch({ projectId, hostId }: {
 						...(input.effort !== undefined ? { effort: input.effort } : {}),
 						...(input.mode ? { mode: input.mode } : {}),
 						...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
-						...(input.accountId ? { accountId: input.accountId } : {}),
+                        ...(input.accountId ? { accountId: input.accountId } : {}),
+                        ...(input.terminateOnPrMerge !== undefined ? { terminateOnPrMerge: input.terminateOnPrMerge } : {}),
 						...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
 						...(input.taskPreparation ? { taskPreparation: input.taskPreparation } : {}),
 					},
@@ -414,7 +419,8 @@ export function useTaskLaunch({ projectId, hostId }: {
 					...(input.effort ? { effort: input.effort } : {}),
 					...(input.mode ? { mode: input.mode } : {}),
 					...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
-					...(input.accountId ? { accountId: input.accountId } : {}),
+                    ...(input.accountId ? { accountId: input.accountId } : {}),
+                    ...(input.terminateOnPrMerge !== undefined ? { terminateOnPrMerge: input.terminateOnPrMerge } : {}),
 					...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
 				},
 			});
@@ -1127,7 +1133,7 @@ export function useTaskLaunch({ projectId, hostId }: {
 	};
 
 	// Rejects with the create error after recording it (and any fallback) here.
-	const launch = async (brief: string, { interfaceMode, approvalMode: requestedApproval, clientRequestId, replay, attachments: files }: TaskLaunchOptions = {}): Promise<string> => {
+	const launch = async (brief: string, { interfaceMode, approvalMode: requestedApproval, archiveOnMerge: archiveOverride, clientRequestId, replay, attachments: files }: TaskLaunchOptions = {}): Promise<string> => {
 		if (!projectId || !canSubmit || isSubmitting) throw new Error(remoteLoadError ?? t("newTask.unableToStart"));
 
 		setIsSubmitting(true);
@@ -1150,6 +1156,11 @@ export function useTaskLaunch({ projectId, hostId }: {
 					.catch(() => {});
 			}
 			const attachmentPayloads = files ?? await toSettledPayload();
+			const mergeOverride = replay?.terminateOnPrMerge !== undefined
+				? replay.terminateOnPrMerge
+				: (archiveOverride ?? archiveOnMerge) === "enabled" ? true
+					: (archiveOverride ?? archiveOnMerge) === "disabled" ? false
+						: undefined;
 			// One that resolved while the checks above ran is claimed too.
 			submittedPreparation = heldPreparation || taskPreparationRef.current;
 			launchingPreparationRef.current = submittedPreparation;
@@ -1176,6 +1187,7 @@ export function useTaskLaunch({ projectId, hostId }: {
 					accountId,
 				}),
 				attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
+				...(mergeOverride !== undefined ? { terminateOnPrMerge: mergeOverride } : {}),
 				taskPreparation: submittedPreparation || undefined,
 			};
 			const { taskPreparation: _, attachments: _attachments, ...requestPayload } = request;
@@ -1280,8 +1292,8 @@ export function useTaskLaunch({ projectId, hostId }: {
 	const submitMode: TaskLaunchOptions["interfaceMode"] = isChatOnlyAgent(selectedAgent) ? "chat" : requiresTuiFallback ? "tui" : undefined;
 	const launchFallback = (brief: string, clientRequestId?: string, files?: FileAttachmentPayload[]) =>
 		fallbackAction === "bypass-permissions"
-			? launch(brief, { interfaceMode: isChatOnlyAgent(selectedAgent) ? "chat" : undefined, approvalMode: "bypass-permissions", clientRequestId, attachments: files })
-			: launch(brief, { interfaceMode: "tui", clientRequestId, attachments: files });
+            ? launch(brief, { interfaceMode: isChatOnlyAgent(selectedAgent) ? "chat" : undefined, approvalMode: "bypass-permissions", clientRequestId, archiveOnMerge, attachments: files })
+            : launch(brief, { interfaceMode: "tui", archiveOnMerge, clientRequestId, attachments: files });
 
 	const changeAgent = (value: string) => {
 		setError(undefined);
@@ -1397,6 +1409,8 @@ export function useTaskLaunch({ projectId, hostId }: {
 		refreshModels: refreshSelectedModels,
 		preparedSessionId,
 		submitMode,
+		archiveOnMerge,
+		setArchiveOnMerge,
 		isCloudProject,
 		isCoderCloudProject,
 		canSubmit,
@@ -1581,6 +1595,14 @@ export function TaskComposer({
 		<TaskComposerView
 			autoFocusPrompt={autoFocusTitle}
 			canSubmit={task.canSubmit}
+			context={!task.isCloudProject ? <div className="flex items-center justify-between gap-3 px-4 pt-2 text-xs text-muted-foreground">
+				<label htmlFor="task-archive-on-merge">{t("newTask.archiveOnMerge")}</label>
+				<select id="task-archive-on-merge" className="rounded border border-border bg-background px-2 py-1 text-foreground" value={task.archiveOnMerge ?? "inherit"} disabled={task.isSubmitting} onChange={(event) => task.setArchiveOnMerge(event.target.value as "inherit" | "enabled" | "disabled")}>
+					<option value="inherit">{t("newTask.archiveOnMergeInherit")}</option>
+					<option value="enabled">{t("newTask.archiveOnMergeEnabled")}</option>
+					<option value="disabled">{t("newTask.archiveOnMergeDisabled")}</option>
+				</select>
+			</div> : undefined}
 			onPromptChange={handlePromptChange}
 			labels={{
 				addFile: t("newTask.addFile"),
@@ -1605,7 +1627,7 @@ export function TaskComposer({
 				isSubmitting: task.isSubmitting,
 				modelWarning: task.modelWarning,
 				onFallbackAction: (brief) => settle(task.launchFallback(brief)),
-				onSubmit: (brief) => settle(task.launch(brief, { interfaceMode: task.submitMode })),
+				onSubmit: (brief) => settle(task.launch(brief, { interfaceMode: task.submitMode, archiveOnMerge: task.archiveOnMerge })),
 			}}
 			renderAgentControl={task.renderAgentControl}
 			renderEffortControl={task.renderEffortControl}

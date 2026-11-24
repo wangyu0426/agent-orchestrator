@@ -23,6 +23,7 @@ type SettingsService interface {
 	SetComputerUse(ctx context.Context, enabled bool) (settingssvc.Snapshot, error)
 	SetSessionRetentionDays(ctx context.Context, days int) (settingssvc.Snapshot, error)
 	SetAccountHandoff(ctx context.Context, enabled bool) (settingssvc.Snapshot, error)
+	SetTerminateOnPRMergeDefault(ctx context.Context, enabled bool) (settingssvc.Snapshot, error)
 	ChatHarnesses(candidates []domain.AgentHarness) []domain.AgentHarness
 	Offering() settingssvc.Offering
 }
@@ -45,6 +46,7 @@ func (c *SettingsController) Register(r chi.Router) {
 	r.Patch("/settings/computer-use", c.setComputerUse)
 	r.Patch("/settings/session-retention", c.setSessionRetention)
 	r.Patch("/settings/account-handoff", c.setAccountHandoff)
+	r.Patch("/settings/terminate-on-pr-merge", c.setTerminateOnPRMergeDefault)
 	r.Patch("/settings/harness-defaults/{agent}", c.setHarnessDefault)
 }
 
@@ -176,6 +178,28 @@ func (c *SettingsController) setSessionRetention(w http.ResponseWriter, r *http.
 	envelope.WriteJSON(w, http.StatusOK, c.response(snapshot))
 }
 
+func (c *SettingsController) setTerminateOnPRMergeDefault(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "PATCH", "/api/v1/settings/terminate-on-pr-merge")
+		return
+	}
+	var req UpdateTerminateOnPRMergeDefaultRequest
+	if !decodeConversationBody(w, r, &req) {
+		return
+	}
+	if req.Enabled == nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation",
+			"TERMINATE_ON_PR_MERGE_INVALID", "enabled must be true or false", nil)
+		return
+	}
+	snapshot, err := c.Svc.SetTerminateOnPRMergeDefault(r.Context(), *req.Enabled)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, c.response(snapshot))
+}
+
 func (c *SettingsController) setAccountHandoff(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/settings/account-handoff")
@@ -208,19 +232,20 @@ func (c *SettingsController) response(snapshot settingssvc.Snapshot) SettingsRes
 	}
 	offering := c.Svc.Offering()
 	return SettingsResponse{
-		DefaultSessionMode:     string(snapshot.DefaultSessionMode),
-		HarnessDefaults:        snapshot.HarnessDefaults,
-		ChatHarnesses:          names,
-		Client:                 offering.Client,
-		LocalEnabled:           offering.LocalEnabled,
-		ChatHibernationEnabled: snapshot.ChatHibernationEnabled,
-		VersionRefresh:         snapshot.VersionRefresh,
-		ComputerUse:            snapshot.ComputerUse,
-		SessionRetentionDays:   snapshot.SessionRetentionDays,
-		CloudEnabled:           offering.CloudEnabled(),
-		AccountHandoff:         snapshot.AccountHandoff,
-		CloudControlPlaneURL:   offering.CloudControlPlaneURL,
-		TrackerIntakeEnabled:   offering.TrackerIntakeEnabled,
+		DefaultSessionMode:        string(snapshot.DefaultSessionMode),
+		HarnessDefaults:           snapshot.HarnessDefaults,
+		ChatHarnesses:             names,
+		Client:                    offering.Client,
+		LocalEnabled:              offering.LocalEnabled,
+		ChatHibernationEnabled:    snapshot.ChatHibernationEnabled,
+		VersionRefresh:            snapshot.VersionRefresh,
+		ComputerUse:               snapshot.ComputerUse,
+		SessionRetentionDays:      snapshot.SessionRetentionDays,
+		AccountHandoff:            snapshot.AccountHandoff,
+		TerminateOnPRMergeDefault: snapshot.TerminateOnPRMergeDefault,
+		CloudEnabled:              offering.CloudEnabled(),
+		CloudControlPlaneURL:      offering.CloudControlPlaneURL,
+		TrackerIntakeEnabled:      offering.TrackerIntakeEnabled,
 	}
 }
 

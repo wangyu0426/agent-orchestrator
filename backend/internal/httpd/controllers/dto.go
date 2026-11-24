@@ -683,8 +683,11 @@ type SpawnSessionRequest struct {
 	ParentSessionID domain.SessionID       `json:"parentSessionId,omitempty"`
 	TrackerProvider domain.TrackerProvider `json:"trackerProvider,omitempty" enum:"github,gitlab"`
 	Kind            domain.SessionKind     `json:"kind,omitempty" enum:"worker,orchestrator"`
-	Harness         domain.AgentHarness    `json:"harness,omitempty" enum:"claude-code,codex,aider,opencode,opencode-v2,grok,droid,amp,agy,crush,cursor,qwen,gemini,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,omp,fx,prime-agent,autohand,unreal-agent,codewhale,mimo-code,minimax-code,deepseek-harness,openhands,command-code,docker-agent,memcode,hermes,stakpak"`
-	Branch          string                 `json:"branch,omitempty"`
+	// TerminateOnPRMerge explicitly overrides the project and user defaults for
+	// a new worker session. Omission inherits those defaults.
+	TerminateOnPRMerge *bool               `json:"terminateOnPrMerge,omitempty"`
+	Harness            domain.AgentHarness `json:"harness,omitempty" enum:"claude-code,codex,aider,opencode,opencode-v2,grok,droid,amp,agy,crush,cursor,qwen,gemini,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,omp,fx,prime-agent,autohand,unreal-agent,codewhale,mimo-code,minimax-code,deepseek-harness,openhands,command-code,docker-agent,memcode,hermes,stakpak"`
+	Branch             string              `json:"branch,omitempty"`
 	// BaseBranch starts the session's branch from this branch instead of the
 	// project's default, to stack its work on another pull request.
 	BaseBranch string `json:"baseBranch,omitempty" maxLength:"255"`
@@ -1452,6 +1455,43 @@ type CleanupSessionsResponse struct {
 	Skipped     []CleanupSkippedSession `json:"skipped"`
 }
 
+// MergeArchivePreviewRequest filters the explicit preview by project.
+type MergeArchivePreviewRequest struct {
+	ProjectID domain.ProjectID `json:"projectId,omitempty"`
+}
+
+// MergeArchiveCandidateResponse reports one merged worker and its current safety result.
+type MergeArchiveCandidateResponse struct {
+	SessionID   domain.SessionID `json:"sessionId"`
+	ProjectID   domain.ProjectID `json:"projectId,omitempty"`
+	DisplayName string           `json:"displayName,omitempty"`
+	Eligible    bool             `json:"eligible"`
+	Reason      string           `json:"reason,omitempty"`
+}
+
+// MergeArchivePreviewResponse is the safe, read-only batch preview.
+type MergeArchivePreviewResponse struct {
+	Candidates []MergeArchiveCandidateResponse `json:"candidates"`
+}
+
+// ApplyMergedArchiveRequest explicitly selects sessions from a preview to archive.
+type ApplyMergedArchiveRequest struct {
+	SessionIDs []domain.SessionID `json:"sessionIds" minItems:"1" maxItems:"500"`
+}
+
+// MergeArchiveApplyResultResponse reports one rechecked batch result.
+type MergeArchiveApplyResultResponse struct {
+	SessionID      domain.SessionID `json:"sessionId"`
+	Archived       bool             `json:"archived"`
+	WorkspaceFreed bool             `json:"workspaceFreed"`
+	Reason         string           `json:"reason,omitempty"`
+}
+
+// ApplyMergedArchiveResponse reports all selected sessions independently.
+type ApplyMergedArchiveResponse struct {
+	Results []MergeArchiveApplyResultResponse `json:"results"`
+}
+
 // SendSessionMessageRequest is the body of POST /api/v1/sessions/{sessionId}/send.
 type SendSessionMessageRequest struct {
 	// SenderSessionID is cooperative loopback attribution, not authentication.
@@ -1497,6 +1537,8 @@ type DelegateTaskRequest struct {
 	// AccountID is the subscription account the worker starts on. Empty uses
 	// the provider's default account.
 	AccountID string `json:"accountId,omitempty" maxLength:"128"`
+	// TerminateOnPRMerge explicitly overrides project and user defaults.
+	TerminateOnPRMerge *bool `json:"terminateOnPrMerge,omitempty"`
 	// Attachments are files pasted, dropped, or picked into the delegated task
 	// brief. Each carries bytes as standard base64 (no data: URL prefix). The
 	// daemon writes them into the spawned worker worktree and appends path
@@ -4291,6 +4333,8 @@ type SettingsResponse struct {
 	AccountHandoff bool `json:"accountHandoff" description:"A Chat turn refused for a usage limit moves its session to another signed-in account of the same agent with room, and the prompt is retried there once (Settings, Agent accounts)."`
 	// SessionRetentionDays is how long an archived session is kept.
 	SessionRetentionDays int `json:"sessionRetentionDays" description:"Days an archived session whose worktree is released is kept before the daemon deletes it permanently; 0 keeps it."`
+	// TerminateOnPRMergeDefault applies to worker sessions created from now on.
+	TerminateOnPRMergeDefault bool `json:"terminateOnPrMergeDefault" description:"Whether new worker sessions are archived after all their pull requests reach terminal state and at least one merged."`
 	// CloudEnabled reports whether the cloud offering is available: on for
 	// everyone unless AO_CLOUD_OFFERING switches it off, given a configured
 	// control plane.
@@ -4328,6 +4372,11 @@ type UpdateVersionRefreshRequest struct {
 // UpdateSessionRetentionRequest sets how long archived sessions are kept.
 type UpdateSessionRetentionRequest struct {
 	Days *int `json:"days" description:"Days to keep an archived session whose worktree is released; 0 keeps it." minimum:"0" maximum:"3650"`
+}
+
+// UpdateTerminateOnPRMergeDefaultRequest changes the default for new worker sessions.
+type UpdateTerminateOnPRMergeDefaultRequest struct {
+	Enabled *bool `json:"enabled"`
 }
 
 // UpdateComputerUseRequest flips whether new chat sessions get the computer-use tools.

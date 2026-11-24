@@ -4,9 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Settings } from "../../hooks/useSettings";
 
-const { settingsMock, updateRetentionMock } = vi.hoisted(() => ({
+const { settingsMock, updateRetentionMock, updateMergeArchiveDefaultMock } = vi.hoisted(() => ({
 	settingsMock: vi.fn(),
 	updateRetentionMock: vi.fn(),
+	updateMergeArchiveDefaultMock: vi.fn(),
 }));
 
 const idle = { update: vi.fn(), saving: false, error: undefined };
@@ -15,6 +16,7 @@ vi.mock("../../hooks/useSettings", () => ({
 	useUpdateSessionInterface: () => idle,
 	useUpdateVersionRefresh: () => idle,
 	useUpdateSessionRetention: () => ({ update: updateRetentionMock, saving: false, error: undefined }),
+	useUpdateTerminateOnPRMergeDefault: () => ({ update: updateMergeArchiveDefaultMock, saving: false, error: undefined }),
 }));
 
 vi.mock("../../hooks/useEditorHandoff", () => ({
@@ -56,6 +58,7 @@ function settings(overrides: Partial<Settings>): Settings {
 beforeEach(() => {
 	settingsMock.mockReset();
 	updateRetentionMock.mockReset();
+	updateMergeArchiveDefaultMock.mockReset();
 });
 
 describe("archived session retention", () => {
@@ -83,5 +86,23 @@ describe("archived session retention", () => {
 		renderSection();
 
 		expect(screen.queryByRole("button", { name: "Delete archived sessions" })).not.toBeInTheDocument();
+	});
+});
+
+describe("worker archive on merge default", () => {
+	it("shows the saved default and persists an explicit opt-out", async () => {
+		settingsMock.mockReturnValue(settings({ terminateOnPRMergeDefault: true }));
+		renderSection();
+
+		const toggle = screen.getByRole("switch", { name: "Archive worker sessions after merge" });
+		expect(toggle).toBeChecked();
+		await userEvent.click(toggle);
+		expect(updateMergeArchiveDefaultMock).toHaveBeenCalledWith(false);
+	});
+
+	it("hides the control when the daemon response has no merge-default field", () => {
+		settingsMock.mockReturnValue(settings({}));
+		renderSection();
+		expect(screen.queryByRole("switch", { name: "Archive worker sessions after merge" })).not.toBeInTheDocument();
 	});
 });
