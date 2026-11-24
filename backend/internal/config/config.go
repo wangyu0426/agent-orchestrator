@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
@@ -210,6 +211,9 @@ type Config struct {
 	// (AO_TRACKER_INTAKE).
 	TrackerIntake bool
 	WorkerQuota   *workerquota.Policy
+	// StructuredReview controls opt-in parsing and authorization of structured
+	// AO-REVIEW review-body decisions on submitted COMMENTED reviews.
+	StructuredReview structuredreview.Policy
 	// Client identifies which client this deployment serves (AO_CLIENT). It is
 	// reported to clients through the settings API and gates nothing in the
 	// daemon: the cloud offering (B2B/B2C, providers, billing) is decided per
@@ -513,6 +517,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.WorkerQuota = policy
+
+	srPolicy, err := loadStructuredReview()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.StructuredReview = srPolicy
 
 	if raw := os.Getenv("AO_CLIENT"); raw != "" {
 		cfg.Client = strings.TrimSpace(raw)
