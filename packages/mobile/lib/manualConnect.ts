@@ -1,5 +1,6 @@
 import type { ServerConfig } from "./config";
 import { resolveManualAddress } from "./connectionFields";
+import { isPairingSecret, type PairDeviceResult } from "./deviceToken";
 import { normalizeServerHost, type Endpoint } from "./endpoints";
 import type { Host } from "./hosts";
 
@@ -16,11 +17,13 @@ export type PersistManualHostEditDeps = {
 	ping: (cfg: ServerConfig) => Promise<unknown>;
 	saveHost: (host: Host) => Promise<void>;
 	renameHost: (id: string, name: string) => Promise<void>;
+	pair?: (cfg: ServerConfig) => Promise<PairDeviceResult>;
 };
 
 /** Account sync rewrites this machine's route and credential from the AO
  * Cloud directory, so a hand edit would silently revert within one sync. */
 export class AccountManagedHostError extends Error {
+	readonly code: string = "ACCOUNT_MANAGED_HOST_ERROR";
 	constructor() {
 		super("This machine's address and password come from your account. Scan a new code with Reconnect to connect another way.");
 		this.name = "AccountManagedHostError";
@@ -29,6 +32,7 @@ export class AccountManagedHostError extends Error {
 
 /** A typed address answered, but it was not the paired machine being edited. */
 export class DifferentMachineError extends Error {
+	readonly code: string = "DIFFERENT_MACHINE_ERROR";
 	constructor() {
 		super("That address belongs to another machine. This pairing was not changed.");
 		this.name = "DifferentMachineError";
@@ -51,6 +55,7 @@ export async function adoptManualConnection(
 	cfg: ServerConfig,
 	deps: AdoptManualDeps,
 	name: string,
+	fallbackToken?: string,
 ): Promise<string> {
 	const machineName = name.trim();
 	if (!machineName) throw new Error("Machine name is required");
@@ -62,6 +67,7 @@ export async function adoptManualConnection(
 		platform: "",
 		endpoints: [manualEndpoint(cfg)],
 		token: cfg.password,
+		...(fallbackToken ? { fallbackToken } : {}),
 		lastConnected: Date.now(),
 	});
 	// Even without an id: the selection is by list position, and leaving it
@@ -77,7 +83,7 @@ export function editedManualHost(host: Host, cfg: ServerConfig, name: string, en
 	if (previous) endpoint.kind = previous.kind;
 	const endpoints = [...host.endpoints];
 	endpoints[endpointIndex] = endpoint;
-	return { ...host, name: name.trim(), token: cfg.password, endpoints };
+	return { ...host, name: name.trim(), token: cfg.password, endpoints, ...(cfg.password !== host.token ? { fallbackToken: undefined } : {}) };
 }
 
 /**
@@ -112,9 +118,20 @@ export async function persistManualHostEdit(
 	if (connectionChanged) {
 		const { hostId } = await deps.probe(after);
 		if (host.id && hostId !== host.id) throw new DifferentMachineError();
-		await deps.ping({ ...target, hostId: host.id || hostId });
-		await deps.saveHost(edited);
-	} else if (edited.name !== host.name) {
+		let credential = { ...target, hostId: host.id || hostId };
+		let saved = edited;
+		if (deps.pair && host.token !== target.password && isPairingSecret(target.password)) {
+			const paired = await deps.pair(credential);
+			if (paired.kind === "paired") {
+				credential = { ...credential, password: paired.token };
+				saved = { ...edited, token: paired.token, fallbackToken: paired.credential === "password" ? target.password : undefined };
+			}
+		}
+		await deps.ping(credential);
+		await deps.saveHost(saved);
+		return saved;
+	}
+	if (edited.name !== host.name) {
 		await deps.renameHost(host.id, edited.name);
 	}
 	return edited;

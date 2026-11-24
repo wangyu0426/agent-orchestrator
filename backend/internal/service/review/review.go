@@ -122,7 +122,9 @@ type Store interface {
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
 	ListPRReviews(ctx context.Context, prURL string) ([]domain.PullRequestReview, error)
 	ListPRComments(ctx context.Context, prURL string) ([]domain.PullRequestComment, error)
-	MarkPRCommentResolved(ctx context.Context, prURL, commentID string) (bool, error)
+	// MarkPRReviewThreadResolved records a thread resolved along with all its
+	// comments; the PR summary reads a thread's state from the thread row.
+	MarkPRReviewThreadResolved(ctx context.Context, prURL, threadID string) error
 }
 
 // PRRefresher fetches one pull request fresh from its provider and records it
@@ -430,7 +432,8 @@ func (s *Service) ResolveReviewComment(ctx context.Context, workerID domain.Sess
 		return fmt.Errorf("%w: review comment is not tracked for this PR", ErrNotFound)
 	}
 	if target.Resolved {
-		return nil
+		// Already resolved on the provider; make sure the thread row agrees.
+		return s.store.MarkPRReviewThreadResolved(ctx, pr.URL, target.ThreadID)
 	}
 	ref, err := reviewRequestRef(pr)
 	if err != nil {
@@ -445,10 +448,10 @@ func (s *Service) ResolveReviewComment(ctx context.Context, workerID domain.Sess
 		}
 		return err
 	}
-	if updated, err := s.store.MarkPRCommentResolved(ctx, pr.URL, target.ID); err != nil {
+	// Mark the whole thread, not just this comment: the summary takes a thread's
+	// state from its row, so a comment-only mark left the card open until the next poll.
+	if err := s.store.MarkPRReviewThreadResolved(ctx, pr.URL, target.ThreadID); err != nil {
 		return err
-	} else if !updated {
-		return fmt.Errorf("%w: review comment is not tracked for this PR", ErrNotFound)
 	}
 	s.emit(ctx, "ao.review.comment_resolved", workerID, map[string]any{"provider": pr.Provider})
 	return nil
@@ -670,7 +673,7 @@ func (s *Service) triggerWithOptions(
 	triggeredPayload := map[string]any{"trigger": string(source), "rerun": opts.Rerun}
 	if err := config.Validate(); err != nil {
 		err = fmt.Errorf("%w: reviewer config: %w", ErrInvalid, err)
-		s.emit(ctx, "ao.review.trigger_failed", workerID, map[string]any{
+		s.emit(ctx, "ao.reviews.trigger_failed", workerID, map[string]any{
 			"error_kind": reviewErrorKind(err),
 			"trigger":    string(source),
 		})
@@ -688,7 +691,7 @@ func (s *Service) triggerWithOptions(
 	}
 	result, err := s.engineTrigger(ctx, workerID, opts)
 	if err != nil {
-		s.emit(ctx, "ao.review.trigger_failed", workerID, map[string]any{
+		s.emit(ctx, "ao.reviews.trigger_failed", workerID, map[string]any{
 			"error_kind": reviewErrorKind(err),
 			"trigger":    string(source),
 		})
@@ -704,7 +707,7 @@ func (s *Service) triggerWithOptions(
 		return result, nil
 	}
 	triggeredPayload["created_runs"] = len(result.CreatedRuns)
-	s.emit(ctx, "ao.review.triggered", workerID, triggeredPayload)
+	s.emit(ctx, "ao.reviews.triggered", workerID, triggeredPayload)
 	return result, nil
 }
 
@@ -714,7 +717,7 @@ func (s *Service) Cancel(ctx context.Context, workerID domain.SessionID) (review
 	if err != nil {
 		return result, err
 	}
-	s.emit(ctx, "ao.review.cancelled", workerID, map[string]any{
+	s.emit(ctx, "ao.reviews.cancelled", workerID, map[string]any{
 		"cancelled_runs": len(result.CancelledRuns),
 	})
 	return result, nil
@@ -931,7 +934,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		// Only on the real running -> complete transition. Re-submitting an
 		// already-complete run returns early below, so telemetry stays idempotent
 		// the same way the store does.
-		s.emit(ctx, "ao.review.submitted", workerID, map[string]any{
+		s.emit(ctx, "ao.reviews.submitted", workerID, map[string]any{
 			"harness":            string(run.Harness),
 			"verdict":            string(verdict),
 			"duration_ms":        s.clock().Sub(run.CreatedAt).Milliseconds(),
