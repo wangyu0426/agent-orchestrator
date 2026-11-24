@@ -59,6 +59,7 @@ type AutoSpawnPause struct {
 	Harness   AgentHarness `json:"harness"`
 	Model     string       `json:"model,omitempty"`
 	Effort    string       `json:"effort,omitempty"`
+	Mode      SessionMode  `json:"mode,omitempty" enum:"chat,tui"`
 	Kind      string       `json:"kind,omitempty"`
 	ErrorCode string       `json:"errorCode"`
 	Message   string       `json:"message"`

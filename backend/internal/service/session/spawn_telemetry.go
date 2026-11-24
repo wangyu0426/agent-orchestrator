@@ -47,3 +47,29 @@ func withSpawnClassification(mapped, err error) error {
 	clone.Cause = &sessionmanager.ClassifiedSpawnError{Err: apiErr.Cause, Step: classified.Step, Cause: classified.Cause}
 	return &clone
 }
+
+// withSpawnFailureDetails attaches the effective harness and interface to an
+// API error so diagnostics and logs attribute failures to the selected route.
+func withSpawnFailureDetails(mapped error, harness domain.AgentHarness, mode domain.SessionMode) error {
+	var apiErr *apierr.Error
+	if !errors.As(mapped, &apiErr) || (harness == "" && mode == "") {
+		return mapped
+	}
+	clone := *apiErr
+	details := make(map[string]any, len(apiErr.Details)+2)
+	for k, v := range apiErr.Details {
+		details[k] = v
+	}
+	if harness != "" {
+		if _, exists := details["harness"]; !exists {
+			details["harness"] = string(harness)
+		}
+	}
+	if mode != "" {
+		if _, exists := details["mode"]; !exists {
+			details["mode"] = string(mode)
+		}
+	}
+	clone.Details = details
+	return &clone
+}

@@ -37,9 +37,10 @@ describe("useAutoSpawnPauseNotice", () => {
  it("distinguishes hosts and launch configurations", () => {
   renderHook(() => useAutoSpawnPauseNotice([
    { id: "same", name: "Shared", autoSpawnPauses: [pause] },
-   { id: "same", name: "Shared", hostId: "host-2", autoSpawnPauses: [pause, { ...pause, model: "different" }] },
+   { id: "same", name: "Shared", hostId: "host-2", autoSpawnPauses: [pause, { ...pause, model: "different" }, { ...pause, mode: "tui" }] },
   ]));
-  expect(useUiStore.getState().globalToasts).toHaveLength(3);
-  expect(useUiStore.getState().globalToasts.map((toast) => toast.title)).toEqual(["Automatic starts paused for Shared", "Automatic starts paused for Shared (host-2)", "Automatic starts paused for Shared (host-2)"]);
+  expect(useUiStore.getState().globalToasts).toHaveLength(4);
+  expect(useUiStore.getState().globalToasts.map((toast) => toast.title)).toEqual(["Automatic starts paused for Shared", "Automatic starts paused for Shared (host-2)", "Automatic starts paused for Shared (host-2)", "Automatic starts paused for Shared (host-2)"]);
+  expect(useUiStore.getState().globalToasts[3].body).toContain("worker, tui");
  });
 });

@@ -69,6 +69,35 @@ func (h AgentHarness) ChatOnly() bool {
 	return h == HarnessUnreal || h == HarnessDockerAgent
 }
 
+// SupportsChat reports whether h has a registered Chat driver.
+func (h AgentHarness) SupportsChat() bool {
+	switch h {
+	case HarnessClaudeCode, HarnessCodex, HarnessOpenCode, HarnessOpenCodeV2,
+		HarnessDroid, HarnessGrok, HarnessKimi, HarnessKimchi, HarnessPi,
+		HarnessCursor, HarnessOMP, HarnessQwen, HarnessUnreal, HarnessDeepSeek,
+		HarnessCommandCode, HarnessCopilot, HarnessAgy, HarnessDockerAgent,
+		HarnessHermes:
+		return true
+	default:
+		return false
+	}
+}
+
+// SupportsMode reports whether h can run in mode, treating an empty mode as
+// the omitted default.
+func (h AgentHarness) SupportsMode(mode SessionMode) bool {
+	switch mode {
+	case "":
+		return true
+	case SessionModeChat:
+		return h.SupportsChat()
+	case SessionModeTUI:
+		return !h.ChatOnly()
+	default:
+		return false
+	}
+}
+
 // IsKnown reports whether h is one of the supported harnesses.
 func (h AgentHarness) IsKnown() bool {
 	for _, k := range AllHarnesses {

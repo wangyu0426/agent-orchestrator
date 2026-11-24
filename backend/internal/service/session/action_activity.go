@@ -178,12 +178,16 @@ func (s *Service) recordSpawnOutcome(ctx context.Context, cfg ports.SpawnConfig,
 	if operationID == "" {
 		return
 	}
+	harness := string(child.Harness)
+	if harness == "" {
+		harness = string(cfg.Harness)
+	}
 	detail := actionDetail{
 		Action:          actionSessionSpawned,
 		OperationID:     operationID,
 		TargetSessionID: string(child.ID),
 		DisplayName:     child.DisplayName,
-		Harness:         string(child.Harness),
+		Harness:         harness,
 		Href:            sessionActionHref(child.ProjectID, child.ID),
 		Error:           actionErrorText(err),
 	}

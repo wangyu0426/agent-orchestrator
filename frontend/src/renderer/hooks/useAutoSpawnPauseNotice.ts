@@ -24,15 +24,16 @@ export function useAutoSpawnPauseNotice(projects: { id: string; name: string; ho
 		const active = new Set<string>();
 		for (const project of projects) {
 			for (const pause of project.autoSpawnPauses ?? []) {
-				const key = JSON.stringify([project.hostId ?? "", project.id, pause.harness, pause.kind ?? "", pause.model ?? "", pause.effort ?? "", pause.pausedAt]);
+				const key = JSON.stringify([project.hostId ?? "", project.id, pause.harness, pause.kind ?? "", pause.model ?? "", pause.effort ?? "", pause.mode ?? "", pause.pausedAt]);
 				const dedupeKey = `auto-spawn-pause:${key}`;
+				const kindLabel = pause.mode ? `${pause.kind || "worker"}, ${pause.mode}` : pause.kind || "worker";
 				active.add(dedupeKey);
 				if (seen.has(key) || useUiStore.getState().globalToasts.some((toast) => toast.dedupeKey === dedupeKey)) continue;
 				showGlobalToast(
 					t("autoSpawnPause.title", { defaultValue: "Automatic starts paused for {{project}}", project: project.hostId && project.hostId !== "local" ? `${project.name} (${project.hostId})` : project.name }),
 					t("autoSpawnPause.configurationBody", {
 						defaultValue: "{{failures}} starts with {{harness}} ({{kind}}, model {{model}}, effort {{effort}}) failed: {{message}} An automatic probe is allowed after a 30-minute cooldown.",
-						failures: pause.failures, harness: pause.harness, kind: pause.kind || "worker",
+						failures: pause.failures, harness: pause.harness, kind: kindLabel,
 						model: pause.model || "default", effort: pause.effort || "default", message: pause.message,
 					}),
 					{

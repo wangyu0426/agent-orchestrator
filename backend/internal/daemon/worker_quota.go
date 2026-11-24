@@ -101,7 +101,7 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 	}
 	eligible := make([]workerquota.Target, 0, len(worker.Remaining))
 	for _, t := range worker.Remaining {
-		if t.Harness != rec.Harness && s.chat.SupportsChat(t.Harness) {
+		if t.Harness != rec.Harness && (t.Mode == "" || t.Mode == domain.SessionModeChat) && s.chat.SupportsChat(t.Harness) {
 			eligible = append(eligible, t)
 		}
 	}
