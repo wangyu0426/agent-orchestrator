@@ -1586,8 +1586,6 @@ func (s *Service) SetAutoReview(ctx context.Context, id domain.SessionID, enable
 	return s.Get(ctx, id)
 }
 
-// Cleanup delegates terminal workspace cleanup to the internal manager and
-// reports both reclaimed and preserved (skipped) workspaces.
 // PreviewMergedArchive lists worker sessions whose tracked PRs include an
 // authoritative merge, with a reason for any session the merge cleanup gates
 // currently defer.
@@ -1613,6 +1611,8 @@ func (s *Service) ApplyMergedArchive(ctx context.Context, ids []domain.SessionID
 	return manager.ApplyMergedArchive(ctx, ids)
 }
 
+// Cleanup delegates terminal workspace cleanup to the internal manager and
+// reports both reclaimed and preserved (skipped) workspaces.
 func (s *Service) Cleanup(ctx context.Context, project domain.ProjectID) (CleanupOutcome, error) {
 	res, err := s.manager.Cleanup(ctx, project)
 	if err != nil {
