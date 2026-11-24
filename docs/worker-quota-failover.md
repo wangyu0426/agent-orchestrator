@@ -73,8 +73,11 @@ schema are tied to the Quotum hub release.
   AGY on installations with its Chat driver available and a compatible approval
   mode. The switch retains the AO session, worktree, issue and PR associations,
   and canonical history. The target starts a new native conversation with the
-  handoff note and a continuation prompt. One durable attempt per session prevents
-  repeated switching, including after daemon restart. If interrupted after
+  handoff note and a continuation prompt. AO saves the order of remaining routes
+  at admission, so a worker that started on a fallback can only move forward
+  in its original order. Changes to route order apply to new workers.
+  One durable attempt per session prevents repeated switching, including after
+  daemon restart. If interrupted after
   switching, inspect the active provider and send a continuation in that session.
 - **Parking.** An unsupported or unavailable fallback leaves the failed turn
   available for manual recovery. AO stops the provider when existing idle and

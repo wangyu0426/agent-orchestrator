@@ -1086,18 +1086,19 @@ type WorkerQuotaAutomationDeferral struct {
 }
 
 type WorkerQuotaSession struct {
-	SessionID      string
-	Harness        string
-	Model          string
-	Effort         string
-	AttemptOwner   string
-	TargetHarness  string
-	TargetModel    string
-	Reason         string
-	FailureAt      int64
-	ResetAt        int64
-	FailureHarness string
-	FailureModel   string
+	SessionID       string
+	Harness         string
+	Model           string
+	Effort          string
+	AttemptOwner    string
+	TargetHarness   string
+	TargetModel     string
+	Reason          string
+	FailureAt       int64
+	ResetAt         int64
+	FailureHarness  string
+	FailureModel    string
+	RemainingRoutes string
 }
 
 type WorkspaceRepo struct {

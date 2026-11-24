@@ -9,7 +9,6 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
-	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
@@ -18,10 +17,18 @@ type quotaTerminalParker interface {
 	ParkQuotaTUI(context.Context, domain.SessionRecord, time.Time) (bool, error)
 }
 
+type workerQuotaChat interface {
+	QuotaFailure(context.Context, domain.SessionRecord) (domain.ConversationTurn, error)
+	SupportsChat(domain.AgentHarness) bool
+	QuotaTargetReady(context.Context, domain.SessionID, domain.AgentHarness) bool
+	SwitchProviderAndSend(context.Context, domain.SessionID, domain.ProviderSwitchRequest, ports.ChatUserMessage) (domain.ConversationTurn, bool, error)
+	ParkQuotaChat(context.Context, domain.SessionRecord, string) (bool, error)
+}
+
 type workerQuotaSweep struct {
 	policy   *workerquota.Policy
 	store    *sqlite.Store
-	chat     *chatsvc.Service
+	chat     workerQuotaChat
 	terminal quotaTerminalParker
 	agents   ports.AgentResolver
 	accounts ports.AgentAccountLaunchEnv
@@ -90,15 +97,8 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 		// A fallback can also exhaust quota. Never switch this session again.
 		return s.park(ctx, rec, turn, failure.At, "automatic handoff budget exhausted")
 	}
-	fallbacks := s.policy.Fallbacks
-	for i, target := range fallbacks {
-		if target.Harness == current.Harness {
-			fallbacks = fallbacks[i+1:]
-			break
-		}
-	}
-	eligible := make([]workerquota.Target, 0, len(fallbacks))
-	for _, t := range fallbacks {
+	eligible := make([]workerquota.Target, 0, len(worker.Remaining))
+	for _, t := range worker.Remaining {
 		if t.Harness != rec.Harness && s.chat.SupportsChat(t.Harness) {
 			eligible = append(eligible, t)
 		}

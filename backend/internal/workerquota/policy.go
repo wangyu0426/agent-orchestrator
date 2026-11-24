@@ -12,13 +12,8 @@ import (
 // ErrDeferred indicates that quota blocked every otherwise eligible route.
 var ErrDeferred = errors.New("automatic worker deferred: all eligible providers have exhausted quota")
 
-// Target describes a launch choice. The project's effective worker is first
-// unless a global primary is configured.
-type Target struct {
-	Harness domain.AgentHarness `json:"harness"`
-	Model   string              `json:"model"`
-	Effort  string              `json:"effort"`
-}
+// Target describes a worker launch choice.
+type Target = domain.WorkerQuotaTarget
 
 // Window is one provider limit for the account and pool associated with a target.
 type Window struct {
@@ -81,6 +76,7 @@ func (p *Policy) Targets(project Target) []Target {
 type Session struct {
 	ID        domain.SessionID
 	Initial   Target
+	Remaining []Target
 	Target    Target
 	Attempt   string
 	Reason    string

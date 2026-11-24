@@ -16,39 +16,40 @@ func automaticQuotaWorker(cfg ports.SpawnConfig) bool {
 		cfg.AgentConfig.Mode == "" && cfg.AgentConfig.Effort == "" && !cfg.EffortOverride && !cfg.AgentConfigResolved
 }
 
-func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectConfig) (bool, error) {
+func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectConfig) ([]workerquota.Target, error) {
 	policy := m.workerQuota
 	if policy == nil || !automaticQuotaWorker(*cfg) {
-		return false, nil
+		return nil, nil
 	}
 	harness := effectiveHarness("", cfg.Kind, *project)
 	base := effectiveAgentConfig(harness, cfg.Kind, *project)
 	primary := workerquota.Target{Harness: harness, Model: base.Model, Effort: base.Effort}
 	targets := policy.Targets(primary)
 	if len(targets) == 0 {
-		return false, nil
+		return nil, nil
 	}
 	windows := m.workerQuotaWindows(ctx, targets)
 	var selected workerquota.Target
+	var remaining []workerquota.Target
 	var blocked bool
-	for _, target := range targets {
+	for i, target := range targets {
 		if _, ok := workerquota.Select([]workerquota.Target{target}, windows, m.clock()); !ok {
 			blocked = true
 			continue
 		}
 		if target == primary || m.quotaTargetReady(ctx, target, *project, *cfg) {
-			selected = target
+			selected, remaining = target, targets[i+1:]
 			break
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return nil, err
 	}
 	if selected.Harness == "" {
 		if blocked {
-			return false, workerquota.ErrDeferred
+			return nil, workerquota.ErrDeferred
 		}
-		return false, nil
+		return nil, nil
 	}
 	if selected != primary {
 		cfg.Harness = selected.Harness
@@ -60,7 +61,7 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 		project.Worker.AgentConfig.Model, project.Worker.AgentConfig.Effort, project.Worker.AgentConfig.Mode = "", "", ""
 		m.logger.Info("worker quota selected configured route", "project", cfg.ProjectID, "harness", selected.Harness, "model", selected.Model, "effort", selected.Effort)
 	}
-	return true, nil
+	return remaining, nil
 }
 
 func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.Target) map[workerquota.Target][]workerquota.Window {

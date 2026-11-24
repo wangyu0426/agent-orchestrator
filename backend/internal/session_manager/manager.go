@@ -1143,7 +1143,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		cfg.AgentConfig.Permissions = permissions
 	}
-	managed, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project.Config)
+	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project.Config)
 	if quotaErr != nil {
 		return domain.SessionRecord{}, 0, 0, quotaErr
 	}
@@ -1282,7 +1282,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	asyncChat := cfg.Async && mode == domain.SessionModeChat && m.chat != nil && (cfg.Kind == domain.KindOrchestrator || cfg.Kind == domain.KindWorker)
 
 	var prep *taskPreparation
-	if !managed && cfg.AutomationRunID == nil && cfg.Branch == "" {
+	if remainingRoutes == nil && cfg.AutomationRunID == nil && cfg.Branch == "" {
 		prep = m.claimTaskPreparation(cfg.TaskPreparation, cfg.ProjectID)
 	}
 	var rec domain.SessionRecord
@@ -1290,8 +1290,8 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		rec = prep.record
 	} else {
 		seed := seedRecord(cfg, project.Config, m.clock())
-		seed.WorkerQuotaManaged = managed
-		if managed {
+		seed.WorkerQuotaRemaining = remainingRoutes
+		if remainingRoutes != nil {
 			seed.Metadata.Model, seed.Metadata.Effort = agentConfig.Model, agentConfig.Effort
 		}
 		if mode == domain.SessionModeChat {

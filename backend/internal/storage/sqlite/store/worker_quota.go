@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -17,10 +19,15 @@ func (s *Store) WorkerQuotaSessions(ctx context.Context) ([]workerquota.Session,
 	}
 	sessions := make([]workerquota.Session, 0, len(rows))
 	for _, r := range rows {
+		var remaining []workerquota.Target
+		if err := json.Unmarshal([]byte(r.RemainingRoutes), &remaining); err != nil {
+			return nil, fmt.Errorf("read remaining quota routes for session %s: %w", r.SessionID, err)
+		}
 		sessions = append(sessions, workerquota.Session{
 			ID: domain.SessionID(r.SessionID), Initial: workerquota.Target{Harness: domain.AgentHarness(r.Harness), Model: r.Model, Effort: r.Effort},
-			Target:  workerquota.Target{Harness: domain.AgentHarness(r.TargetHarness), Model: r.TargetModel},
-			Attempt: r.AttemptOwner, Reason: r.Reason, FailureAt: time.UnixMilli(r.FailureAt),
+			Remaining: remaining,
+			Target:    workerquota.Target{Harness: domain.AgentHarness(r.TargetHarness), Model: r.TargetModel},
+			Attempt:   r.AttemptOwner, Reason: r.Reason, FailureAt: time.UnixMilli(r.FailureAt),
 		})
 	}
 	return sessions, nil

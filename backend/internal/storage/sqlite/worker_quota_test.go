@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,8 +20,9 @@ func TestWorkerQuotaAdmissionAndAttemptSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
+	remaining := []workerquota.Target{{Harness: domain.HarnessAgy, Model: "agy-model"}, {Harness: domain.HarnessCodex, Model: "codex-fallback", Effort: "high"}}
 	rec, err := st.CreateSession(ctx, domain.SessionRecord{
-		Kind: domain.KindWorker, Harness: domain.HarnessCodex, WorkerQuotaManaged: true,
+		Kind: domain.KindWorker, Harness: domain.HarnessCodex, WorkerQuotaRemaining: remaining,
 		CreatedAt: now, UpdatedAt: now, Metadata: domain.SessionMetadata{Model: "codex-model"},
 	})
 	if err != nil {
@@ -58,7 +60,7 @@ func TestWorkerQuotaAdmissionAndAttemptSurviveRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = restored.Close() })
 	sessions, err := restored.WorkerQuotaSessions(ctx)
-	if err != nil || len(sessions) != 1 || sessions[0].ID != rec.ID || sessions[0].Attempt != "quota:one" {
+	if err != nil || len(sessions) != 1 || sessions[0].ID != rec.ID || sessions[0].Attempt != "quota:one" || !slices.Equal(sessions[0].Remaining, remaining) {
 		t.Fatalf("restored sessions %+v, %v", sessions, err)
 	}
 	if ok, err := restored.ClaimWorkerQuotaAttempt(ctx, rec.ID, "quota:two", workerquota.Target{Harness: domain.HarnessAgy}); err != nil || ok {

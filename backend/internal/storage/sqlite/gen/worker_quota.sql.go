@@ -54,15 +54,16 @@ func (q *Queries) DeferAutomationRunForQuota(ctx context.Context, arg DeferAutom
 }
 
 const insertWorkerQuotaSession = `-- name: InsertWorkerQuotaSession :exec
-INSERT INTO worker_quota_session (session_id, harness, model, effort)
-VALUES (?, ?, ?, ?)
+INSERT INTO worker_quota_session (session_id, harness, model, effort, remaining_routes)
+VALUES (?, ?, ?, ?, ?)
 `
 
 type InsertWorkerQuotaSessionParams struct {
-	SessionID string
-	Harness   string
-	Model     string
-	Effort    string
+	SessionID       string
+	Harness         string
+	Model           string
+	Effort          string
+	RemainingRoutes string
 }
 
 func (q *Queries) InsertWorkerQuotaSession(ctx context.Context, arg InsertWorkerQuotaSessionParams) error {
@@ -71,6 +72,7 @@ func (q *Queries) InsertWorkerQuotaSession(ctx context.Context, arg InsertWorker
 		arg.Harness,
 		arg.Model,
 		arg.Effort,
+		arg.RemainingRoutes,
 	)
 	return err
 }
@@ -116,7 +118,7 @@ func (q *Queries) ListWorkerQuotaFailures(ctx context.Context, nowMs int64) ([]L
 }
 
 const listWorkerQuotaSessions = `-- name: ListWorkerQuotaSessions :many
-SELECT worker_quota_session.session_id, worker_quota_session.harness, worker_quota_session.model, worker_quota_session.effort, worker_quota_session.attempt_owner, worker_quota_session.target_harness, worker_quota_session.target_model, worker_quota_session.reason, worker_quota_session.failure_at, worker_quota_session.reset_at, worker_quota_session.failure_harness, worker_quota_session.failure_model FROM worker_quota_session
+SELECT worker_quota_session.session_id, worker_quota_session.harness, worker_quota_session.model, worker_quota_session.effort, worker_quota_session.attempt_owner, worker_quota_session.target_harness, worker_quota_session.target_model, worker_quota_session.reason, worker_quota_session.failure_at, worker_quota_session.reset_at, worker_quota_session.failure_harness, worker_quota_session.failure_model, worker_quota_session.remaining_routes FROM worker_quota_session
 JOIN sessions ON sessions.id = worker_quota_session.session_id
 WHERE NOT sessions.is_terminated
 `
@@ -143,6 +145,7 @@ func (q *Queries) ListWorkerQuotaSessions(ctx context.Context) ([]WorkerQuotaSes
 			&i.ResetAt,
 			&i.FailureHarness,
 			&i.FailureModel,
+			&i.RemainingRoutes,
 		); err != nil {
 			return nil, err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,34 +36,34 @@ func TestWorkerQuotaSpawnPreservesExplicitOverrides(t *testing.T) {
 		Model: "codex-model", Effort: "high", Permissions: domain.PermissionModeDefault,
 	}}}
 	automatic := ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", IssueID: "github:org/repo#14", CreatedBy: domain.SessionCreatedByAutomation}
-	apply := func(cfg ports.SpawnConfig) (ports.SpawnConfig, domain.ProjectConfig, bool, error) {
+	apply := func(cfg ports.SpawnConfig) (ports.SpawnConfig, domain.ProjectConfig, []workerquota.Target, error) {
 		settings := project
-		ok, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &settings)
-		return cfg, settings, ok, err
+		remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &cfg, &settings)
+		return cfg, settings, remaining, err
 	}
-	if cfg, _, enrolled, err := apply(automatic); err != nil || enrolled || cfg.Harness != automatic.Harness || cfg.IssueID != automatic.IssueID {
-		t.Fatalf("disabled policy changed spawn: %+v, %v, %v", cfg, enrolled, err)
+	if cfg, _, remaining, err := apply(automatic); err != nil || remaining != nil || cfg.Harness != automatic.Harness || cfg.IssueID != automatic.IssueID {
+		t.Fatalf("disabled policy changed spawn: %+v, %v, %v", cfg, remaining, err)
 	}
-	manager.workerQuota = &workerquota.Policy{
-		Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-pro"}}, Source: source,
-	}
+	agy := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini-pro"}
+	codexFallback := workerquota.Target{Harness: domain.HarnessCodex, Model: "codex-fallback", Effort: "low"}
+	manager.workerQuota = &workerquota.Policy{Fallbacks: []workerquota.Target{agy, codexFallback, agy}, Source: source}
 	explicit := automatic
 	explicit.AgentConfig.Model = "chosen-model"
-	if cfg, _, enrolled, err := apply(explicit); err != nil || enrolled || cfg.AgentConfig.Model != "chosen-model" || source.reads != 0 {
-		t.Fatalf("override was routed: %+v, %v, %v", cfg, enrolled, err)
+	if cfg, _, remaining, err := apply(explicit); err != nil || remaining != nil || cfg.AgentConfig.Model != "chosen-model" || source.reads != 0 {
+		t.Fatalf("override was routed: %+v, %v, %v", cfg, remaining, err)
 	}
-	cfg, settings, enrolled, err := apply(automatic)
-	if err != nil || !enrolled || cfg.Harness != domain.HarnessAgy || cfg.AgentConfig.Model != "gemini-pro" ||
+	cfg, settings, remaining, err := apply(automatic)
+	if err != nil || !slices.Equal(remaining, []workerquota.Target{codexFallback}) || cfg.Harness != domain.HarnessAgy || cfg.AgentConfig.Model != "gemini-pro" ||
 		cfg.IssueID != automatic.IssueID || settings.Worker.AgentConfig.Permissions != domain.PermissionModeDefault ||
 		settings.Worker.AgentConfig.Effort != "" {
-		t.Fatalf("incorrect fallback: %+v, %+v, %v, %v", cfg, settings.Worker, enrolled, err)
+		t.Fatalf("incorrect fallback: %+v, %+v, %v, %v", cfg, settings.Worker, remaining, err)
 	}
 	source.blocked[domain.HarnessAgy] = true
-	if _, _, enrolled, err := apply(automatic); enrolled || !errors.Is(err, workerquota.ErrDeferred) {
-		t.Fatalf("all exhausted = %v, %v", enrolled, err)
+	if _, _, remaining, err := apply(automatic); remaining != nil || !errors.Is(err, workerquota.ErrDeferred) {
+		t.Fatalf("all exhausted = %v, %v", remaining, err)
 	}
 	delete(source.blocked, domain.HarnessCodex)
-	if cfg, _, enrolled, err := apply(automatic); err != nil || !enrolled || cfg.Harness != "" {
-		t.Fatalf("primary not restored: %+v, %v, %v", cfg, enrolled, err)
+	if cfg, _, remaining, err := apply(automatic); err != nil || !slices.Equal(remaining, []workerquota.Target{agy, codexFallback}) || cfg.Harness != "" {
+		t.Fatalf("primary not restored: %+v, %v, %v", cfg, remaining, err)
 	}
 }

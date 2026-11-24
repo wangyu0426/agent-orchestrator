@@ -1,6 +1,6 @@
 -- name: InsertWorkerQuotaSession :exec
-INSERT INTO worker_quota_session (session_id, harness, model, effort)
-VALUES (?, ?, ?, ?);
+INSERT INTO worker_quota_session (session_id, harness, model, effort, remaining_routes)
+VALUES (?, ?, ?, ?, ?);
 
 -- name: ListWorkerQuotaSessions :many
 SELECT worker_quota_session.* FROM worker_quota_session

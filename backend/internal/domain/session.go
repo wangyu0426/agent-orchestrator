@@ -408,14 +408,22 @@ type SessionMetadata struct {
 	BrowserCapabilityVerifier string `json:"-"`
 }
 
+// WorkerQuotaTarget is a configured harness, model, and reasoning effort.
+type WorkerQuotaTarget struct {
+	Harness AgentHarness `json:"harness"`
+	Model   string       `json:"model"`
+	Effort  string       `json:"effort"`
+}
+
 // SessionRecord is the persistence shape. It intentionally stores only durable
 // facts: identity, agent harness, activity_state, is_terminated, and operational
 // metadata. The user-facing Status is derived from these facts plus PR facts.
 type SessionRecord struct {
-	// WorkerQuotaManaged enrolls a newly created automatic worker in quota routing.
-	WorkerQuotaManaged bool      `json:"-"`
-	ID                 SessionID `json:"id"`
-	ProjectID          ProjectID `json:"projectId,omitempty"`
+	// WorkerQuotaRemaining holds the routes ranked after the admitted route.
+	// A non-nil empty slice means quota routing admitted the last route.
+	WorkerQuotaRemaining []WorkerQuotaTarget `json:"-"`
+	ID                   SessionID           `json:"id"`
+	ProjectID            ProjectID           `json:"projectId,omitempty"`
 	// AutomationRunID is the optional durable origin for an unattended spawn.
 	// It is internal lifecycle data, not part of the session API read model.
 	AutomationRunID *AutomationRunID `json:"-"`
