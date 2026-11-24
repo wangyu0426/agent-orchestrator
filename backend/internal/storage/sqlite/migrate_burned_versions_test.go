@@ -270,6 +270,7 @@ var shippedMigrations = map[int64]string{
 	20261115050423095: "20261115050423095_allow_stakpak_harness.sql",
 	20261115071147951: "20261115071147951_allow_docker_agent_harness.sql",
 	20261115072651599: "20261115072651599_allow_minimax_code_harness.sql",
+	20261124024118378: "20261124024118378_worker_quota_failover.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

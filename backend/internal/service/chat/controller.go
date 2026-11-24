@@ -2534,6 +2534,10 @@ func (c *Controller) BeginHandoff(
 // or interrupts accepted work: branch changes are refused until the user stops
 // the active turn and the durable queue is empty.
 func (c *Controller) BeginIdleBranchHandoff(ctx context.Context) error {
+	return c.beginIdleBranchHandoff(ctx, false)
+}
+
+func (c *Controller) beginIdleBranchHandoff(ctx context.Context, requireQuiescence bool) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
@@ -2545,6 +2549,10 @@ func (c *Controller) BeginIdleBranchHandoff(ctx context.Context) error {
 	if c.pendingTurnID != "" {
 		return ErrTurnRunning
 	}
+	if requireQuiescence && (c.operations != 0 || c.compactionPending || c.dispatchingTurnID != "") {
+		return ErrTurnRunning
+	}
+
 	if _, err := c.store.NextQueuedTurn(ctx, c.conversation.ID); err == nil {
 		return ErrTurnRunning
 	} else if !errors.Is(err, domain.ErrNoQueuedTurn) {

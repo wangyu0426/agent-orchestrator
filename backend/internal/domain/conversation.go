@@ -636,6 +636,9 @@ const (
 	ConversationFailureAuthRequired ConversationFailureCode = "auth_required"
 )
 
+// ConversationFailureQuotaExhausted requires a native provider quota refusal.
+const ConversationFailureQuotaExhausted ConversationFailureCode = "quota_exhausted"
+
 // ConversationTurnDiff is the turn's changed-file summary.
 //
 // Per-turn state rather than a timeline entry: the provider re-sends the whole

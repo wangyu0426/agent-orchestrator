@@ -109,6 +109,9 @@ func (u *usageLimitTracker) decorate(ev ports.ChatEvent, now time.Time) ports.Ch
 		if ev.Err == nil && ev.TurnState == domain.TurnStateFailed && ev.ProviderTurnID == u.failureTurnID {
 			ev.Err, ev.UsageLimitResetsAt = u.failure, u.failureResetsAt
 		}
+		if ev.TurnState == domain.TurnStateFailed && errors.Is(ev.Err, errCodexUsageLimitExceeded) {
+			ev.FailureCode = domain.ConversationFailureQuotaExhausted
+		}
 		switch ev.ProviderTurnID {
 		case u.turnID:
 			*u = usageLimitTracker{threadID: u.threadID}

@@ -609,8 +609,9 @@ type TerminalActivityDetector interface {
 
 // TurnFailure is a provider turn that ended on an error, and when it ended.
 type TurnFailure struct {
-	At      time.Time
-	Message string
+	QuotaExhausted bool
+	At             time.Time
+	Message        string
 	// Interrupted marks a turn the user interrupted (Esc) rather than one
 	// that ended on an error.
 	Interrupted bool

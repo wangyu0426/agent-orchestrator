@@ -115,6 +115,10 @@ SELECT r.id, r.automation_id, r.scheduled_for, r.session_id, r.status,
 FROM automation_runs r
 JOIN automations a ON a.id = r.automation_id
 WHERE r.status = 'pending'
+  AND NOT EXISTS (
+      SELECT 1 FROM worker_quota_automation_deferral d
+      WHERE d.run_id = r.id AND d.retry_at > sqlc.arg(now)
+  )
   AND a.enabled = 1
   AND NOT EXISTS (
       SELECT 1 FROM automation_runs active

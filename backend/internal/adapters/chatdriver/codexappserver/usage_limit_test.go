@@ -51,6 +51,11 @@ func TestCodexUsageLimitNativeErrors(t *testing.T) {
 				if (limit != nil) != tc.quota || (limit != nil && limit.ResetsAt != nil) {
 					t.Fatalf("%s limit = %#v, error = %v", method, limit, ev.Err)
 				}
+				tracker := usageLimitTracker{threadID: "thread-1", turnID: "turn-1"}
+				ev = tracker.decorate(ev, time.Now())
+				if got := ev.FailureCode == domain.ConversationFailureQuotaExhausted; got != (method == "turn/completed" && tc.quota) {
+					t.Fatalf("%s quota failure code = %q", method, ev.FailureCode)
+				}
 				if !strings.Contains(ev.Err.Error(), tc.message) {
 					t.Fatalf("%s discarded provider copy: %v", method, ev.Err)
 				}

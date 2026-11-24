@@ -178,6 +178,8 @@ func (s *Service) liveViewLeasesLocked(id domain.SessionID) map[string]time.Time
 // developer-mode setting; a version refresh stops a provider still running a
 // replaced harness release so its next start uses the installed one.
 type hibernateOptions struct {
+	quotaTurnID    string
+	quotaOwner     domain.SessionControllerOwner
 	versionRefresh bool
 	// forUpdate stops an idle provider so an installer can replace its
 	// executable; the session wakes on its next message or once the update ends.
@@ -190,7 +192,7 @@ type hibernateOptions struct {
 }
 
 func (o hibernateOptions) enabled(s *Service) bool {
-	if o.versionRefresh || o.forUpdate {
+	if o.versionRefresh || o.forUpdate || o.quotaTurnID != "" {
 		return true
 	}
 	return s.hibernationEnabled != nil && s.hibernationEnabled()
@@ -199,6 +201,9 @@ func (o hibernateOptions) enabled(s *Service) bool {
 // eligible is the durable-fact check, read before and again after the
 // provider confirms it has no background work.
 func (o hibernateOptions) eligible(s *Service, rec domain.SessionRecord) bool {
+	if o.quotaTurnID != "" && rec.ControllerOwner() != o.quotaOwner {
+		return false
+	}
 	candidate := rec
 	if (o.forUpdate || o.versionRefresh) && candidate.Kind == domain.KindOrchestrator {
 		// Idle hibernation keeps orchestrators running. An update or a move to
@@ -344,6 +349,14 @@ func (s *Service) hibernateChat(ctx context.Context, id domain.SessionID, opts h
 		controller.sendMu.Unlock()
 		return false, nil
 	}
+	if opts.quotaTurnID != "" {
+		turn, err := s.QuotaFailure(ctx, rec)
+		if err != nil || turn.ID != opts.quotaTurnID {
+			controller.sendMu.Unlock()
+			return false, err
+		}
+	}
+
 	// Activity from outside Chat can change while eligibility is read. Recheck
 	// before recording the shutdown intent with a revision-checked write.
 	fresh, err := s.requireChatSession(ctx, id)

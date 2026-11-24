@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 // EnvComputerUse is set to "1" on a chat session's `ao mcp` server when the
@@ -207,6 +209,7 @@ type Config struct {
 	// TrackerIntake gates the issue-intake observer daemon-wide
 	// (AO_TRACKER_INTAKE).
 	TrackerIntake bool
+	WorkerQuota   *workerquota.Policy
 	// Client identifies which client this deployment serves (AO_CLIENT). It is
 	// reported to clients through the settings API and gates nothing in the
 	// daemon: the cloud offering (B2B/B2C, providers, billing) is decided per
@@ -504,6 +507,12 @@ func Load() (Config, error) {
 		}
 		cfg.TrackerIntake = v
 	}
+
+	policy, err := loadWorkerQuota()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WorkerQuota = policy
 
 	if raw := os.Getenv("AO_CLIENT"); raw != "" {
 		cfg.Client = strings.TrimSpace(raw)

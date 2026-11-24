@@ -412,8 +412,10 @@ type SessionMetadata struct {
 // facts: identity, agent harness, activity_state, is_terminated, and operational
 // metadata. The user-facing Status is derived from these facts plus PR facts.
 type SessionRecord struct {
-	ID        SessionID `json:"id"`
-	ProjectID ProjectID `json:"projectId,omitempty"`
+	// WorkerQuotaManaged enrolls a newly created automatic worker in quota routing.
+	WorkerQuotaManaged bool      `json:"-"`
+	ID                 SessionID `json:"id"`
+	ProjectID          ProjectID `json:"projectId,omitempty"`
 	// AutomationRunID is the optional durable origin for an unattended spawn.
 	// It is internal lifecycle data, not part of the session API read model.
 	AutomationRunID *AutomationRunID `json:"-"`

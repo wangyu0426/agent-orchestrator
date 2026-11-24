@@ -21,6 +21,10 @@ const (
 
 // ProviderSwitchRequest is what a switch to another provider asks for.
 type ProviderSwitchRequest struct {
+	// ExpectedSource is set only by internal automatic recovery.
+	ExpectedSource      *SessionControllerOwner
+	ExpectedQuotaTurnID string
+
 	TargetHarness  AgentHarness
 	IdempotencyKey string
 	// Model and Effort are what the target starts on. Empty keeps its default.

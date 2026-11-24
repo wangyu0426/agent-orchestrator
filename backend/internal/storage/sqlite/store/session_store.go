@@ -134,7 +134,30 @@ func (s *Store) createSessionLocked(ctx context.Context, q *gen.Queries, rec dom
 		}
 		num++
 	}
-	if err := q.InsertSession(ctx, recordToInsert(rec, num)); err != nil {
+	insert := func(q *gen.Queries) error {
+		return q.InsertSession(ctx, recordToInsert(rec, num))
+	}
+	enroll := func(q *gen.Queries) error {
+		if err := insert(q); err != nil {
+			return err
+		}
+		return q.InsertWorkerQuotaSession(ctx, gen.InsertWorkerQuotaSessionParams{
+			SessionID: string(rec.ID),
+			Harness:   string(rec.Harness),
+			Model:     rec.Metadata.Model,
+			Effort:    rec.Metadata.Effort,
+		})
+	}
+	switch {
+	case !rec.WorkerQuotaManaged:
+		err = insert(q)
+	case q != s.qw:
+		// Session import already owns the writer transaction.
+		err = enroll(q)
+	default:
+		err = s.inTx(ctx, "enroll automatic worker quota", enroll)
+	}
+	if err != nil {
 		if rec.ClientRequestID != "" {
 			existing, found, reloadErr := s.getSessionByClientRequestID(ctx, q, rec.ClientRequestID)
 			if reloadErr == nil && found {

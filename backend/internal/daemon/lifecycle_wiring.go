@@ -366,6 +366,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Projects: store,
 	})
 	mgr := sessionmanager.New(sessionmanager.Deps{
+		WorkerQuota:         cfg.WorkerQuota,
 		Runtime:             runtime,
 		Agents:              agents,
 		Workspace:           ws,

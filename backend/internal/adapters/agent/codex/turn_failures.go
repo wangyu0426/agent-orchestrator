@@ -127,14 +127,19 @@ func codexTurnBoundary(line []byte) (failure ports.TurnFailure, boundary, failed
 		return ports.TurnFailure{}, true, false
 	}
 	var detail struct {
-		Message string `json:"message"`
+		Message        string `json:"message"`
+		CodexErrorInfo string `json:"codex_error_info"`
 	}
 	_ = json.Unmarshal(errorJSON, &detail)
 	at, err := time.Parse(time.RFC3339Nano, record.Timestamp)
 	if err != nil {
 		return ports.TurnFailure{}, true, false
 	}
-	return ports.TurnFailure{At: at, Message: detail.Message}, true, true
+	return ports.TurnFailure{
+		At: at, Message: detail.Message,
+		QuotaExhausted: detail.CodexErrorInfo == "usageLimitExceeded" || detail.CodexErrorInfo == "usage_limit_exceeded" ||
+			strings.HasPrefix(detail.Message, "You've hit your usage limit."),
+	}, true, true
 }
 
 func containsCodexTurnBoundaryType(line []byte) bool {
