@@ -2,6 +2,15 @@
 INSERT INTO session_terminal_turns (session_id, harness, native_session_id, user_request, requested_at)
 VALUES (sqlc.arg(session_id), sqlc.arg(harness), sqlc.arg(native_session_id), sqlc.arg(user_request), sqlc.arg(requested_at));
 
+-- name: InsertCompletedTerminalTurn :exec
+INSERT OR IGNORE INTO session_terminal_turns (
+    session_id, harness, native_session_id, provider_turn_id, user_request, agent_response, requested_at, responded_at
+)
+VALUES (
+    sqlc.arg(session_id), sqlc.arg(harness), sqlc.arg(native_session_id), sqlc.arg(provider_turn_id),
+    sqlc.arg(user_request), sqlc.arg(agent_response), sqlc.arg(requested_at), sqlc.arg(responded_at)
+);
+
 -- name: AppendTerminalTurnRequest :execrows
 -- Joins a request to the session's newest turn while that turn is still open
 -- on the same thread. A side with no thread id matches on the provider alone.

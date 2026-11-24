@@ -52,45 +52,47 @@ type agyTranscriptStep struct {
 }
 
 // ValidateTranscriptPath validates that rawPath is an absolute, regular .jsonl
-// file inside a trusted AGY storage root under GEMINI_HOME (without symlink
-// traversal outside that root). When conversationID is non-empty and the path
-// lies under a brain/<id>/ directory, the directory id must match.
+// file inside the session-owned brain/<conversationID>/ directory under a
+// trusted AGY storage root in GEMINI_HOME (without symlink traversal outside
+// that directory). Both a valid conversationID and a matching brain/<id>/
+// layout are required; missing IDs or unrecognized layouts fail closed.
 func ValidateTranscriptPath(rawPath, conversationID string) (string, bool) {
+	resolvedPath, _, ok := validateTranscriptPathInfo(rawPath, conversationID)
+	return resolvedPath, ok
+}
+
+func validateTranscriptPathInfo(rawPath, conversationID string) (string, os.FileInfo, bool) {
 	path := strings.TrimSpace(rawPath)
-	if path == "" || !filepath.IsAbs(path) {
-		return "", false
+	convID := strings.TrimSpace(conversationID)
+	if path == "" || !filepath.IsAbs(path) || !validConversationID(convID) {
+		return "", nil, false
 	}
 	if !strings.EqualFold(filepath.Ext(path), ".jsonl") {
-		return "", false
+		return "", nil, false
 	}
 	geminiHome, err := GeminiHome(nil)
 	if err != nil || strings.TrimSpace(geminiHome) == "" {
-		return "", false
+		return "", nil, false
 	}
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	info, err := os.Stat(resolvedPath)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", false
+		return "", nil, false
 	}
-	if !isWithinTrustedAgyRoot(resolvedPath, geminiHome) {
-		return "", false
+	if !isWithinOwnedBrainDir(resolvedPath, geminiHome, convID) {
+		return "", nil, false
 	}
-	if convID := strings.TrimSpace(conversationID); convID != "" {
-		if pathConvID, ok := brainConversationID(resolvedPath); ok && pathConvID != convID {
-			return "", false
-		}
-	}
-	return resolvedPath, true
+	return resolvedPath, info, true
 }
 
-func isWithinTrustedAgyRoot(resolvedPath, geminiHome string) bool {
+func isWithinOwnedBrainDir(resolvedPath, geminiHome, convID string) bool {
 	trustedDirs := []string{
-		filepath.Join(geminiHome, CLIStorageDir),
-		filepath.Join(geminiHome, ACPStorageDir),
-		filepath.Join(geminiHome, "antigravity"),
+		filepath.Join(geminiHome, CLIStorageDir, "brain", convID),
+		filepath.Join(geminiHome, ACPStorageDir, "brain", convID),
+		filepath.Join(geminiHome, "antigravity", "brain", convID),
 	}
 	for _, root := range trustedDirs {
 		resolvedRoot, err := filepath.EvalSymlinks(root)
@@ -108,22 +110,11 @@ func isWithinTrustedAgyRoot(resolvedPath, geminiHome string) bool {
 	return false
 }
 
-// brainConversationID extracts <id> from .../brain/<id>/... when present.
-func brainConversationID(path string) (string, bool) {
-	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
-	for i := 0; i < len(parts)-2; i++ {
-		if parts[i] == "brain" && parts[i+1] != "" {
-			return parts[i+1], true
-		}
-	}
-	return "", false
-}
-
 // ResolveStopTranscript validates the transcriptPath in an AGY Stop hook
 // payload and extracts the completed turn's final assistant response and
 // matching user request. It never returns an earlier turn's response when the
-// latest turn is incomplete or failed, and never reads outside trusted AGY
-// data roots.
+// latest turn is incomplete, failed, or has a malformed tail boundary, and
+// never reads outside the session-owned brain directory.
 func ResolveStopTranscript(payload []byte) CompletedTurn {
 	var in agyStopPayload
 	if err := json.Unmarshal(payload, &in); err != nil {
@@ -131,7 +122,7 @@ func ResolveStopTranscript(payload []byte) CompletedTurn {
 	}
 	rawPath := firstNonEmpty(in.TranscriptPath, in.TranscriptPathCamel)
 	convID := firstNonEmpty(in.ConversationID, in.ConversationIDCamel, in.SessionID, in.SessionIDCamel)
-	if rawPath == "" {
+	if rawPath == "" || !validConversationID(convID) {
 		return CompletedTurn{}
 	}
 
@@ -140,20 +131,20 @@ func ResolveStopTranscript(payload []byte) CompletedTurn {
 	var validatedPath string
 
 	for {
-		path, ok := ValidateTranscriptPath(rawPath, convID)
+		path, info, ok := validateTranscriptPathInfo(rawPath, convID)
 		if ok {
 			validatedPath = path
-			if info, err := os.Stat(path); err == nil && info.Size() != lastSize {
+			if info.Size() != lastSize {
 				lastSize = info.Size()
-				turn, settled := parseAgyTranscriptTail(path)
+				turn, settled := parseAgyTranscriptTail(path, info)
 				turn.TranscriptPath = path
 				if settled || turn.FinalAssistantMessage != "" {
 					return turn
 				}
 			}
 		} else if !isTransientMissing(rawPath) {
-			// Unsafe path, symlink escape, non-regular file, or wrong session:
-			// reject immediately without waiting.
+			// Unsafe path, symlink escape, non-regular file, missing ID, or
+			// wrong session/layout: reject immediately without waiting.
 			return CompletedTurn{}
 		}
 		if !time.Now().Before(deadline) {
@@ -173,39 +164,29 @@ func isTransientMissing(rawPath string) bool {
 }
 
 // parseAgyTranscriptTail reads the bounded tail of an AGY JSONL transcript and
-// resolves the latest completed turn. settled is true when the latest turn has
-// reached a terminal state (completed response or explicit error/no-response
-// boundary), false when the latest step is still RUNNING or the file is empty.
-func parseAgyTranscriptTail(path string) (CompletedTurn, bool) {
-	lines := readAgyTranscriptTail(path)
+// resolves the latest completed turn. It scans backwards from the end and fails
+// closed if a malformed line appears at the tail before a completed
+// PLANNER_RESPONSE, preventing partial newer writes from falling back to an
+// earlier turn.
+func parseAgyTranscriptTail(path string, expectedInfo os.FileInfo) (CompletedTurn, bool) {
+	lines := readAgyTranscriptTail(path, expectedInfo)
 	if len(lines) == 0 {
 		return CompletedTurn{}, false
 	}
 
-	var steps []agyTranscriptStep
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
+	finalLineIdx := -1
+	var finalStep agyTranscriptStep
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
 		if len(line) == 0 {
 			continue
 		}
 		var step agyTranscriptStep
-		if err := json.Unmarshal(line, &step); err != nil {
-			continue
+		if err := json.Unmarshal(line, &step); err != nil || step.Type == "" {
+			// Malformed or partial JSON at the tail boundary: fail closed so
+			// we never silently attribute an older completed turn.
+			return CompletedTurn{}, false
 		}
-		if step.Type == "" {
-			continue
-		}
-		steps = append(steps, step)
-	}
-	if len(steps) == 0 {
-		return CompletedTurn{}, false
-	}
-
-	// Walk backwards from the latest step to locate the final PLANNER_RESPONSE
-	// of the current turn without crossing a USER_INPUT boundary.
-	finalIdx := -1
-	for i := len(steps) - 1; i >= 0; i-- {
-		step := steps[i]
 		switch step.Type {
 		case "USER_INPUT":
 			// Reached the start of the current turn without a completed final
@@ -230,22 +211,22 @@ func parseAgyTranscriptTail(path string) (CompletedTurn, bool) {
 			if content == "" {
 				return CompletedTurn{}, true
 			}
-			finalIdx = i
+			finalLineIdx = i
+			finalStep = step
 		case "GENERIC":
 			status := strings.ToUpper(strings.TrimSpace(step.Status))
 			if status == "RUNNING" {
 				return CompletedTurn{}, false
 			}
 		}
-		if finalIdx >= 0 {
+		if finalLineIdx >= 0 {
 			break
 		}
 	}
-	if finalIdx < 0 {
+	if finalLineIdx < 0 {
 		return CompletedTurn{}, false
 	}
 
-	finalStep := steps[finalIdx]
 	turn := CompletedTurn{
 		FinalAssistantMessage: strings.TrimSpace(finalStep.Content),
 	}
@@ -254,9 +235,17 @@ func parseAgyTranscriptTail(path string) (CompletedTurn, bool) {
 	}
 
 	// Find the matching USER_INPUT that opened this turn.
-	for i := finalIdx - 1; i >= 0; i-- {
-		if steps[i].Type == "USER_INPUT" {
-			if req := strings.TrimSpace(steps[i].Content); req != "" {
+	for i := finalLineIdx - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		var step agyTranscriptStep
+		if err := json.Unmarshal(line, &step); err != nil {
+			continue
+		}
+		if step.Type == "USER_INPUT" {
+			if req := strings.TrimSpace(step.Content); req != "" {
 				turn.TurnUserRequest = req
 			}
 			break
@@ -265,14 +254,17 @@ func parseAgyTranscriptTail(path string) (CompletedTurn, bool) {
 	return turn, true
 }
 
-func readAgyTranscriptTail(path string) [][]byte {
-	file, err := os.Open(path) //nolint:gosec // validated against trusted AGY storage root
+func readAgyTranscriptTail(path string, expectedInfo os.FileInfo) [][]byte {
+	file, err := os.Open(path) //nolint:gosec // validated against session-owned AGY brain directory
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	if expectedInfo != nil && !os.SameFile(expectedInfo, info) {
 		return nil
 	}
 	offset := max(info.Size()-agyTranscriptTailBytes, 0)

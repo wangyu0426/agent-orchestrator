@@ -943,6 +943,7 @@ type SessionTerminalTurn struct {
 	AgentResponse   string
 	RequestedAt     time.Time
 	RespondedAt     sql.NullTime
+	ProviderTurnID  string
 }
 
 type SessionWorktree struct {

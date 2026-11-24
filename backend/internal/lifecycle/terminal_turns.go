@@ -50,7 +50,7 @@ func (m *Manager) recordTerminalTurn(ctx context.Context, rec domain.SessionReco
 		// keeps the next request from piling onto this one.
 		if s.SubagentID == "" && !staleTerminalStop(rec, s) {
 			resp := strings.TrimSpace(s.FinalAssistantMessage)
-			if rec.Harness == domain.HarnessAgy && resp != "" {
+			if rec.Harness == domain.HarnessAgy && resp != "" && strings.TrimSpace(s.ProviderTurnID) != "" {
 				if completeRecorder, ok := m.store.(completedTerminalTurnRecorder); ok {
 					err = completeRecorder.RecordCompletedTerminalTurn(ctx, domain.TerminalTurn{
 						SessionID:       rec.ID,
@@ -58,6 +58,7 @@ func (m *Manager) recordTerminalTurn(ctx context.Context, rec domain.SessionReco
 						UserRequest:     strings.TrimSpace(s.TurnUserRequest),
 						RequestedAt:     at,
 						NativeSessionID: cmp.Or(s.AgentSessionID, rec.Metadata.AgentSessionID),
+						ProviderTurnID:  strings.TrimSpace(s.ProviderTurnID),
 					}, resp, at)
 					break
 				}

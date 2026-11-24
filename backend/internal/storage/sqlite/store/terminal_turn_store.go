@@ -57,39 +57,28 @@ func (s *Store) RecordTerminalTurnResponse(ctx context.Context, id domain.Sessio
 
 // RecordCompletedTerminalTurn persists a completed turn reported on Stop for
 // harnesses (such as AGY) that do not emit a separate user-prompt-submit hook.
-// Duplicate deliveries or replays of the newest recorded turn are ignored.
+// Deduplication is enforced durably by (session_id, harness, native_session_id,
+// provider_turn_id) so distinct turns with identical text are both kept while
+// duplicate deliveries or out-of-order replays of an earlier turn are ignored.
 func (s *Store) RecordCompletedTerminalTurn(ctx context.Context, turn domain.TerminalTurn, response string, at time.Time) error {
 	resp := strings.TrimSpace(response)
-	if resp == "" {
+	turnID := strings.TrimSpace(turn.ProviderTurnID)
+	if resp == "" || turnID == "" {
 		return nil
 	}
 	req := strings.TrimSpace(turn.UserRequest)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.inTx(ctx, "record completed terminal turn", func(q *gen.Queries) error {
-		existing, err := q.ListTerminalTurns(ctx, string(turn.SessionID))
-		if err != nil {
-			return fmt.Errorf("list terminal turns: %w", err)
-		}
-		if len(existing) > 0 {
-			last := existing[len(existing)-1]
-			if last.AgentResponse == "" && last.UserRequest == req {
-				return q.CloseTerminalTurn(ctx, gen.CloseTerminalTurnParams{
-					AgentResponse: resp, RespondedAt: sql.NullTime{Time: at, Valid: true}, SessionID: string(turn.SessionID),
-				})
-			}
-			if last.UserRequest == req && last.AgentResponse == resp {
-				return nil
-			}
-		}
-		if err := q.InsertTerminalTurn(ctx, gen.InsertTerminalTurnParams{
-			SessionID: string(turn.SessionID), Harness: string(turn.Harness),
-			NativeSessionID: turn.NativeSessionID, UserRequest: req, RequestedAt: at,
-		}); err != nil {
-			return err
-		}
-		if err := q.CloseTerminalTurn(ctx, gen.CloseTerminalTurnParams{
-			AgentResponse: resp, RespondedAt: sql.NullTime{Time: at, Valid: true}, SessionID: string(turn.SessionID),
+		if err := q.InsertCompletedTerminalTurn(ctx, gen.InsertCompletedTerminalTurnParams{
+			SessionID:       string(turn.SessionID),
+			Harness:         string(turn.Harness),
+			NativeSessionID: turn.NativeSessionID,
+			ProviderTurnID:  turnID,
+			UserRequest:     req,
+			AgentResponse:   resp,
+			RequestedAt:     at,
+			RespondedAt:     sql.NullTime{Time: at, Valid: true},
 		}); err != nil {
 			return err
 		}

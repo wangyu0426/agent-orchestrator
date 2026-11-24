@@ -180,6 +180,19 @@ func TestResolveStopTranscript_MalformedAndOversized(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed tail boundary fails closed", func(t *testing.T) {
+		_, path := setupAgyTranscriptFixture(t, "conv-tail-bad", []string{
+			`{"step_index":1,"type":"USER_INPUT","status":"DONE","content":"turn 1"}`,
+			`{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"turn 1 answer"}`,
+			`{"step_index":3,"type":"USER_INPUT","status":"DONE","content":"turn 2 partial`,
+		})
+		payload, _ := json.Marshal(map[string]any{"conversationId": "conv-tail-bad", "transcriptPath": path})
+		got := ResolveStopTranscript(payload)
+		if got.FinalAssistantMessage != "" {
+			t.Fatalf("expected empty FinalAssistantMessage on malformed tail boundary, got %+v", got)
+		}
+	})
+
 	t.Run("oversized file bounded tail read", func(t *testing.T) {
 		geminiHome := t.TempDir()
 		t.Setenv("GEMINI_HOME", geminiHome)
@@ -233,6 +246,9 @@ func TestResolveStopTranscript_RejectsUnsafePathsAndCrossSession(t *testing.T) {
 	nonJSONL := filepath.Join(geminiHome, CLIStorageDir, "brain", "conv-owner", "notes.txt")
 	_ = os.WriteFile(nonJSONL, []byte(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"txt"}`+"\n"), 0o600)
 
+	unrecognizedLayout := filepath.Join(geminiHome, CLIStorageDir, "other.jsonl")
+	_ = os.WriteFile(unrecognizedLayout, []byte(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"other"}`+"\n"), 0o600)
+
 	cases := []struct {
 		name           string
 		conversationID string
@@ -243,6 +259,8 @@ func TestResolveStopTranscript_RejectsUnsafePathsAndCrossSession(t *testing.T) {
 		{"symlink escape", "conv-owner", symlinkEscape},
 		{"non-jsonl extension", "conv-owner", nonJSONL},
 		{"cross-session mismatch", "conv-other", validPath},
+		{"missing conversation id", "", validPath},
+		{"unrecognized layout without brain dir", "conv-owner", unrecognizedLayout},
 	}
 
 	for _, tc := range cases {

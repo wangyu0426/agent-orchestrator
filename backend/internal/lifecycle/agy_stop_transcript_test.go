@@ -85,6 +85,27 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 		t.Fatalf("unexpected turn: %+v", turns[0])
 	}
 
+	// Distinct turn B with identical prompt/response text but new ProviderTurnID
+	// must be persisted as a separate turn (not collapsed by text equality).
+	turnB := stopSignal
+	turnB.ProviderTurnID = "step:10"
+	turnB.Timestamp = now.Add(30 * time.Second)
+	if err := mgr.ApplyActivitySignal(ctx, rec.ID, turnB); err != nil {
+		t.Fatalf("turn B stop signal: %v", err)
+	}
+	// Out-of-order replay of turn A after turn B must be ignored by durable
+	// provider_turn_id uniqueness.
+	if err := mgr.ApplyActivitySignal(ctx, rec.ID, stopSignal); err != nil {
+		t.Fatalf("replay turn A after turn B: %v", err)
+	}
+	turns, err = st.ListTerminalTurns(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("list turns after B and replay A: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("len(turns) = %d, want 2 (distinct identical turn B kept, replay A ignored)", len(turns))
+	}
+
 	// Simulate recovery/relaunch: RuntimeLaunchID advances and FirstSignalAt resets.
 	gotRec.Metadata.RuntimeLaunchID = "launch-2"
 	gotRec.FirstSignalAt = time.Time{}
@@ -110,8 +131,8 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 	if err != nil {
 		t.Fatalf("list turns after stale: %v", err)
 	}
-	if len(turns) != 1 {
-		t.Fatalf("stale stop appended a turn: len=%d", len(turns))
+	if len(turns) != 2 {
+		t.Fatalf("stale stop appended a turn: len=%d, want 2", len(turns))
 	}
 
 	// First fresh post-recovery hook (pre-invocation) restores activity health.
