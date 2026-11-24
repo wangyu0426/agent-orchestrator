@@ -19,8 +19,16 @@ const (
 	ProviderSwitchRefusalRecoveryRequired   ProviderSwitchRefusalKind = "recovery_required"
 )
 
+// ErrQuotaSourceChanged means the source no longer matches the quota sweep.
+var ErrQuotaSourceChanged = errors.New("quota recovery source changed")
+
 // ProviderSwitchRequest is what a switch to another provider asks for.
 type ProviderSwitchRequest struct {
+	// ExpectedSource is set only by internal automatic recovery.
+	ExpectedSource      *SessionControllerOwner
+	ExpectedSourceModel string
+	ExpectedQuotaTurnID string
+
 	TargetHarness  AgentHarness
 	IdempotencyKey string
 	// Model and Effort are what the target starts on. Empty keeps its default.

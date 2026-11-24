@@ -168,6 +168,11 @@ func (s *Service) dispatch(ctx context.Context, store schedulerStore, run domain
 			_, markErr := store.FailAutomationRun(context.WithoutCancel(ctx), run.ID, runError(spawnErr), now)
 			return errors.Join(spawnErr, markErr)
 		}
+		if deferred, ok := s.store.(interface {
+			DeferAutomationRunForQuota(context.Context, domain.AutomationRunID, string, time.Time, time.Time) error
+		}); ok && errors.As(spawnErr, &apiError) && apiError.Code == "WORKER_QUOTA_DEFERRED" {
+			return deferred.DeferAutomationRunForQuota(context.WithoutCancel(ctx), run.ID, runError(spawnErr), now, now.Add(time.Minute))
+		}
 		// A paused project fails this occurrence rather than re-queueing it: the
 		// pause holds until a person starts a session or changes its settings.
 		permanent := errors.As(spawnErr, &apiError) && (apiError.Kind == apierr.KindInvalid || apiError.Kind == apierr.KindNotFound || apiError.Code == "AUTO_SPAWN_PAUSED")

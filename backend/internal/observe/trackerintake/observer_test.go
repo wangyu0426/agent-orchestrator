@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -675,5 +676,72 @@ func TestCanonicalIssueIDGitLabHostDisambiguates(t *testing.T) {
 	internal := CanonicalIssueID(domain.TrackerID{Provider: domain.TrackerProviderGitLab, Native: "group/repo#7", Host: "gitlab.internal"})
 	if dotCom == internal {
 		t.Fatalf("gitlab.com and self-managed with same native produced identical IssueID %q", dotCom)
+	}
+}
+
+type quotaIntakeSpawner struct {
+	store    *fakeStore
+	blocked  bool
+	attempts int
+	started  chan struct{}
+	release  chan struct{}
+}
+
+func (s *quotaIntakeSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {
+	s.attempts++
+	if s.blocked {
+		return domain.Session{}, 0, 0, apierr.Unavailable("WORKER_QUOTA_DEFERRED", "all providers exhausted")
+	}
+	close(s.started)
+	<-s.release
+	record := domain.SessionRecord{ID: "demo-1", ProjectID: cfg.ProjectID, IssueID: cfg.IssueID, Kind: cfg.Kind}
+	s.store.sessions = append(s.store.sessions, record)
+	return domain.Session{SessionRecord: record}, len(cfg.Prompt), 0, nil
+}
+
+func TestWorkerQuotaIntakeDefersAndSpawnsOnceAfterRecovery(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+	store := &fakeStore{projects: []domain.ProjectRecord{{
+		ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git",
+		Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+	}}}
+	tracker := &fakeTracker{issues: []domain.Issue{{
+		ID:    domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"},
+		State: domain.IssueOpen, Assignees: []string{"alice"}, Labels: []string{"agent-ready"},
+	}}}
+	spawner := &quotaIntakeSpawner{store: store, blocked: true, started: make(chan struct{}), release: make(chan struct{})}
+	cfg := Config{Logger: discardLogger(), Clock: func() time.Time { return now }, FailureBackoff: time.Minute}
+	observer := New(singleResolver(tracker), store, spawner, cfg)
+	for range 2 {
+		if err := observer.Poll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if spawner.attempts != 1 || len(store.sessions) != 0 {
+		t.Fatalf("deferred attempts = %d, sessions = %d", spawner.attempts, len(store.sessions))
+	}
+	spawner.blocked = false
+	now = now.Add(time.Minute)
+	done := make(chan error, 1)
+	go func() { done <- observer.Poll(ctx) }()
+	select {
+	case <-spawner.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("intake did not retry after backoff")
+	}
+	err := observer.Poll(ctx)
+	close(spawner.release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := New(singleResolver(tracker), store, spawner, cfg).Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if spawner.attempts != 2 || len(store.sessions) != 1 {
+		t.Fatalf("recovery attempts = %d, sessions = %d", spawner.attempts, len(store.sessions))
 	}
 }

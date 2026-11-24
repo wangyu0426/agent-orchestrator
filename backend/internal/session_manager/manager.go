@@ -33,6 +33,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/termtheme"
 	"github.com/aoagents/agent-orchestrator/backend/internal/tmuxbin"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 // Sentinel errors returned by the Session Manager; callers match them with
@@ -427,10 +428,11 @@ type conversationSettingsStore interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	runtime   runtimeController
-	agents    ports.AgentResolver
-	workspace ports.Workspace
-	store     Store
+	workerQuota *workerquota.Policy
+	runtime     runtimeController
+	agents      ports.AgentResolver
+	workspace   ports.Workspace
+	store       Store
 	// forkSeeds copies a fork source's files into the fork's worktree.
 	forkSeeds forkSeedApplier
 	// claudeSessionFork copies a Claude session into a fork's worktree. It is
@@ -912,11 +914,12 @@ const (
 
 // Deps are the collaborators a Session Manager needs; New wires them together.
 type Deps struct {
-	Runtime   runtimeController
-	Agents    ports.AgentResolver
-	Workspace ports.Workspace
-	Store     Store
-	Messenger ports.AgentMessenger
+	WorkerQuota *workerquota.Policy
+	Runtime     runtimeController
+	Agents      ports.AgentResolver
+	Workspace   ports.Workspace
+	Store       Store
+	Messenger   ports.AgentMessenger
 	// Defaults supplies the daemon-owned default session interface for spawns that
 	// name no mode. Nil means always use the compatibility default.
 	Defaults SessionModeDefaults
@@ -990,6 +993,7 @@ func (m *Manager) WaitAgentSwitchWorkers(ctx context.Context) error {
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
+		workerQuota:                    d.WorkerQuota,
 		runtime:                        d.Runtime,
 		agents:                         d.Agents,
 		workspace:                      d.Workspace,
@@ -1139,6 +1143,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		cfg.AgentConfig.Permissions = permissions
 	}
+	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project)
+	if quotaErr != nil {
+		return domain.SessionRecord{}, 0, 0, quotaErr
+	}
+
 	// A per-project role override picks the harness when the spawn names none,
 	// so a project can default workers to one agent and orchestrators to another.
 	cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
@@ -1273,7 +1282,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	asyncChat := cfg.Async && mode == domain.SessionModeChat && m.chat != nil && (cfg.Kind == domain.KindOrchestrator || cfg.Kind == domain.KindWorker)
 
 	var prep *taskPreparation
-	if cfg.AutomationRunID == nil && cfg.Branch == "" {
+	if remainingRoutes == nil && cfg.AutomationRunID == nil && cfg.Branch == "" {
 		prep = m.claimTaskPreparation(cfg.TaskPreparation, cfg.ProjectID)
 	}
 	var rec domain.SessionRecord
@@ -1281,6 +1290,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		rec = prep.record
 	} else {
 		seed := seedRecord(cfg, project.Config, m.clock())
+		seed.WorkerQuotaRemaining = remainingRoutes
+		if remainingRoutes != nil {
+			seed.Metadata.Model, seed.Metadata.Effort = agentConfig.Model, agentConfig.Effort
+		}
 		if mode == domain.SessionModeChat {
 			seed.Metadata.Model = cfg.AgentConfig.Model
 			seed.Metadata.Effort = cfg.AgentConfig.Effort
@@ -3418,6 +3431,16 @@ func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.Sessio
 // terminal identity, and provider-native conversation remain available for an
 // exact ResumeAgentWithMode call.
 func (m *Manager) ExitAgent(ctx context.Context, id domain.SessionID) (domain.SessionRecord, error) {
+	return m.exitAgent(ctx, id, nil, time.Time{})
+}
+
+// ParkQuotaTUI exits the failed terminal agent while retaining its workspace.
+func (m *Manager) ParkQuotaTUI(ctx context.Context, rec domain.SessionRecord, at time.Time) (bool, error) {
+	exited, err := m.exitAgent(ctx, rec.ID, &rec, at)
+	return exited.Activity.State == domain.ActivityExited, err
+}
+
+func (m *Manager) exitAgent(ctx context.Context, id domain.SessionID, expected *domain.SessionRecord, failedAt time.Time) (domain.SessionRecord, error) {
 	if err := m.beginAgentOperation(ctx, id, agentOperationExit); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
 			err = ErrAgentExitInProgress
@@ -3444,6 +3467,26 @@ func (m *Manager) ExitAgent(ctx context.Context, id domain.SessionID) (domain.Se
 	if rec.Activity.State == domain.ActivityExited {
 		return domain.SessionRecord{}, fmt.Errorf("exit agent %s: %w", id, ErrAgentExited)
 	}
+	if expected != nil {
+		if rec.ControllerOwner() != expected.ControllerOwner() || rec.Metadata.Model != expected.Metadata.Model {
+			return domain.SessionRecord{}, domain.ErrQuotaSourceChanged
+		}
+		if rec.Activity.State != domain.ActivityIdle ||
+			rec.Activity.LastActivityAt.After(failedAt) || rec.Metadata.LatestUserPromptAt.After(failedAt) {
+			return domain.SessionRecord{}, nil
+		}
+		lastInput, release := m.beginTerminalInputDrain(rec)
+		if release != nil {
+			defer release()
+		}
+		if lastInput.After(failedAt) {
+			return domain.SessionRecord{}, nil
+		}
+		if err := m.prepareSourceHandoff(ctx, rec, domain.SessionInterfaceTransitionDrain, lastInput); err != nil {
+			return domain.SessionRecord{}, err
+		}
+	}
+
 	if err := m.releaseTerminalRuntime(ctx, rec); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("exit agent %s: %w", id, err)
 	}

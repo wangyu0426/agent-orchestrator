@@ -20,6 +20,7 @@ in [gemini-cli.md](gemini-cli.md).
 | [Public manual sources](../frontend/src/docs/content/index.mdx) | Existing user guides, configuration, capability catalog, CLI reference, and mobile access pages. |
 | [architecture.md](architecture.md)                     | Current backend model, package layout, status derivation, persistence/CDC, and load-bearing rules.                    |
 | [scm-observer.md](scm-observer.md)                     | SCM subsystem: polling pipeline, durable-state invariants, PR identity model, and the rename/transfer design.         |
+| [worker-quota-failover.md](worker-quota-failover.md) | Daemon-wide worker quota routing, Quotum configuration, and session recovery. |
 | [backend-code-structure.md](backend-code-structure.md) | Package ownership rules for the Go backend: domain, services, ports, adapters, storage, HTTP, CLI, and daemon wiring. |
 | [cli/README.md](cli/README.md)                         | CLI commands and daemon control surface.                                                                              |
 | [cloud-development.md](cloud-development.md)           | Current public Cloud sources, local stack, tests, and hosted-environment boundaries. |

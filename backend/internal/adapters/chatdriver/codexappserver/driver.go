@@ -237,6 +237,29 @@ func (d *Driver) DiscoverModels(ctx context.Context, workdir string, env map[str
 	return listModels(ctx, conv.conn)
 }
 
+// DiscoverDefaultModel reads the model Codex would use with no model override.
+// The catalog marks a generic default, while thread/start honors local config.
+func (d *Driver) DiscoverDefaultModel(ctx context.Context, workdir string, env map[string]string) (string, error) {
+	if !filepath.IsAbs(workdir) {
+		return "", errors.New("default model discovery requires an absolute workspace path")
+	}
+	conv, err := d.connect(ctx, workdir, env, "")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conv.Close() }()
+	var resp struct {
+		Model string `json:"model"`
+	}
+	params := map[string]any{
+		"cwd": workdir, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
+	}
+	if err := conv.conn.request(ctx, "thread/start", params, &resp); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Model), nil
+}
+
 type codexVersion [3]int
 
 var codexVersionPattern = regexp.MustCompile(`\b(\d+)\.(\d+)\.(\d+)\b`)

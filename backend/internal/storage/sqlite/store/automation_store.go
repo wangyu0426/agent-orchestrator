@@ -193,7 +193,7 @@ func (s *Store) ClaimNextAutomationRun(ctx context.Context, now, leaseExpiresAt 
 	var claimed domain.AutomationRun
 	found := false
 	err := s.inTx(ctx, "claim automation run", func(q *gen.Queries) error {
-		candidate, err := q.GetNextClaimableAutomationRun(ctx)
+		candidate, err := q.GetNextClaimableAutomationRun(ctx, now)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -353,6 +353,19 @@ func (s *Store) FailAutomationRun(ctx context.Context, id domain.AutomationRunID
 		return false, fmt.Errorf("fail automation run %s: %w", id, err)
 	}
 	return rows > 0, nil
+}
+
+// DeferAutomationRunForQuota retains the occurrence and releases its claim.
+func (s *Store) DeferAutomationRunForQuota(ctx context.Context, id domain.AutomationRunID, reason string, now, retryAt time.Time) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.inTx(ctx, "defer automation run for quota", func(q *gen.Queries) error {
+		released, err := q.ReleaseAutomationRun(ctx, gen.ReleaseAutomationRunParams{ErrorMessage: nullableString(reason), UpdatedAt: now, ID: id})
+		if err != nil || released == 0 {
+			return err
+		}
+		return q.DeferAutomationRunForQuota(ctx, gen.DeferAutomationRunForQuotaParams{RunID: string(id), RetryAt: retryAt})
+	})
 }
 
 // ReleaseAutomationRun returns a transiently failed claim to pending.

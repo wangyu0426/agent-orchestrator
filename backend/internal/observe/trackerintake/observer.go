@@ -5,13 +5,16 @@ package trackerintake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -80,6 +83,7 @@ type Config struct {
 
 // Observer polls configured projects and starts sessions for eligible issues.
 type Observer struct {
+	pollMu         sync.Mutex
 	resolver       TrackerResolver
 	store          Store
 	spawner        Spawner
@@ -119,6 +123,10 @@ func (o *Observer) Start(ctx context.Context) <-chan struct{} {
 // spawn failures are logged and skipped so one bad issue/project does not block
 // the rest of the daemon.
 func (o *Observer) Poll(ctx context.Context) error {
+	if !o.pollMu.TryLock() {
+		return nil
+	}
+	defer o.pollMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -212,6 +220,11 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 			Prompt:    BuildIssuePrompt(issue),
 			CreatedBy: domain.SessionCreatedByAutomation,
 		}); err != nil {
+			var apiErr *apierr.Error
+			if errors.As(err, &apiErr) && apiErr.Code == "WORKER_QUOTA_DEFERRED" {
+				o.logger.Info("tracker intake deferred until worker quota recovers", "project", project.ID, "issue", issueID)
+				return true
+			}
 			o.logger.Error("tracker intake: spawn issue session failed", "project", project.ID, "issue", issueID, "err", err)
 			// An automated spawn has no HTTP request, so the request logger never
 			// sees it. Bad input (an invalid issue or project) stays out.

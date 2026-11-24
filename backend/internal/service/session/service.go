@@ -26,6 +26,7 @@ import (
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 const maxDisplayNameLen = 100
@@ -2150,6 +2151,11 @@ func toSpawnAPIError(err error) error {
 		return apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupErr.Error(), nil)
 	}
 	switch {
+	case errors.Is(err, workerquota.ErrNoReadyRoute):
+		return apierr.Unavailable("WORKER_QUOTA_NO_READY_ROUTE", err.Error())
+	case errors.Is(err, workerquota.ErrDeferred):
+		return apierr.Unavailable("WORKER_QUOTA_DEFERRED", err.Error())
+
 	case errors.Is(err, sessionmanager.ErrClientRequestConflict):
 		return apierr.Conflict("CLIENT_REQUEST_CONFLICT", "clientRequestId belongs to a different task", nil)
 	case errors.Is(err, sessionmanager.ErrClientRequestIncomplete):

@@ -311,10 +311,12 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 		t.Fatalf("GetLaunchCommand: %v", err)
 	}
 
-	// Hooks fire: run the script with the stub `ao` ahead of the real PATH.
+	// The login shell may prepend an installed ao to PATH. Pin the shim
+	// from inside the script, after the login profile has run.
+	cmd[2] = "export PATH=\"$AO_FAKE_HOOK_PATH:$PATH\"\n" + cmd[2]
 	run := exec.Command(cmd[0], cmd[1:]...) //nolint:gosec // argv is the harness's own launch command
 	run.Env = append(os.Environ(),
-		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AO_FAKE_HOOK_PATH="+dir,
 		"AO_HOOK_LOG="+hookLog,
 		"AO_SESSION_ID=fake-1",
 	)

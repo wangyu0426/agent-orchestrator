@@ -276,6 +276,10 @@ SELECT r.id, r.automation_id, r.scheduled_for, r.session_id, r.status,
 FROM automation_runs r
 JOIN automations a ON a.id = r.automation_id
 WHERE r.status = 'pending'
+  AND NOT EXISTS (
+      SELECT 1 FROM worker_quota_automation_deferral d
+      WHERE d.run_id = r.id AND d.retry_at > ?1
+  )
   AND a.enabled = 1
   AND NOT EXISTS (
       SELECT 1 FROM automation_runs active
@@ -286,8 +290,8 @@ ORDER BY r.scheduled_for, r.id
 LIMIT 1
 `
 
-func (q *Queries) GetNextClaimableAutomationRun(ctx context.Context) (AutomationRun, error) {
-	row := q.db.QueryRowContext(ctx, getNextClaimableAutomationRun)
+func (q *Queries) GetNextClaimableAutomationRun(ctx context.Context, now time.Time) (AutomationRun, error) {
+	row := q.db.QueryRowContext(ctx, getNextClaimableAutomationRun, now)
 	var i AutomationRun
 	err := row.Scan(
 		&i.ID,

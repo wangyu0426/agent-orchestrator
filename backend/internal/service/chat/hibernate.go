@@ -178,6 +178,9 @@ func (s *Service) liveViewLeasesLocked(id domain.SessionID) map[string]time.Time
 // developer-mode setting; a version refresh stops a provider still running a
 // replaced harness release so its next start uses the installed one.
 type hibernateOptions struct {
+	quotaTurnID    string
+	quotaOwner     domain.SessionControllerOwner
+	quotaModel     string
 	versionRefresh bool
 	// forUpdate stops an idle provider so an installer can replace its
 	// executable; the session wakes on its next message or once the update ends.
@@ -190,7 +193,7 @@ type hibernateOptions struct {
 }
 
 func (o hibernateOptions) enabled(s *Service) bool {
-	if o.versionRefresh || o.forUpdate {
+	if o.versionRefresh || o.forUpdate || o.quotaTurnID != "" {
 		return true
 	}
 	return s.hibernationEnabled != nil && s.hibernationEnabled()
@@ -263,6 +266,10 @@ func (s *Service) hibernateChat(ctx context.Context, id domain.SessionID, opts h
 	if err != nil {
 		gate.unlock()
 		return false, err
+	}
+	if opts.quotaTurnID != "" && (rec.ControllerOwner() != opts.quotaOwner || rec.Metadata.Model != opts.quotaModel) {
+		gate.unlock()
+		return false, domain.ErrQuotaSourceChanged
 	}
 	if !opts.eligible(s, rec) || opts.viewed(s, id) {
 		gate.unlock()
@@ -344,12 +351,24 @@ func (s *Service) hibernateChat(ctx context.Context, id domain.SessionID, opts h
 		controller.sendMu.Unlock()
 		return false, nil
 	}
+	if opts.quotaTurnID != "" {
+		turn, err := s.QuotaFailure(ctx, rec)
+		if err != nil || turn.ID != opts.quotaTurnID {
+			controller.sendMu.Unlock()
+			return false, err
+		}
+	}
+
 	// Activity from outside Chat can change while eligibility is read. Recheck
 	// before recording the shutdown intent with a revision-checked write.
 	fresh, err := s.requireChatSession(ctx, id)
 	if err != nil {
 		controller.sendMu.Unlock()
 		return false, err
+	}
+	if opts.quotaTurnID != "" && (fresh.ControllerOwner() != opts.quotaOwner || fresh.Metadata.Model != opts.quotaModel) {
+		controller.sendMu.Unlock()
+		return false, domain.ErrQuotaSourceChanged
 	}
 	if !opts.eligible(s, fresh) {
 		controller.sendMu.Unlock()

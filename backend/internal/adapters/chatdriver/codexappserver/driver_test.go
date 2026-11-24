@@ -1864,3 +1864,30 @@ func TestCodexResumedThreadKeepsTheUsersConfiguredServiceTier(t *testing.T) {
 		t.Fatalf("serviceTier = %s, want it left to the user's config", tier)
 	}
 }
+
+func TestDiscoverDefaultModelReadsEphemeralThreadModel(t *testing.T) {
+	d, srv := newTestDriver(t)
+	srv.reply("thread/start", `{"thread":{"id":"ephemeral-thread"},"model":"configured-default"}`)
+	workdir := t.TempDir()
+	model, err := d.DiscoverDefaultModel(t.Context(), workdir, nil)
+	if err != nil || model != "configured-default" {
+		t.Fatalf("default model = %q, %v", model, err)
+	}
+	start := srv.awaitFrame(func(f frame) bool { return f.Method == "thread/start" })
+	var params struct {
+		Cwd            string  `json:"cwd"`
+		Model          *string `json:"model"`
+		Sandbox        string  `json:"sandbox"`
+		ApprovalPolicy string  `json:"approvalPolicy"`
+		Ephemeral      bool    `json:"ephemeral"`
+	}
+	if err := json.Unmarshal(start.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.Cwd != workdir || params.Model != nil || params.Sandbox != "read-only" || params.ApprovalPolicy != "never" || !params.Ephemeral {
+		t.Fatalf("default model probe = %+v", params)
+	}
+	if srv.sentMethod("model/list") || srv.sentMethod("turn/start") {
+		t.Fatal("default model probe requested a catalog or sent a turn")
+	}
+}

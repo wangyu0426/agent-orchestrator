@@ -1080,6 +1080,27 @@ type UsageTierRepair struct {
 	UsageSourceID int64
 }
 
+type WorkerQuotaAutomationDeferral struct {
+	RunID   string
+	RetryAt time.Time
+}
+
+type WorkerQuotaSession struct {
+	SessionID       string
+	Harness         string
+	Model           string
+	Effort          string
+	AttemptOwner    string
+	TargetHarness   string
+	TargetModel     string
+	Reason          string
+	FailureAt       int64
+	ResetAt         int64
+	FailureHarness  string
+	FailureModel    string
+	RemainingRoutes string
+}
+
 type WorkspaceRepo struct {
 	ProjectID     domain.ProjectID
 	Name          string

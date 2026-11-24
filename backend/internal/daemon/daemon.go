@@ -54,6 +54,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecyclelog"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -709,6 +710,28 @@ func Run(buildVersion string) (retErr error) {
 	go agentAccountSvc.KeepReadingLimits(ctx, time.Minute)
 	// The mode-aware messenger, so a Chat original is told as a chat message.
 	sessionForkSvc := wireSessionFork(store, sessionSvc, wiredSessMgr, chatSvc, chatDrivers, agentAccountSvc, lcStack.ArtifactVersions, lifecycleMessenger, log)
+	if cfg.WorkerQuota != nil {
+		cfg.WorkerQuota.ComputerLogin = func(ctx context.Context, harness domain.AgentHarness) bool {
+			return agentAccountSvc.RunsOnComputerLogin(ctx, harness, "")
+		}
+		cfg.WorkerQuota.DiscoverDefaultModel = func(ctx context.Context, project domain.ProjectRecord, harness domain.AgentHarness) string {
+			if harness != domain.HarnessCodex || project.Path == "" {
+				return ""
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			login, err := agentAccountSvc.DefaultLaunchEnv(probeCtx, harness)
+			if err != nil {
+				return ""
+			}
+			env := agentlaunch.MergeEnv(project.Config.Env, login)
+			model, err := codexModelDriver.DiscoverDefaultModel(probeCtx, project.Path, env)
+			if err != nil {
+				log.Debug("worker quota default model unavailable", "project", project.ID, "harness", harness)
+			}
+			return model
+		}
+	}
 	chatSvc.SetUsageLimitAccounts(agentAccountSvc)
 	if mover, ok := wiredSessMgr.(chatsvc.AccountHandoffMover); ok {
 		chatSvc.SetAccountHandoff(settingsSvc.AccountHandoffEnabled, agentAccountSvc, mover)
@@ -1416,7 +1439,7 @@ func Run(buildVersion string) (retErr error) {
 	}
 
 	var startupReconcileDone <-chan struct{}
-	var usageLimitResumeDone <-chan struct{}
+	var usageLimitResumeDone, workerQuotaDone <-chan struct{}
 	runErr := srv.RunWithReady(ctx, func() {
 		// Agent-readiness warming is advisory and idempotent, and request paths
 		// lazily Ensure on demand. Kick it here, after the listener is live, so its
@@ -1546,6 +1569,19 @@ func Run(buildVersion string) (retErr error) {
 				}
 			}
 		}()
+		if cfg.WorkerQuota != nil {
+			parker, _ := sessMgr.(quotaTerminalParker)
+			quota := workerQuotaSweep{policy: cfg.WorkerQuota, store: store, chat: chatSvc, terminal: parker, agents: agents, accounts: agentAccountSvc, log: log}
+			workerQuotaDone = observe.StartPollLoop(ctx, 10*time.Second, func(ctx context.Context) error {
+				select {
+				case <-done:
+					return quota.poll(ctx)
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}, log, "worker quota")
+		}
+
 		go func() {
 			defer sentryobs.RecoverBackground()
 			runVersionRefreshSweep(ctx, cfg, settingsSvc, sessMgr, systemInstall, log)
@@ -1574,6 +1610,10 @@ func Run(buildVersion string) (retErr error) {
 	// stop only cancels workers; deferred stopSignals keeps a second automatic
 	// SIGTERM from terminating the process while installer restoration runs.
 	stop()
+	if workerQuotaDone != nil {
+		<-workerQuotaDone
+	}
+
 	if usageLimitResumeDone != nil {
 		<-usageLimitResumeDone
 	}

@@ -417,3 +417,40 @@ func TestAutomationDeleteCascadesRunsButPreservesSession(t *testing.T) {
 		t.Fatalf("surviving session = %#v ok=%v err=%v", got, ok, err)
 	}
 }
+
+func TestWorkerQuotaAutomationDeferralKeepsTheOccurrence(t *testing.T) {
+	s := newTestStore(t)
+	seedProject(t, s, "scheduled")
+	ctx := t.Context()
+	now := time.Date(2026, time.November, 24, 12, 0, 0, 0, time.UTC)
+	_, err := s.CreateAutomation(ctx, domain.Automation{
+		ID: "quota-automation", ProjectID: "scheduled", DisplayName: "Triage",
+		Prompt: "Review issues", Kind: domain.KindWorker, RRuleText: "FREQ=DAILY",
+		Timezone: "UTC", Enabled: true, NextRunAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.CreateAutomationRun(ctx, domain.AutomationRun{
+		ID: "quota-run", AutomationID: "quota-automation", ScheduledFor: now,
+		Status: domain.AutomationRunPending, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := s.ClaimNextAutomationRun(ctx, now, now.Add(time.Hour))
+	if err != nil || !ok {
+		t.Fatalf("initial claim = %v, %v", ok, err)
+	}
+	deadline := now.Add(time.Minute)
+	if err := s.DeferAutomationRunForQuota(ctx, claim.ID, "all providers exhausted", now, deadline); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.ClaimNextAutomationRun(ctx, deadline.Add(-time.Second), now.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("claim before retry deadline = %v, %v", ok, err)
+	}
+	retry, ok, err := s.ClaimNextAutomationRun(ctx, deadline, now.Add(time.Hour))
+	if err != nil || !ok || retry.ID != claim.ID || !retry.ScheduledFor.Equal(claim.ScheduledFor) {
+		t.Fatalf("changed occurrence after recovery: %+v, %v, %v", retry, ok, err)
+	}
+}
