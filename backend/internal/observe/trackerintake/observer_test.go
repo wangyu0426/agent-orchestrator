@@ -745,3 +745,53 @@ func TestWorkerQuotaIntakeDefersAndSpawnsOnceAfterRecovery(t *testing.T) {
 		t.Fatalf("recovery attempts = %d, sessions = %d", spawner.attempts, len(store.sessions))
 	}
 }
+
+type failingAttributionSpawner struct {
+	calls int
+	err   error
+}
+
+func (s *failingAttributionSpawner) Spawn(_ context.Context, _ ports.SpawnConfig) (domain.Session, int, int, error) {
+	s.calls++
+	return domain.Session{}, 0, 0, s.err
+}
+
+func TestWorkerQuotaAutoSpawnPausedStopsIssueLoopAndBacksOffWithoutDuplicateClaim(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{projects: []domain.ProjectRecord{{
+		ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git",
+		Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+	}}}
+	tracker := &fakeTracker{issues: []domain.Issue{
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#2"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+	}}
+	spawner := &failingAttributionSpawner{
+		err: apierr.Conflict("AUTO_SPAWN_PAUSED", "paused", map[string]any{"harness": "agy", "mode": "chat"}),
+	}
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	observer := New(singleResolver(tracker), store, spawner, Config{
+		Clock:          func() time.Time { return now },
+		FailureBackoff: 5 * time.Minute,
+		Logger:         logger,
+	})
+	if err := observer.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawn calls = %d, want 1 (AUTO_SPAWN_PAUSED stops further issues in poll)", spawner.calls)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("sessions = %d, want 0", len(store.sessions))
+	}
+	if !strings.Contains(logBuf.String(), "harness=agy") || !strings.Contains(logBuf.String(), "mode=chat") {
+		t.Fatalf("expected harness=agy mode=chat in intake error log, got: %s", logBuf.String())
+	}
+	if err := observer.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawn calls during backoff = %d, want still 1", spawner.calls)
+	}
+}

@@ -170,3 +170,30 @@ func TestWorkerQuotaPreservesManualModelChoiceAfterDefaultAdmission(t *testing.T
 		t.Fatalf("provider default failed to regain quota recovery: switches=%v parks=%d", chat.switches, chat.parks)
 	}
 }
+
+func TestWorkerQuotaInFlightHandoffParksInsteadOfReinterpretingTUIMode(t *testing.T) {
+	ctx := t.Context()
+	store := sqlitetest.MustOpen(t)
+	now := time.Now().UTC()
+	tuiFallback := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeTUI}
+	_, err := store.CreateSession(ctx, domain.SessionRecord{
+		Kind: domain.KindWorker, Mode: domain.SessionModeChat, Harness: domain.HarnessCodex,
+		WorkerQuotaRemaining: []workerquota.Target{tuiFallback}, CreatedAt: now, UpdatedAt: now,
+		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		Metadata: domain.SessionMetadata{Model: "codex-model"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := &quotaChatStub{failedAt: now}
+	sweep := workerQuotaSweep{
+		policy: &workerquota.Policy{Fallbacks: []workerquota.Target{tuiFallback}},
+		store:  store, chat: chat, log: slog.New(slog.DiscardHandler),
+	}
+	if err := sweep.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.switches) != 0 || chat.parks != 1 {
+		t.Fatalf("expected safe park without reinterpreting mode:tui as Chat; switches=%v parks=%d", chat.switches, chat.parks)
+	}
+}

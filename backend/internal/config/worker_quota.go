@@ -30,18 +30,15 @@ func loadWorkerQuota() (*workerquota.Policy, error) {
 	if len(policy.Fallbacks) == 0 || len(policy.Fallbacks) > 8 {
 		return nil, fmt.Errorf("AO_WORKER_QUOTA_FALLBACKS must specify one to eight targets")
 	}
-	for _, target := range policy.Targets(workerquota.Target{}) {
-		if !target.Harness.IsKnown() || target.Model != strings.TrimSpace(target.Model) || target.Effort != strings.TrimSpace(target.Effort) {
-			return nil, fmt.Errorf("worker quota targets require a known harness and trimmed model and effort values")
+	if policy.Primary != nil {
+		if err := validateWorkerQuotaTarget("AO_WORKER_QUOTA_PRIMARY", *policy.Primary); err != nil {
+			return nil, err
 		}
 	}
 	for _, target := range policy.Fallbacks {
-		if !target.Harness.IsKnown() {
-			return nil, fmt.Errorf("AO_WORKER_QUOTA_FALLBACKS requires a known harness for every target")
+		if err := validateWorkerQuotaTarget("AO_WORKER_QUOTA_FALLBACKS", target); err != nil {
+			return nil, err
 		}
-	}
-	if policy.Primary != nil && !policy.Primary.Harness.IsKnown() {
-		return nil, fmt.Errorf("AO_WORKER_QUOTA_PRIMARY requires a known harness")
 	}
 	if base := os.Getenv("AO_QUOTUM_URL"); base != "" {
 		var bindings map[domain.AgentHarness]workerquota.Binding
@@ -62,6 +59,23 @@ func loadWorkerQuota() (*workerquota.Policy, error) {
 		policy.Source = source
 	}
 	return policy, nil
+}
+
+func validateWorkerQuotaTarget(source string, target workerquota.Target) error {
+	if !target.Harness.IsKnown() {
+		return fmt.Errorf("%s requires a known harness for every target", source)
+	}
+	if target.Model != strings.TrimSpace(target.Model) || target.Effort != strings.TrimSpace(target.Effort) {
+		return fmt.Errorf("%s requires trimmed model and effort values", source)
+	}
+	mode, err := domain.ParseSessionMode(string(target.Mode))
+	if err != nil {
+		return fmt.Errorf("%s: %w", source, err)
+	}
+	if !target.Harness.SupportsMode(mode) {
+		return fmt.Errorf("%s: harness %q does not support mode %q", source, target.Harness, mode)
+	}
+	return nil
 }
 
 func workerQuotaJSON(name string, value any) error {

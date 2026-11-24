@@ -35,6 +35,7 @@ type autoSpawnKey struct {
 	project       domain.ProjectID
 	harness       domain.AgentHarness
 	model, effort string
+	mode          domain.SessionMode
 	kind          domain.SessionKind
 }
 
@@ -74,10 +75,74 @@ type autoSpawnAttempt struct {
 	settled   bool // guarded by the breaker mutex
 }
 type autoSpawnAttemptKey struct{}
+type autoSpawnGateKey struct{}
 
 func autoSpawnAttemptFrom(ctx context.Context) *autoSpawnAttempt {
 	attempt, _ := ctx.Value(autoSpawnAttemptKey{}).(*autoSpawnAttempt)
 	return attempt
+}
+
+func autoSpawnGateFrom(ctx context.Context) *autoSpawnGate {
+	gate, _ := ctx.Value(autoSpawnGateKey{}).(*autoSpawnGate)
+	return gate
+}
+
+type autoSpawnGate struct {
+	service  *Service
+	project  domain.ProjectID
+	kind     domain.SessionKind
+	settings string
+	auto     bool
+	mu       sync.Mutex
+	attempt  *autoSpawnAttempt
+}
+
+func (g *autoSpawnGate) TryAdmit(harness domain.AgentHarness, model, effort string, mode domain.SessionMode) (bool, error) {
+	key := autoSpawnKey{project: g.project, harness: harness, model: model, effort: effort, mode: mode, kind: g.kind}
+	attempt, paused := g.service.autoSpawns.begin(key, g.settings, g.auto, g.service.now())
+	if paused {
+		return false, autoSpawnPausedError(harness, model, effort, mode)
+	}
+	g.mu.Lock()
+	g.attempt = attempt
+	g.mu.Unlock()
+	return true, nil
+}
+
+func (g *autoSpawnGate) RebindMode(harness domain.AgentHarness, model, effort string, mode domain.SessionMode) error {
+	g.mu.Lock()
+	prev := g.attempt
+	g.mu.Unlock()
+	if prev != nil && prev.key.mode == mode {
+		return nil
+	}
+	if prev != nil {
+		g.service.autoSpawns.cancelUnsettledProbe(prev)
+	}
+	admitted, pauseErr := g.TryAdmit(harness, model, effort, mode)
+	if !admitted {
+		return pauseErr
+	}
+	return nil
+}
+
+func (g *autoSpawnGate) Attempt() *autoSpawnAttempt {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.attempt
+}
+
+func autoSpawnPausedError(harness domain.AgentHarness, model, effort string, mode domain.SessionMode) error {
+	details := map[string]any{"harness": string(harness), "model": model, "effort": effort}
+	if mode != "" {
+		details["mode"] = string(mode)
+	}
+	return apierr.Conflict("AUTO_SPAWN_PAUSED",
+		"Automatic starts for this launch configuration are paused. A probe is allowed after a 30-minute cooldown. Start this configuration manually to retry sooner.",
+		details)
 }
 
 func (b *autoSpawnBreaker) begin(key autoSpawnKey, settings string, automatic bool, now time.Time) (*autoSpawnAttempt, bool) {
@@ -141,6 +206,28 @@ func (b *autoSpawnBreaker) finish(attempt *autoSpawnAttempt, code, message strin
 	return false
 }
 
+func (b *autoSpawnBreaker) cancelUnsettledProbe(attempt *autoSpawnAttempt) {
+	if attempt == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if attempt.settled {
+		return
+	}
+	attempt.settled = true
+	streak := b.streaks[attempt.key]
+	if streak != attempt.state {
+		return
+	}
+	if streak.probing {
+		streak.probing = false
+	}
+	if streak.count == 0 && streak.pausedAt.IsZero() {
+		delete(b.streaks, attempt.key)
+	}
+}
+
 // pauses lists the pauses in force for a project.
 func (b *autoSpawnBreaker) pauses(project domain.ProjectID, settings string, now time.Time) []domain.AutoSpawnPause {
 	b.mu.Lock()
@@ -158,7 +245,7 @@ func (b *autoSpawnBreaker) pauses(project domain.ProjectID, settings string, now
 }
 
 func (s *autoSpawnStreak) pause(key autoSpawnKey) domain.AutoSpawnPause {
-	return domain.AutoSpawnPause{Harness: key.harness, Model: key.model, Effort: key.effort, Kind: string(key.kind), ErrorCode: s.code, Message: s.message, Failures: s.count, PausedAt: s.pausedAt}
+	return domain.AutoSpawnPause{Harness: key.harness, Model: key.model, Effort: key.effort, Mode: key.mode, Kind: string(key.kind), ErrorCode: s.code, Message: s.message, Failures: s.count, PausedAt: s.pausedAt}
 }
 
 // autoSpawnSettings fingerprints the project settings a start depends on:
@@ -188,25 +275,35 @@ func (s *Service) AutoSpawnPauses(ctx context.Context, project domain.ProjectRec
 // launch configuration is paused, and keeps the breaker's counts.
 func (s *Service) spawnUnlessAutoPaused(ctx context.Context, cfg ports.SpawnConfig, spawn func(context.Context) (domain.Session, int, int, error)) (domain.Session, int, int, error) {
 	var attempt *autoSpawnAttempt
+	var gate *autoSpawnGate
 	if cfg.ProjectID != "" && s.store != nil {
 		project, ok, err := s.store.GetProject(ctx, string(cfg.ProjectID))
 		if err == nil && ok {
-			harness := autoSpawnHarness(cfg, project)
-			launch := cfg
-			launch.Harness = harness
-			tuning := sessionmanager.EffectiveSpawnAgentConfig(launch, project.Config)
-			key := autoSpawnKey{project: cfg.ProjectID, harness: harness, model: tuning.Model, effort: tuning.Effort, kind: cfg.Kind}
-			var paused bool
-			attempt, paused = s.autoSpawns.begin(key, autoSpawnSettings(project), automaticSpawn(cfg), s.now())
-			if paused {
-				return domain.Session{}, 0, 0, apierr.Conflict("AUTO_SPAWN_PAUSED",
-					"Automatic starts for this launch configuration are paused. A probe is allowed after a 30-minute cooldown. Start this configuration manually to retry sooner.",
-					map[string]any{"harness": string(harness), "model": key.model, "effort": key.effort})
+			if _, deferred := s.manager.(interface{ SupportsDeferredAutoSpawn() bool }); deferred {
+				gate = &autoSpawnGate{
+					service: s, project: cfg.ProjectID, kind: cfg.Kind,
+					settings: autoSpawnSettings(project), auto: automaticSpawn(cfg),
+				}
+				ctx = context.WithValue(sessionmanager.WithAutoSpawnAdmitter(ctx, gate), autoSpawnGateKey{}, gate)
+			} else {
+				harness := autoSpawnHarness(cfg, project)
+				launch := cfg
+				launch.Harness = harness
+				tuning := sessionmanager.EffectiveSpawnAgentConfig(launch, project.Config)
+				key := autoSpawnKey{project: cfg.ProjectID, harness: harness, model: tuning.Model, effort: tuning.Effort, mode: cfg.RequestedMode, kind: cfg.Kind}
+				var paused bool
+				attempt, paused = s.autoSpawns.begin(key, autoSpawnSettings(project), automaticSpawn(cfg), s.now())
+				if paused {
+					return domain.Session{}, 0, 0, autoSpawnPausedError(harness, key.model, key.effort, key.mode)
+				}
+				ctx = context.WithValue(ctx, autoSpawnAttemptKey{}, attempt)
 			}
-			ctx = context.WithValue(ctx, autoSpawnAttemptKey{}, attempt)
 		}
 	}
 	sess, promptBytes, systemPromptBytes, err := spawn(ctx)
+	if attempt == nil && gate != nil {
+		attempt = gate.Attempt()
+	}
 	if err != nil || sess.ProvisionState != domain.SessionProvisionProvisioning {
 		s.settleAutoSpawn(attempt, err == nil, err)
 	}
@@ -241,7 +338,8 @@ func (s *Service) settleAutoSpawn(attempt *autoSpawnAttempt, ready bool, err err
 		message = apiErr.Message
 	}
 	if s.autoSpawns.finish(attempt, code, message, s.now()) && s.logger != nil {
-		s.logger.Warn("session: automatic launch configuration paused", "project", attempt.key.project, "harness", attempt.key.harness, "code", code)
+		s.logger.Warn("session: automatic launch configuration paused",
+			"project", attempt.key.project, "harness", attempt.key.harness, "mode", attempt.key.mode, "code", code)
 	}
 }
 

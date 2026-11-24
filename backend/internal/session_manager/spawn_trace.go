@@ -29,6 +29,7 @@ type SpawnTrace struct {
 	mu         sync.Mutex
 	steps      map[string]int64
 	failedStep string
+	harness    domain.AgentHarness
 	model      string
 	mode       domain.SessionMode
 	async      bool
@@ -73,6 +74,17 @@ func BeginSpawnStep(ctx context.Context, step string) func(error) {
 	}
 }
 
+// NoteSpawnHarness records the effective harness resolved for the spawn.
+func NoteSpawnHarness(ctx context.Context, harness domain.AgentHarness) {
+	trace := spawnTraceFrom(ctx)
+	if trace == nil || harness == "" {
+		return
+	}
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	trace.harness = harness
+}
+
 // NoteSpawnLaunch records the launch's mode and whether it went on in the
 // background. An empty mode is ignored and async is sticky-true.
 func NoteSpawnLaunch(ctx context.Context, mode domain.SessionMode, async bool) {
@@ -113,6 +125,7 @@ type SpawnTraceFacts struct {
 	// StepMs holds only the steps that ran, keyed "<step>_ms".
 	StepMs     map[string]int64
 	FailedStep string
+	Harness    domain.AgentHarness
 	Model      string
 	Mode       domain.SessionMode
 	Async      bool
@@ -129,7 +142,7 @@ func (t *SpawnTrace) Facts() SpawnTraceFacts {
 	for step, ms := range t.steps {
 		steps[step+"_ms"] = ms
 	}
-	return SpawnTraceFacts{StepMs: steps, FailedStep: t.failedStep, Model: t.model, Mode: t.mode, Async: t.async}
+	return SpawnTraceFacts{StepMs: steps, FailedStep: t.failedStep, Harness: t.harness, Model: t.model, Mode: t.mode, Async: t.async}
 }
 
 // SpawnTraceFrom returns the trace ctx carries, or nil.

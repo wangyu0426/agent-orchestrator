@@ -5626,6 +5626,8 @@ export interface components {
             harness: string;
             kind?: string;
             message: string;
+            /** @enum {string} */
+            mode?: "chat" | "tui";
             model?: string;
             /** Format: date-time */
             pausedAt: string;

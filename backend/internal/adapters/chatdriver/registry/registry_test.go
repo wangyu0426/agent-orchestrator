@@ -60,4 +60,10 @@ func TestShippedChatDrivers(t *testing.T) {
 			t.Errorf("%s refused with %v, want ErrChatUnsupported so callers can branch", harness, err)
 		}
 	}
+
+	for _, harness := range domain.AllHarnesses {
+		if got, want := r.SupportsChat(harness), harness.SupportsChat(); got != want {
+			t.Errorf("%s: registry SupportsChat=%v, domain SupportsChat=%v", harness, got, want)
+		}
+	}
 }

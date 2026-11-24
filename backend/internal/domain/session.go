@@ -408,11 +408,12 @@ type SessionMetadata struct {
 	BrowserCapabilityVerifier string `json:"-"`
 }
 
-// WorkerQuotaTarget is a configured harness, model, and reasoning effort.
+// WorkerQuotaTarget is a configured harness, model, reasoning effort, and optional session interface.
 type WorkerQuotaTarget struct {
 	Harness AgentHarness `json:"harness"`
 	Model   string       `json:"model"`
 	Effort  string       `json:"effort"`
+	Mode    SessionMode  `json:"mode,omitempty"`
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable

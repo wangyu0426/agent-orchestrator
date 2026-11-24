@@ -4,23 +4,66 @@ Worker failover is a daemon-wide opt-in. It applies to tracker intake, scheduled
 workers, and workers spawned by another AO session. Each project's existing
 worker harness, model, and reasoning effort are the default primary. AO checks
 routes in configuration order and skips a route when a current applicable
-quota window is exhausted. An explicit spawn harness, account, model, native
-mode, or reasoning effort takes precedence. Interactive task creation,
-orchestrator sessions, and reviewer routing continue to use their own settings.
+quota window is exhausted.
+
+## Precedence
+
+1. **Explicit spawn overrides** — manual task creation, or any explicit spawn
+   harness, account, model, interface (`--mode`), native mode, or reasoning
+   effort — take precedence and bypass worker quota routing.
+2. **Selected worker quota route** (`AO_WORKER_QUOTA_PRIMARY` if set, otherwise
+   the project's worker settings as primary, followed by
+   `AO_WORKER_QUOTA_FALLBACKS` in order): the selected route's `harness`,
+   `model`, `effort`, and optional `mode` override project defaults and the
+   daemon's default session interface.
+3. **Daemon and project defaults** — when a route omits `mode`, AO resolves the
+   session interface from the daemon default (falling back to TUI if default
+   Chat is unavailable for that harness, or Chat if the harness is Chat-only).
+
+Interactive task creation, orchestrator sessions, and reviewer routing continue
+to use their own settings.
 
 ## Configuration
 
 Set the following environment variables for the AO daemon and restart it.
 The optional primary takes precedence over every project's worker settings.
 A target with an omitted model or effort uses the target provider's default.
+An optional `"mode"` (`"chat"` or `"tui"`) pins the session interface for new
+workers admitted on that route; omitting `"mode"` preserves default behavior.
+Invalid mode values and incompatible harness/mode combinations (such as `"tui"`
+on a Chat-only harness or `"chat"` on a harness without a Chat driver) are
+rejected at configuration load.
 Use the model IDs accepted by the chosen harness.
 
 ```sh
 export AO_WORKER_QUOTA_FAILOVER=on
-export AO_WORKER_QUOTA_FALLBACKS='[{"harness":"agy","model":"your-agy-model-id"}]'
+export AO_WORKER_QUOTA_FALLBACKS='[{"harness":"agy","model":"your-agy-model-id","mode":"tui"}]'
 # Optional AO-wide primary override
 export AO_WORKER_QUOTA_PRIMARY='{"harness":"codex","model":"your-codex-model-id","effort":"high"}'
 ```
+
+### Rollout example (Codex primary with AGY TUI fallback)
+
+To keep Codex as the primary worker harness and fall back to AGY Hydrogen Low
+in Terminal UI mode when Codex weekly quota is exhausted:
+
+```sh
+export AO_WORKER_QUOTA_FAILOVER=on
+export AO_WORKER_QUOTA_FALLBACKS='[{"harness":"agy","model":"gemini-4-hydrogen-low","mode":"tui"}]'
+export AO_QUOTUM_URL='https://quotum.example.com'
+export AO_QUOTUM_BOARD='board-id'
+export AO_QUOTUM_SESSION_FILE='/path/to/private/quotum-session'
+export AO_QUOTUM_BINDINGS='{
+  "codex":{"sourceId":"codex-source-id"},
+  "agy":{"sourceId":"agy-source-id","modelGroups":{"gemini-4-hydrogen-low":["gemini:session","gemini:weekly"]}}
+}'
+```
+
+When `"mode":"tui"` is configured, AO admits the route using TUI prerequisites
+(installed binary and terminal runtime) without requiring AGY ACP Chat
+authentication, and launches the worker directly in TUI. Optional AI task naming
+is best-effort and falls back to a deterministic prompt slug if background Chat
+naming is unavailable.
 
 AO can run without Quotum. A confirmed Codex Chat refusal with a known
 rolling reset can defer new work for the same model on the computer login.
@@ -84,6 +127,9 @@ schema are tied to the Quotum hub release.
   One durable attempt per session prevents repeated switching, including after
   daemon restart. If interrupted after
   switching, inspect the active provider and send a continuation in that session.
+  Remaining fallback routes that pin `"mode":"tui"` are not reinterpreted as Chat
+  for an in-flight Chat session; if no Chat-compatible fallback remains, the
+  session parks safely for manual recovery.
 - **Parking.** An unsupported or unavailable fallback leaves the failed turn
   available for manual recovery. AO stops the provider when existing idle and
   ownership checks permit it. Terminal UI workers with a confirmed Codex
@@ -92,6 +138,35 @@ schema are tied to the Quotum hub release.
   session or use its provider switch controls. No separate worktree is created.
   Pending Chat input, queued work, and user-armed usage-limit auto-resume take
   precedence over automatic switching.
+
+## Diagnosing and recovering paused launches
+
+Repeated identical configuration or authentication failures (3 consecutive
+failures) pause only the failing effective route configuration `(project,
+harness, model, effort, mode)` rather than poisoning the configured primary or
+unrelated routes. Healthy alternative routes remain eligible according to policy.
+
+To inspect active pauses without modifying credentials or sessions:
+
+- Check daemon logs for `worker quota selected configured route` and
+  `session: automatic launch configuration paused` (both record the effective
+  `harness`, `mode`, and `code`).
+- Query `GET /api/v1/projects` and inspect each project's `autoSpawnPauses`
+  list (showing `harness`, `model`, `effort`, `mode`, `errorCode`, `message`,
+  `failures`, and `pausedAt`).
+
+To recover from a pause without deleting credentials or sessions:
+
+- **Restart the daemon** after fixing environment configuration (for example,
+  switching a fallback route to `"mode":"tui"`). Pause streaks are held in
+  daemon memory and clear on restart while preserving all sessions and
+  credentials.
+- **Run one manual session** matching the paused harness, model, effort, and
+  interface; a successful manual start clears the matching pause immediately.
+- **Update the project's agent/worker settings**, which invalidates the cached
+  pause fingerprint for that project.
+- **Wait for the 30-minute cooldown**, after which the daemon automatically
+  admits one probe attempt for that configuration.
 
 Selected non-primary routes, deferred intake, and handoff or parking reasons are
 recorded in daemon logs. The session shows its active harness and model. Review

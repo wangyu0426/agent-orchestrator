@@ -13,6 +13,23 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
+type quotaTestReadiness struct {
+	byHarness map[domain.AgentHarness]domain.AgentReadinessSnapshot
+}
+
+func (r quotaTestReadiness) EnsureAgentReadiness(_ context.Context, agentID string, _ domain.AgentReadinessPurpose) (domain.AgentReadinessSnapshot, error) {
+	if snap, ok := r.byHarness[domain.AgentHarness(agentID)]; ok {
+		return snap, nil
+	}
+	return domain.AgentReadinessSnapshot{
+		ID:           agentID,
+		Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+	}, nil
+}
+func (quotaTestReadiness) InvalidateAgentInstallation(string)   {}
+func (quotaTestReadiness) InvalidateAgentAuthentication(string) {}
+func (quotaTestReadiness) RecheckAgent(string)                  {}
+
 type testQuotaSource struct {
 	now     time.Time
 	blocked map[domain.AgentHarness]bool
@@ -144,5 +161,92 @@ func TestWorkerQuotaGlobalRoutesUnavailableDoNotLaunchProjectProvider(t *testing
 	}
 	if cfg.Harness != "" || project.Config.Worker.Harness != domain.HarnessCodex {
 		t.Fatalf("failed admission changed spawn config: %+v, %+v", cfg, project.Config.Worker)
+	}
+}
+
+func TestWorkerQuotaExplicitModeOverrideAndReadinessIsolation(t *testing.T) {
+	now := time.Now()
+	source := &testQuotaSource{now: now, blocked: map[domain.AgentHarness]bool{domain.HarnessCodex: true}}
+	project := domain.ProjectRecord{
+		ID:     "project",
+		Config: domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex}},
+	}
+	readiness := quotaTestReadiness{byHarness: map[domain.AgentHarness]domain.AgentReadinessSnapshot{
+		domain.HarnessAgy: {
+			ID:           string(domain.HarnessAgy),
+			Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+			// Even if readiness reports unauthorized for ACP, AGY TUI does not require ACP auth.
+			Authentication: domain.AgentAuthenticationObservation{State: domain.AgentAuthenticationUnauthorized, Freshness: domain.AgentReadinessFresh},
+		},
+	}}
+	launcher := &taskNamingLauncher{err: ports.ErrChatAuthRequired}
+	manager := &Manager{
+		workerQuota: &workerquota.Policy{
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeTUI}},
+			Source:    source,
+		},
+		clock:          func() time.Time { return now },
+		logger:         slog.New(slog.DiscardHandler),
+		agents:         fakeAgents{},
+		chat:           launcher,
+		defaults:       fixedSessionModeDefaults(domain.SessionModeChat),
+		agentReadiness: readiness,
+	}
+
+	// Explicit spawn interface override is not overridden by worker quota routing.
+	explicitMode := ports.SpawnConfig{
+		Kind:          domain.KindWorker,
+		ProjectID:     "project",
+		CreatedBy:     domain.SessionCreatedByAutomation,
+		RequestedMode: domain.SessionModeChat,
+	}
+	if remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &explicitMode, &project); err != nil || remaining != nil || explicitMode.Harness != "" || explicitMode.RequestedMode != domain.SessionModeChat {
+		t.Fatalf("explicit interface override was routed: cfg=%+v remaining=%v err=%v", explicitMode, remaining, err)
+	}
+
+	// Automated worker with exhausted Codex selects AGY TUI without running PreflightChat.
+	automatic := ports.SpawnConfig{
+		Kind:      domain.KindWorker,
+		ProjectID: "project",
+		CreatedBy: domain.SessionCreatedByAutomation,
+	}
+	remaining, err := manager.selectWorkerQuotaTarget(t.Context(), &automatic, &project)
+	if err != nil || remaining == nil {
+		t.Fatalf("selectWorkerQuotaTarget = remaining=%v err=%v", remaining, err)
+	}
+	if automatic.Harness != domain.HarnessAgy || automatic.AgentConfig.Model != "gemini-4-hydrogen-low" || automatic.RequestedMode != domain.SessionModeTUI {
+		t.Fatalf("propagated route = %+v, want agy/gemini-4-hydrogen-low/tui", automatic)
+	}
+	if len(launcher.preflighted) != 0 {
+		t.Fatalf("TUI route ran PreflightChat: %v", launcher.preflighted)
+	}
+
+	// Same route without mode preserves daemon default (Chat) and checks Chat preflight.
+	omittedModePolicy := &workerquota.Policy{
+		Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"}},
+		Source:    source,
+	}
+	manager.workerQuota = omittedModePolicy
+	readiness.byHarness[domain.HarnessAgy] = domain.AgentReadinessSnapshot{
+		ID:           string(domain.HarnessAgy),
+		Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+	}
+	launcher.preflightErr = nil
+	automatic = ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", CreatedBy: domain.SessionCreatedByAutomation}
+	if _, err := manager.selectWorkerQuotaTarget(t.Context(), &automatic, &project); err != nil {
+		t.Fatalf("omitted mode route failed: %v", err)
+	}
+	if automatic.RequestedMode != "" {
+		t.Fatalf("omitted mode set RequestedMode = %q, want empty (daemon default applies)", automatic.RequestedMode)
+	}
+
+	// Incompatible mode on route (e.g. unreal-agent with tui) is rejected predictably.
+	manager.workerQuota = &workerquota.Policy{
+		Primary:   &workerquota.Target{Harness: domain.HarnessUnreal, Mode: domain.SessionModeTUI},
+		Fallbacks: []workerquota.Target{{Harness: domain.HarnessAider, Mode: domain.SessionModeChat}},
+	}
+	automatic = ports.SpawnConfig{Kind: domain.KindWorker, ProjectID: "project", CreatedBy: domain.SessionCreatedByAutomation}
+	if _, err := manager.selectWorkerQuotaTarget(t.Context(), &automatic, &project); !errors.Is(err, workerquota.ErrNoReadyRoute) {
+		t.Fatalf("incompatible routes error = %v, want ErrNoReadyRoute", err)
 	}
 }

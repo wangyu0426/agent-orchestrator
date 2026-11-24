@@ -1082,6 +1082,10 @@ func New(d Deps) *Manager {
 	return m
 }
 
+// SupportsDeferredAutoSpawn reports that Spawn invokes the context-carried
+// AutoSpawnAdmitter once the effective harness, tuning, and mode are resolved.
+func (*Manager) SupportsDeferredAutoSpawn() bool { return true }
+
 // Spawn creates the session row (which assigns the "{project}-{n}" id), then the
 // workspace and runtime, then reports completion to the LCM. If workspace
 // materialization fails the still-seed row is deleted outright; a later failure
@@ -1156,16 +1160,30 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		cfg.AgentConfig.Permissions = permissions
 	}
-	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project)
+	quota, quotaErr := m.selectWorkerQuota(ctx, &cfg, &project)
 	if quotaErr != nil {
 		return domain.SessionRecord{}, 0, 0, quotaErr
 	}
+	remainingRoutes := quota.remaining
 
 	// A per-project role override picks the harness when the spawn names none,
 	// so a project can default workers to one agent and orchestrators to another.
 	cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
 	if cfg.Harness == "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness", ErrMissingHarness, roleConfigName(cfg.Kind))
+	}
+	NoteSpawnHarness(ctx, cfg.Harness)
+	admitter := autoSpawnAdmitterFrom(ctx)
+	if admitter != nil && !quota.active {
+		initialMode := m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
+		if cfg.Harness.ChatOnly() && cfg.RequestedMode != domain.SessionModeTUI {
+			initialMode = domain.SessionModeChat
+		}
+		NoteSpawnLaunch(ctx, initialMode, false)
+		initialTuning := EffectiveSpawnAgentConfig(cfg, project.Config)
+		if admitted, pauseErr := admitter.TryAdmit(cfg.Harness, initialTuning.Model, initialTuning.Effort, initialMode); !admitted {
+			return domain.SessionRecord{}, 0, 0, pauseErr
+		}
 	}
 	releaseHarness, err := m.beginHarnessUse(cfg.Harness)
 	if err != nil {
@@ -1215,6 +1233,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	// if it is unavailable for this harness or installation, fall back to TUI.
 	modeExplicitlyRequested := cfg.RequestedMode.Valid()
 	mode := m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
+	if quota.active && quota.mode != "" {
+		mode = quota.mode
+	}
+	NoteSpawnLaunch(ctx, mode, false)
 	if mode == domain.SessionModeChat && m.chat != nil && cfg.AgentConfig.Permissions == "" &&
 		effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config).Permissions == "" {
 		// Auto is AO's generic default, not a provider capability. An agent
@@ -1231,13 +1253,23 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 	}
 	if mode == domain.SessionModeChat {
-		if m.chat == nil {
+		if quota.active && quota.chatPreflighted {
+			if quota.chatPreflightErr != nil {
+				return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", agentlaunch.RedactError(quota.chatPreflightErr, project.Config.Env))
+			}
+		} else if m.chat == nil {
 			if modeExplicitlyRequested {
 				return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: chat mode is not available in this build", ports.ErrChatUnsupported)
 			}
 			m.logger.Warn("spawn: default Chat unavailable; falling back to TUI",
 				"harness", cfg.Harness, "error", ports.ErrChatUnsupported)
 			mode = domain.SessionModeTUI
+			NoteSpawnLaunch(ctx, mode, false)
+			if admitter != nil {
+				if pauseErr := admitter.RebindMode(cfg.Harness, agentConfig.Model, agentConfig.Effort, mode); pauseErr != nil {
+					return domain.SessionRecord{}, 0, 0, pauseErr
+				}
+			}
 		} else if err := m.preflightChat(ctx, cfg.Harness, agentConfig.Permissions, m.chatPreflightEnv(cfg, project.Config.Env)); err != nil {
 			fallbackAllowed := errors.Is(err, ports.ErrChatUnsupported) ||
 				errors.Is(err, ports.ErrChatDriverUnavailable) ||
@@ -1250,6 +1282,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 			m.logger.Warn("spawn: default Chat unavailable; falling back to TUI",
 				"harness", cfg.Harness, "error", agentlaunch.RedactError(err, project.Config.Env))
 			mode = domain.SessionModeTUI
+			NoteSpawnLaunch(ctx, mode, false)
+			if admitter != nil {
+				if pauseErr := admitter.RebindMode(cfg.Harness, agentConfig.Model, agentConfig.Effort, mode); pauseErr != nil {
+					return domain.SessionRecord{}, 0, 0, pauseErr
+				}
+			}
 		}
 		if mode == domain.SessionModeChat {
 			checked := BeginSpawnStep(ctx, SpawnStepModelCheck)
@@ -7077,6 +7115,9 @@ func setProtectedEnv(env map[string]string, key, value string, caseInsensitive b
 }
 
 func hookPATHForOS(executable func() (string, error), getenv func(string) string, projectEnv map[string]string, dataDir string, caseInsensitive bool) (string, error) {
+	if executable == nil {
+		return "", errors.New("executable resolver unavailable")
+	}
 	if !caseInsensitive {
 		return HookPATH(executable, getenv, projectEnv, dataDir)
 	}

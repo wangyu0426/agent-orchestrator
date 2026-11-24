@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -476,11 +477,17 @@ func (s *Service) spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 	}
 	cfg = s.withIssueContext(ctx, cfg, project)
+	ctx, trace := sessionmanager.WithSpawnTrace(ctx)
 	rec, promptBytes, systemPromptBytes, err := s.spawnWithTelemetry(ctx, cfg, project)
 	if err != nil {
-		s.invalidateAgentReadinessAfterLaunchFailure(cfg.Harness, err)
-		apiErr := withSpawnClassification(toSpawnAPIError(err), err)
-		s.recordSpawnOutcome(ctx, cfg, domain.SessionRecord{}, actionStatusForError(err), apiErr)
+		facts := trace.Facts()
+		effectiveHarness := cmp.Or(facts.Harness, cfg.Harness)
+		effectiveMode := cmp.Or(facts.Mode, cfg.RequestedMode)
+		s.invalidateAgentReadinessAfterLaunchFailure(effectiveHarness, err)
+		apiErr := withSpawnFailureDetails(withSpawnClassification(toSpawnAPIError(err), err), effectiveHarness, effectiveMode)
+		outcomeCfg := cfg
+		outcomeCfg.Harness = effectiveHarness
+		s.recordSpawnOutcome(ctx, outcomeCfg, domain.SessionRecord{}, actionStatusForError(err), apiErr)
 		return domain.Session{}, 0, 0, apiErr
 	}
 	s.recordSpawnOutcome(ctx, cfg, rec, domain.ActivityStatusCompleted, nil)
@@ -504,7 +511,9 @@ func (s *Service) spawnWithTelemetry(ctx context.Context, cfg ports.SpawnConfig,
 	start := s.monoNow()
 	// The manager records step timings and the launch it chose here; the
 	// outcome event reads them, from the background for an async Chat start.
-	ctx, _ = sessionmanager.WithSpawnTrace(ctx)
+	if sessionmanager.SpawnTraceFrom(ctx) == nil {
+		ctx, _ = sessionmanager.WithSpawnTrace(ctx)
+	}
 	firstSession, err := s.isFirstSession(ctx)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("count sessions: %w", err)
@@ -515,7 +524,7 @@ func (s *Service) spawnWithTelemetry(ctx context.Context, cfg ports.SpawnConfig,
 	createdBy := s.spawnCreatedBy(ctx, cfg)
 	// An asynchronous Chat start answers before it is usable; the provision
 	// observer then owns the outcome (spawn_outcome.go) and reads these facts.
-	acc := &spawnAcceptance{start: start, createdBy: createdBy, firstEligible: firstSession, project: project, autoSpawn: autoSpawnAttemptFrom(ctx)}
+	acc := &spawnAcceptance{start: start, createdBy: createdBy, firstEligible: firstSession, project: project, autoSpawn: autoSpawnAttemptFrom(ctx), autoSpawnGate: autoSpawnGateFrom(ctx)}
 	rec, promptBytes, systemPromptBytes, err := s.manager.Spawn(context.WithValue(ctx, spawnAcceptanceKey{}, acc), cfg)
 	err = sessionmanager.ClassifySpawnError(ctx, sessionmanager.RelabelSpawnTimeout(err, ctx))
 	answeredMs := s.monoNow().Sub(start).Milliseconds()
@@ -530,7 +539,14 @@ func (s *Service) spawnWithTelemetry(ctx context.Context, cfg ports.SpawnConfig,
 		}
 		s.firstSession.finish(s.milestones, firstSession, false)
 		elapsed := answeredMs
-		s.emitSpawnFailed(spawnFailure{kind: cfg.Kind, harness: cfg.Harness, projectID: cfg.ProjectID, mode: cfg.RequestedMode, facts: s.spawnFactsFromRequest(ctx, createdBy, false)}, err, elapsed, elapsed)
+		facts := s.spawnFactsFromRequest(ctx, createdBy, false)
+		traceFacts := facts.trace.Facts()
+		effectiveHarness := cmp.Or(traceFacts.Harness, cfg.Harness)
+		effectiveMode := cmp.Or(traceFacts.Mode, cfg.RequestedMode)
+		var apiErr *apierr.Error
+		if !errors.As(err, &apiErr) || apiErr.Code != "AUTO_SPAWN_PAUSED" {
+			s.emitSpawnFailed(spawnFailure{kind: cfg.Kind, harness: effectiveHarness, projectID: cfg.ProjectID, mode: effectiveMode, facts: facts}, err, elapsed, elapsed)
+		}
 		return domain.SessionRecord{}, 0, 0, err
 	}
 	s.recordCreatedBy(ctx, rec.ID, createdBy)

@@ -225,11 +225,27 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 				o.logger.Info("tracker intake deferred until worker quota recovers", "project", project.ID, "issue", issueID)
 				return true
 			}
-			o.logger.Error("tracker intake: spawn issue session failed", "project", project.ID, "issue", issueID, "err", err)
+			logAttrs := []any{"project", project.ID, "issue", issueID}
+			if apiErr != nil {
+				if apiErr.Code != "" {
+					logAttrs = append(logAttrs, "code", apiErr.Code)
+				}
+				if h, ok := apiErr.Details["harness"].(string); ok && h != "" {
+					logAttrs = append(logAttrs, "harness", h)
+				}
+				if m, ok := apiErr.Details["mode"].(string); ok && m != "" {
+					logAttrs = append(logAttrs, "mode", m)
+				}
+			}
+			logAttrs = append(logAttrs, "err", err)
+			o.logger.Error("tracker intake: spawn issue session failed", logAttrs...)
 			// An automated spawn has no HTTP request, so the request logger never
 			// sees it. Bad input (an invalid issue or project) stays out.
 			if kind, code := telemetrymeta.ErrorKindAndCode(err); kind == "internal" || sentryobs.IsFaultCode(code) {
 				sentryobs.CaptureBackground(ctx, err, "trackerintake", "tracker_spawn", nil)
+			}
+			if apiErr != nil && (apiErr.Code == "AUTO_SPAWN_PAUSED" || apiErr.Code == "WORKER_QUOTA_NO_READY_ROUTE") {
+				return true
 			}
 			spawnFailed = true
 			continue
