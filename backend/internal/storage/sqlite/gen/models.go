@@ -178,16 +178,17 @@ type AgentSwitchFailureReceipt struct {
 }
 
 type AppSetting struct {
-	ID                   int64
-	DefaultSessionMode   domain.SessionMode
-	UpdatedAt            time.Time
-	CloudOffering        bool
-	HarnessDefaults      string
-	VersionRefresh       bool
-	ComputerUse          bool
-	SessionRetentionDays int64
-	AccountHandoff       bool
-	LimitHistory         bool
+	ID                        int64
+	DefaultSessionMode        domain.SessionMode
+	UpdatedAt                 time.Time
+	CloudOffering             bool
+	HarnessDefaults           string
+	VersionRefresh            bool
+	ComputerUse               bool
+	SessionRetentionDays      int64
+	AccountHandoff            bool
+	LimitHistory              bool
+	TerminateOnPRMergeDefault bool
 }
 
 type Automation struct {

@@ -461,9 +461,10 @@ type Manager struct {
 	// defaults resolves the daemon-owned default session interface for a spawn
 	// that names no mode. Nil falls back to the compatibility default, so a build
 	// without it behaves exactly as before.
-	defaults     SessionModeDefaults
-	chat         ChatLauncher
-	modelCatalog interface {
+	defaults            SessionModeDefaults
+	mergePolicyDefaults SessionMergePolicyDefaults
+	chat                ChatLauncher
+	modelCatalog        interface {
 		Models(context.Context, string, string, bool) (ports.AgentModelCatalog, error)
 	}
 	lcm                         lifecycleRecorder
@@ -992,6 +993,7 @@ func (m *Manager) WaitAgentSwitchWorkers(ctx context.Context) error {
 // New builds a Session Manager from its dependencies, defaulting the clock to
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
+	mergePolicyDefaults, _ := d.Defaults.(SessionMergePolicyDefaults)
 	m := &Manager{
 		workerQuota:                    d.WorkerQuota,
 		runtime:                        d.Runtime,
@@ -1000,6 +1002,7 @@ func New(d Deps) *Manager {
 		store:                          d.Store,
 		forkSeeds:                      gitForkSeeds{},
 		defaults:                       d.Defaults,
+		mergePolicyDefaults:            mergePolicyDefaults,
 		chat:                           d.Chat,
 		lcm:                            d.Lifecycle,
 		preview:                        d.Preview,
@@ -1135,6 +1138,16 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		if strings.TrimSpace(cfg.Branch) != "" {
 			cfg.RequireNewBranch = true
 		}
+	}
+	if cfg.Kind == domain.KindWorker {
+		terminateOnMerge, err := m.resolveTerminateOnPRMerge(ctx, cfg.TerminateOnPRMerge, project.Config)
+		if err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: resolve archive-on-merge policy: %w", err)
+		}
+		cfg.TerminateOnPRMerge = &terminateOnMerge
+	} else {
+		// The worker archive policy does not change orchestrator lifecycle.
+		cfg.TerminateOnPRMerge = nil
 	}
 	if cfg.ParentSessionID != "" && cfg.AgentConfig.Permissions == "" {
 		permissions, err := m.inheritedSpawnPermissions(ctx, cfg.ProjectID, cfg.ParentSessionID)
@@ -1329,6 +1342,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		if err != nil {
 			return domain.SessionRecord{}, 0, 0, wrapSpawnStageEarly(ErrSpawnCreate, err)
 		}
+	}
+	if cfg.Kind == domain.KindWorker && cfg.TerminateOnPRMerge != nil {
+		// A speculative task-preparation row is created before final spawn. Apply
+		// the current resolved policy before it is promoted into a live session.
+		rec.TerminateOnPRMerge = *cfg.TerminateOnPRMerge
 	}
 	id := rec.ID
 	if m.agentAccounts != nil || cfg.AgentAccountID != "" {
@@ -2914,17 +2932,31 @@ type KillResult struct {
 
 // Kill waits for workspace retirement for internal callers that depend on it.
 func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
-	result, err := m.kill(ctx, id, false)
+	result, err := m.kill(ctx, id, false, false)
 	return result.Freed, err
 }
 
 // RequestKill stops the agent and persists terminal intent before returning.
 // Configured cleanup commands use the daemon's existing background workers.
 func (m *Manager) RequestKill(ctx context.Context, id domain.SessionID) (KillResult, error) {
-	return m.kill(ctx, id, true)
+	return m.kill(ctx, id, true, false)
 }
 
-func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundCleanup bool) (KillResult, error) {
+// ArchiveMergedSession uses the regular session teardown only after the merge
+// lane proves the session and its owned resources are safe to release.
+func (m *Manager) ArchiveMergedSession(ctx context.Context, id domain.SessionID) (bool, error) {
+	rec, found, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("archive merged session %s: read session: %w", id, err)
+	}
+	if !found || rec.IsTerminated {
+		return false, nil
+	}
+	result, err := m.kill(ctx, id, true, true)
+	return result.Freed, err
+}
+
+func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundCleanup, archiveOnMerge bool) (KillResult, error) {
 	// Teardown deliberately stops riding the caller's context. Kill runs a
 	// sequence (stop the agent, tear the controller down, mark the row
 	// terminated, drop the worktree) where being cancelled partway leaves a session
@@ -2969,8 +3001,6 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	if !ok {
 		return KillResult{}, nil // already gone: benign race
 	}
-	m.stopPreviewBestEffort(ctx, id)
-	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
 	ws := workspaceInfo(rec)
 
@@ -2981,6 +3011,35 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	} else if ok {
 		workspaceProjectRows = rows
 		workspaceProject = true
+	}
+	var releaseArchiveInput func()
+	if archiveOnMerge {
+		release, reason, err := m.mergeArchiveEligibility(ctx, rec, workspaceProjectRows, workspaceProject, true)
+		if release != nil {
+			releaseArchiveInput = release
+			defer releaseArchiveInput()
+		}
+		if reason != "" {
+			return KillResult{}, &MergeArchiveDeferredError{SessionID: id, Reason: reason, Cause: err}
+		}
+	}
+	if archiveOnMerge {
+		if m.preview != nil {
+			if err := m.preview.StopSession(ctx, id); err != nil {
+				return KillResult{}, fmt.Errorf("archive merged session %s: stop preview: %w", id, err)
+			}
+		}
+		if m.browser != nil {
+			cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := m.browser.DestroySession(cleanupCtx, id)
+			cancel()
+			if err != nil {
+				return KillResult{}, fmt.Errorf("archive merged session %s: destroy browser: %w", id, err)
+			}
+		}
+	} else {
+		m.stopPreviewBestEffort(ctx, id)
+		m.destroyBrowserBestEffort(ctx, id)
 	}
 	if err := m.terminateNativeSession(ctx, rec); err != nil {
 		return KillResult{}, fmt.Errorf("kill %s: native session: %w", id, err)
@@ -2997,7 +3056,16 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	// process, and closing it also settles any turn left in flight so a later
 	// read does not show work that is no longer running.
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		m.stopChatBestEffort(ctx, id)
+		if archiveOnMerge {
+			if m.chat == nil {
+				return KillResult{}, fmt.Errorf("archive merged session %s: chat controller is unavailable", id)
+			}
+			if err := m.chat.StopChat(ctx, id); err != nil {
+				return KillResult{}, fmt.Errorf("archive merged session %s: stop chat controller: %w", id, err)
+			}
+		} else {
+			m.stopChatBestEffort(ctx, id)
+		}
 	} else if handle.ID != "" {
 		// Any Destroy error stops the kill. Every runtime's Destroy already
 		// returns nil when it confirms the session is absent, so an error means
@@ -6249,14 +6317,33 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		Activity:            domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
 		// Resolved before this point and persisted here. There is no UPDATE
 		// statement that can change it afterwards.
-		Mode:              domain.NormalizeSessionMode(cfg.RequestedMode),
-		Metadata:          domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
-		RequestedOutput:   cfg.RequestedOutput,
-		OutputType:        domain.SessionOutputNone,
-		AutoReviewEnabled: projectConfig.AutoReview,
-		AutoInjectReview:  true,
-		AutoInjectCI:      true,
+		Mode:               domain.NormalizeSessionMode(cfg.RequestedMode),
+		Metadata:           domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
+		RequestedOutput:    cfg.RequestedOutput,
+		OutputType:         domain.SessionOutputNone,
+		AutoReviewEnabled:  projectConfig.AutoReview,
+		AutoInjectReview:   true,
+		AutoInjectCI:       true,
+		TerminateOnPRMerge: cfg.Kind == domain.KindWorker && cfg.TerminateOnPRMerge != nil && *cfg.TerminateOnPRMerge,
 	}
+}
+
+// resolveTerminateOnPRMerge applies the worker policy precedence at creation
+// time. Persisting the result on the session keeps later changes to project or
+// global defaults from silently changing existing sessions.
+func (m *Manager) resolveTerminateOnPRMerge(ctx context.Context, explicit *bool, projectConfig domain.ProjectConfig) (bool, error) {
+	if explicit != nil {
+		return *explicit, nil
+	}
+	if projectConfig.TerminateOnPRMerge != nil {
+		return *projectConfig.TerminateOnPRMerge, nil
+	}
+	if m.mergePolicyDefaults != nil {
+		return m.mergePolicyDefaults.TerminateOnPRMergeDefault(ctx)
+	}
+	// A manager without a settings provider is still a fork worker manager and
+	// therefore keeps the fork's safe default for newly-created workers.
+	return true, nil
 }
 
 func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, branchNamespace string) string {

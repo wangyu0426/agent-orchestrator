@@ -756,6 +756,7 @@ func genLegacyPRParams(r domain.PullRequest) gen.UpsertLegacyPRParams {
 		IsDraft:          boolInt(r.Draft),
 		IsMerged:         boolInt(r.Merged),
 		IsClosed:         boolInt(r.Closed),
+		ObservedAt:       nullTime(r.ObservedAt),
 		ReviewObservedAt: nullTime(r.ReviewObservedAt),
 		ReviewPartial:    r.ReviewPartial,
 		ID:               r.SessionID,

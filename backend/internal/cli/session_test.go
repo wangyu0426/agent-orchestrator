@@ -228,6 +228,76 @@ func TestSessionList_JSONOutputDecodes(t *testing.T) {
 	}
 }
 
+func TestSessionArchiveMergedPreviewsByDefaultAndAppliesOnlyEligibleCandidates(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var routes []string
+	var applied []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestLogEntry(r) != cliInvokedRequest {
+			routes = append(routes, requestLogEntry(r))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/archive-merged/preview":
+			var request struct {
+				ProjectID string `json:"projectId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if request.ProjectID != "demo" {
+				http.Error(w, "project filter missing", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, `{"candidates":[`+
+				`{"sessionId":"eligible-1","projectId":"demo","displayName":"Ready","eligible":true},`+
+				`{"sessionId":"deferred-1","projectId":"demo","eligible":false,"reason":"worker_active"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/archive-merged/apply":
+			var request struct {
+				SessionIDs []string `json:"sessionIds"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			applied = append(applied, request.SessionIDs...)
+			_, _ = io.WriteString(w, `{"results":[{"sessionId":"eligible-1","archived":true,"workspaceFreed":true}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	deps := Deps{ProcessAlive: func(int) bool { return true }}
+
+	out, errOut, err := executeCLI(t, deps, "session", "archive-merged", "--project", "demo", "--json")
+	if err != nil {
+		t.Fatalf("preview command failed: %v\nstderr=%s", err, errOut)
+	}
+	if strings.Contains(out, `"apply"`) || !strings.Contains(out, `"worker_active"`) {
+		t.Fatalf("default preview output = %s; want deferred reason and no apply result", out)
+	}
+	if len(routes) != 1 || routes[0] != "POST /api/v1/sessions/archive-merged/preview" || len(applied) != 0 {
+		t.Fatalf("default preview routes=%v applied=%v; want preview only", routes, applied)
+	}
+
+	routes = nil
+	out, errOut, err = executeCLI(t, deps, "session", "archive-merged", "--project", "demo", "--apply", "--json")
+	if err != nil {
+		t.Fatalf("apply command failed: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, `"archived": true`) || !reflect.DeepEqual(applied, []string{"eligible-1"}) {
+		t.Fatalf("apply output=%s applied=%v; want only the eligible candidate", out, applied)
+	}
+	if !reflect.DeepEqual(routes, []string{
+		"POST /api/v1/sessions/archive-merged/preview",
+		"POST /api/v1/sessions/archive-merged/apply",
+	}) {
+		t.Fatalf("apply routes = %v", routes)
+	}
+}
+
 func TestSessionList_EnrichesPRColumnsAndKeepsFallbackFacts(t *testing.T) {
 	cfg := setConfigEnv(t)
 	var detailsMu sync.Mutex

@@ -56,6 +56,9 @@ type SpawnConfig struct {
 	// AgentConfig overrides the resolved project/role agent config for this
 	// single spawn. Empty fields keep the project defaults.
 	AgentConfig AgentConfig
+	// TerminateOnPRMerge overrides project and user defaults for this worker
+	// spawn. Nil inherits them; false is an explicit opt-out.
+	TerminateOnPRMerge *bool
 	// EffortOverride preserves the distinction between an omitted task override
 	// and an explicit empty value meaning provider default.
 	EffortOverride bool

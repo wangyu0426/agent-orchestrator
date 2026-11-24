@@ -295,6 +295,22 @@ afterEach(() => {
 });
 
 describe("TaskComposer", () => {
+	it("sends an explicit task-level archive-on-merge opt-out", async () => {
+		h.post.mockImplementation(async (path: string) => path === "/api/v1/orchestrators/delegate"
+			? { data: { workerId: "merge-opt-out" } }
+			: { data: {} });
+		const onCreated = vi.fn();
+		render(<Wrap><TaskComposer projectId="proj-1" onCreated={onCreated} /></Wrap>);
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Keep this worker running" } });
+		fireEvent.change(screen.getByRole("combobox", { name: "After pull requests merge" }), { target: { value: "disabled" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(onCreated).toHaveBeenCalledWith("merge-opt-out"));
+		expect(h.post).toHaveBeenCalledWith("/api/v1/orchestrators/delegate", expect.objectContaining({
+			body: expect.objectContaining({ terminateOnPrMerge: false }),
+		}));
+	});
+
 	it("requires a named branch and a second Start before retrying a checked out branch", async () => {
 		let delegates = 0;
 		h.post.mockImplementation(async (path: string) => {

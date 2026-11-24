@@ -4642,6 +4642,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/archive-merged/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archive explicitly selected merged worker sessions after rechecking eligibility */
+        post: operations["applyMergedSessionArchive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/archive-merged/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview merged worker sessions and their archive eligibility */
+        post: operations["previewMergedSessionArchive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/cleanup": {
         parameters: {
             query?: never;
@@ -4776,6 +4810,23 @@ export interface paths {
         head?: never;
         /** Choose how long archived sessions are kept before they are deleted */
         patch: operations["updateSessionRetention"];
+        trace?: never;
+    };
+    "/api/v1/settings/terminate-on-pr-merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Choose whether new worker sessions archive after their pull requests merge */
+        patch: operations["updateTerminateOnPRMergeDefault"];
         trace?: never;
     };
     "/api/v1/settings/version-refresh": {
@@ -5501,6 +5552,12 @@ export interface components {
             processCount: number;
             reviewers?: components["schemas"]["ControllersReviewerMemoryResponse"][];
             rssBytes: number;
+        };
+        ApplyMergedArchiveRequest: {
+            sessionIds: string[];
+        };
+        ApplyMergedArchiveResponse: {
+            results: components["schemas"]["MergeArchiveApplyResultResponse"][];
         };
         ArtifactFileResponse: {
             /** @description Hex SHA-256 of the file's content. */
@@ -6985,6 +7042,7 @@ export interface components {
             model?: string;
             projectId: string;
             taskPreparation?: string;
+            terminateOnPrMerge?: null | boolean;
         };
         DelegateTaskResponse: {
             ok: boolean;
@@ -7477,6 +7535,25 @@ export interface components {
             /** @enum {string} */
             pressureSource: "psi" | "available_pct" | "memorystatus";
         };
+        MergeArchiveApplyResultResponse: {
+            archived: boolean;
+            reason?: string;
+            sessionId: string;
+            workspaceFreed: boolean;
+        };
+        MergeArchiveCandidateResponse: {
+            displayName?: string;
+            eligible: boolean;
+            projectId?: string;
+            reason?: string;
+            sessionId: string;
+        };
+        MergeArchivePreviewRequest: {
+            projectId?: string;
+        };
+        MergeArchivePreviewResponse: {
+            candidates: components["schemas"]["MergeArchiveCandidateResponse"][];
+        };
         MergePRRequest: {
             allowNoChecks?: boolean;
             expectedHeadSha: string;
@@ -7755,6 +7832,7 @@ export interface components {
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
             sessionPrefix?: string;
             symlinks?: string[];
+            terminateOnPrMerge?: null | boolean;
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
             worker?: components["schemas"]["RoleOverride"];
             workersRequestReview?: boolean;
@@ -8713,6 +8791,8 @@ export interface components {
             localEnabled: boolean;
             /** @description Days an archived session whose worktree is released is kept before the daemon deletes it permanently; 0 keeps it. */
             sessionRetentionDays: number;
+            /** @description Whether new worker sessions are archived after all their pull requests reach terminal state and at least one merged. */
+            terminateOnPrMergeDefault: boolean;
             trackerIntakeEnabled: boolean;
             /** @description After a harness update, idle open sessions restart on the new release instead of running the old one until they happen to restart. */
             versionRefresh: boolean;
@@ -8938,6 +9018,7 @@ export interface components {
             prompt?: string;
             /** @enum {string} */
             requestedOutput?: "artifact";
+            terminateOnPrMerge?: null | boolean;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";
         };
@@ -9247,6 +9328,9 @@ export interface components {
         UpdateShellTerminalRequest: {
             /** @description New tab title for the shell terminal. Trimmed; must be non-empty. */
             title: string;
+        };
+        UpdateTerminateOnPRMergeDefaultRequest: {
+            enabled: null | boolean;
         };
         UpdateVersionRefreshRequest: {
             enabled: null | boolean;
@@ -27094,6 +27178,108 @@ export interface operations {
             };
         };
     };
+    applyMergedSessionArchive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApplyMergedArchiveRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplyMergedArchiveResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    previewMergedSessionArchive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeArchivePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergeArchivePreviewResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     cleanupSessions: {
         parameters: {
             query?: {
@@ -27459,6 +27645,57 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["UpdateSessionRetentionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateTerminateOnPRMergeDefault: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTerminateOnPRMergeDefaultRequest"];
             };
         };
         responses: {

@@ -144,6 +144,12 @@ type sessionTerminator interface {
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 }
 
+// mergeSessionArchiver is implemented by the session manager so PR-driven
+// teardown can run its stricter ownership, workspace, and idle-state preflight.
+type mergeSessionArchiver interface {
+	ArchiveMergedSession(ctx context.Context, id domain.SessionID) (bool, error)
+}
+
 type sessionUsageFinalizer interface {
 	FinalizeSession(
 		ctx context.Context,

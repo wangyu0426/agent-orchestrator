@@ -150,6 +150,11 @@ type sessionMessageOptionsSender interface {
 	SendWithOptions(ctx context.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment, options ports.MessageDeliveryOptions) error
 }
 
+type mergeArchiveSessionService interface {
+	PreviewMergedArchive(context.Context, domain.ProjectID) ([]sessionmanager.MergeArchiveCandidate, error)
+	ApplyMergedArchive(context.Context, []domain.SessionID) []sessionmanager.MergeArchiveApplyResult
+}
+
 // ActivityRecorder applies an agent activity-state signal to a session. It is
 // satisfied directly by *lifecycle.Manager: an activity signal is a pure
 // lifecycle reduction (no runtime/workspace teardown), so it bypasses
@@ -220,6 +225,8 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Get("/sessions", c.list)
 	r.Post("/sessions", c.spawn)
 	r.Post("/sessions/cleanup", c.cleanup)
+	r.Post("/sessions/archive-merged/preview", c.previewMergedArchive)
+	r.Post("/sessions/archive-merged/apply", c.applyMergedArchive)
 	r.Get("/sessions/{sessionId}", c.get)
 	r.Get("/sessions/{sessionId}/preview", c.preview)
 	r.Post("/sessions/{sessionId}/preview", c.setPreview)
@@ -397,7 +404,17 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	// A standalone worker has no project to start in the background.
 	async := in.Async && in.ProjectID != ""
-	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, RequestedOutput: in.RequestedOutput, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
+	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{
+		ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID,
+		TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch,
+		BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt,
+		RequestedOutput: in.RequestedOutput, DisplayName: displayName,
+		DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments,
+		AgentConfig:    ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode},
+		EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID),
+		ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async,
+		TerminateOnPRMerge: in.TerminateOnPRMerge,
+	})
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -2227,6 +2244,74 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (c *SessionsController) previewMergedArchive(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/archive-merged/preview")
+		return
+	}
+	service, ok := c.Svc.(mergeArchiveSessionService)
+	if !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/archive-merged/preview")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var in MergeArchivePreviewRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	candidates, err := service.PreviewMergedArchive(r.Context(), in.ProjectID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	response := MergeArchivePreviewResponse{Candidates: make([]MergeArchiveCandidateResponse, 0, len(candidates))}
+	for _, candidate := range candidates {
+		response.Candidates = append(response.Candidates, MergeArchiveCandidateResponse{
+			SessionID: candidate.SessionID, ProjectID: candidate.ProjectID,
+			DisplayName: candidate.DisplayName, Eligible: candidate.Eligible, Reason: candidate.Reason,
+		})
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+func (c *SessionsController) applyMergedArchive(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/archive-merged/apply")
+		return
+	}
+	service, ok := c.Svc.(mergeArchiveSessionService)
+	if !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/archive-merged/apply")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var in ApplyMergedArchiveRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if len(in.SessionIDs) == 0 || len(in.SessionIDs) > 500 {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "SESSION_IDS_INVALID", "sessionIds must contain between 1 and 500 session ids", nil)
+		return
+	}
+	for _, id := range in.SessionIDs {
+		if strings.TrimSpace(string(id)) == "" {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "SESSION_IDS_INVALID", "sessionIds must not contain empty values", nil)
+			return
+		}
+	}
+	results := service.ApplyMergedArchive(r.Context(), in.SessionIDs)
+	response := ApplyMergedArchiveResponse{Results: make([]MergeArchiveApplyResultResponse, 0, len(results))}
+	for _, result := range results {
+		response.Results = append(response.Results, MergeArchiveApplyResultResponse{
+			SessionID: result.SessionID, Archived: result.Archived,
+			WorkspaceFreed: result.WorkspaceFreed, Reason: result.Reason,
+		})
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
 func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/send")
@@ -2331,20 +2416,21 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 	}
 
 	out, err := c.Svc.DelegateTask(r.Context(), sessionsvc.DelegateTaskInput{
-		ClientRequestID:   in.ClientRequestID,
-		ClientRequestHash: requestHash,
-		ProjectID:         in.ProjectID,
-		Brief:             domain.SanitizeControlChars(in.Brief),
-		BaseBranch:        strings.TrimSpace(in.BaseBranch),
-		Branch:            domain.SanitizeControlChars(strings.TrimSpace(in.Branch)),
-		RequestedAgent:    in.Agent,
-		Model:             domain.SanitizeControlChars(strings.TrimSpace(in.Model)),
-		Effort:            sanitizedOptionalString(in.Effort),
-		ApprovalMode:      in.ApprovalMode,
-		RequestedMode:     in.Mode,
-		AccountID:         strings.TrimSpace(in.AccountID),
-		Attachments:       attachments,
-		TaskPreparation:   domain.TaskPreparationToken(strings.TrimSpace(in.TaskPreparation)),
+		ClientRequestID:    in.ClientRequestID,
+		ClientRequestHash:  requestHash,
+		ProjectID:          in.ProjectID,
+		Brief:              domain.SanitizeControlChars(in.Brief),
+		BaseBranch:         strings.TrimSpace(in.BaseBranch),
+		Branch:             domain.SanitizeControlChars(strings.TrimSpace(in.Branch)),
+		RequestedAgent:     in.Agent,
+		Model:              domain.SanitizeControlChars(strings.TrimSpace(in.Model)),
+		Effort:             sanitizedOptionalString(in.Effort),
+		ApprovalMode:       in.ApprovalMode,
+		RequestedMode:      in.Mode,
+		AccountID:          strings.TrimSpace(in.AccountID),
+		TerminateOnPRMerge: in.TerminateOnPRMerge,
+		Attachments:        attachments,
+		TaskPreparation:    domain.TaskPreparationToken(strings.TrimSpace(in.TaskPreparation)),
 	})
 	if err != nil {
 		envelope.WriteError(w, r, err)

@@ -106,6 +106,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		// bound this lane at each poll; only the "sessionComplete reads PR rows"
 		// bar must additionally wait on genuine agent quiescence.
 		if rec.Activity.State == domain.ActivityActive {
+			slog.Default().Info("lifecycle: defer merge archive", "sessionID", id, "reason", "worker_active")
 			return nil
 		}
 		done, err := m.sessionComplete(ctx, id)
@@ -115,6 +116,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		if done {
 			return m.terminateCompletedSession(ctx, id)
 		}
+		slog.Default().Info("lifecycle: defer merge archive", "sessionID", id, "reason", "pull_request_completion_not_confirmed")
 		return nil
 	}
 	rec, ok, err := m.store.GetSession(ctx, id)
@@ -323,7 +325,24 @@ func (m *Manager) terminateCompletedSession(ctx context.Context, id domain.Sessi
 		return fmt.Errorf("terminate completed session %s: session terminator is not configured", id)
 	}
 	before, live := m.liveBeforeEnd(ctx, id)
-	_, err := terminator.Kill(ctx, id)
+	var err error
+	if archiver, ok := terminator.(mergeSessionArchiver); ok {
+		rec, found, readErr := m.store.GetSession(ctx, id)
+		if readErr != nil {
+			err = fmt.Errorf("read session before merge archive %s: %w", id, readErr)
+		} else if !found {
+			return nil
+		} else if rec.Kind == domain.KindWorker {
+			_, err = archiver.ArchiveMergedSession(ctx, id)
+		} else {
+			_, err = terminator.Kill(ctx, id)
+		}
+	} else {
+		_, err = terminator.Kill(ctx, id)
+	}
+	if err != nil {
+		slog.Default().Warn("lifecycle: merge archive deferred or failed", "sessionID", id, "error", err)
+	}
 	// Cleanup can fail after the terminal write; the row decides whether the
 	// session ended (the report is claimed once per termination).
 	m.reportEndIfTerminated(ctx, before, live, err, deliverytelemetry.EndPRMerged)

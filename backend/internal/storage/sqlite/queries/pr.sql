@@ -77,9 +77,9 @@ ON CONFLICT (url) DO UPDATE SET
 -- name: UpsertLegacyPR :exec
 INSERT INTO pr (
     url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, state_changed_at,
-    is_draft, is_merged, is_closed, review_observed_at, review_partial, auto_inject_ci
+    is_draft, is_merged, is_closed, review_observed_at, review_partial, observed_at, auto_inject_ci
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     COALESCE((SELECT auto_inject_ci FROM sessions WHERE id = ?), TRUE))
 ON CONFLICT (url) DO UPDATE SET
     number = excluded.number,
@@ -104,7 +104,8 @@ ON CONFLICT (url) DO UPDATE SET
     review_partial = CASE
         WHEN excluded.review_observed_at IS NULL THEN pr.review_partial
         ELSE excluded.review_partial
-    END;
+    END,
+    observed_at = COALESCE(excluded.observed_at, pr.observed_at);
 
 -- name: GetPR :one
 SELECT * FROM pr WHERE url = ?;

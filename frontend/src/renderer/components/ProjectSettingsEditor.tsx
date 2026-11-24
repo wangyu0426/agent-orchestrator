@@ -30,6 +30,7 @@ export type ProjectSettingsDraft = {
 	orchestratorPermissions: string;
 	reviewerPermissions: string;
 	autoReview: boolean;
+	archiveOnMergeDefault?: "global" | "enabled" | "disabled";
 	/** Local-only: workers may ask AO to review their own PRs. */
 	workersRequestReview?: boolean;
 	/** Cloud-only: agent commits name the AO GitHub App as a co-author. */
@@ -56,7 +57,8 @@ type Capabilities = {
 	reviewer: boolean;
 	requiredAgents: boolean;
 	workersRequestReview?: boolean;
-	coAuthorCommits?: boolean;
+    coAuthorCommits?: boolean;
+    archiveOnMerge?: boolean;
 	nameLimit?: number;
 	requiredBranch?: boolean;
 	/** Cloud defaults and tuning belong to its runtime, rather than the local catalog. */
@@ -189,6 +191,16 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 					{capabilities.intake && <ProjectSettingsSection title={t("settings.project.issues")} grouped><IntakeFields variant="settings" description={intakeDescription} form={intake} onChange={(values) => patch({ intakeEnabled: values.enabled ?? draft.intakeEnabled, intakeRepo: values.repo ?? draft.intakeRepo, intakeAssignee: values.assignee ?? draft.intakeAssignee })} repoPreview={{ value: draft.intakeRepo.trim() || deriveRepoPath(repository ?? ""), host: deriveRepoHost(repository ?? "") }} /></ProjectSettingsSection>}
 					<ProjectSettingsSection title={t("settings.project.pullRequests")} grouped>
 						<ProjectAutoReviewToggle description={autoReviewDescription} checked={draft.autoReview} onCheckedChange={(autoReview) => patch({ autoReview })} />
+						{capabilities.archiveOnMerge && <ProjectSettingsRow label={t("settings.project.archiveOnMergeDefault")}><SettingsOptionMenu
+							aria-label={t("settings.project.archiveOnMergeDefault")}
+							value={draft.archiveOnMergeDefault ?? "global"}
+							options={[
+								{ value: "global", label: t("settings.project.archiveOnMergeInherit") },
+								{ value: "enabled", label: t("settings.project.archiveOnMergeEnabled") },
+								{ value: "disabled", label: t("settings.project.archiveOnMergeDisabled") },
+							]}
+							onChange={(value) => patch({ archiveOnMergeDefault: value as ProjectSettingsDraft["archiveOnMergeDefault"] })}
+						/></ProjectSettingsRow>}
 						{capabilities.workersRequestReview && <ProjectWorkersRequestReviewToggle checked={draft.workersRequestReview ?? false} onCheckedChange={(workersRequestReview) => patch({ workersRequestReview })} />}
 						{capabilities.coAuthorCommits && <ProjectCoAuthorCommitsToggle checked={draft.coAuthorCommits ?? true} onCheckedChange={(coAuthorCommits) => patch({ coAuthorCommits })} />}
 					</ProjectSettingsSection>

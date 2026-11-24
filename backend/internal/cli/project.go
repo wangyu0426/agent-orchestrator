@@ -128,6 +128,7 @@ type projectConfig struct {
 	Orchestrator          roleOverride         `json:"orchestrator,omitempty"`
 	TrackerIntake         trackerIntakeConfig  `json:"trackerIntake,omitempty"`
 	AutoReview            bool                 `json:"autoReview,omitempty"`
+	TerminateOnPRMerge    *bool                `json:"terminateOnPrMerge,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
@@ -160,6 +161,8 @@ type projectSetConfigOptions struct {
 	trackerRepo           string
 	trackerAssignee       string
 	reviewers             []string
+	archiveOnMergeDefault bool
+	inheritArchiveOnMerge bool
 	configJSON            string
 	clear                 bool
 	json                  bool
@@ -360,6 +363,8 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.trackerRepo, "tracker-repo", "", "Provider-native repo for issue intake (owner/repo or group/subgroup/repo; default: derive from git origin)")
 	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "Issue assignee required for intake eligibility")
 	f.StringArrayVar(&opts.reviewers, "reviewer", nil, "Reviewer harness that reviews worker PRs (repeatable; e.g. claude-code)")
+	f.BoolVar(&opts.archiveOnMergeDefault, "archive-on-merge-default", false, "Default new worker sessions to archive after all tracked PRs close with at least one merged; pass =false to opt out")
+	f.BoolVar(&opts.inheritArchiveOnMerge, "inherit-archive-on-merge-default", false, "Remove this project's archive-on-merge default and follow the user default")
 	f.StringVar(&opts.configJSON, "config-json", "", "Full config as a JSON object (overrides field flags)")
 	f.BoolVar(&opts.clear, "clear", false, "Clear all config")
 	f.BoolVar(&opts.json, "json", false, "Output the updated project as JSON")
@@ -372,6 +377,7 @@ var projectConfigFlags = []string{
 	"worker-agent", "orchestrator-agent", "agent-rules", "agent-rules-file",
 	"orchestrator-rules", "orchestrator-rules-file", "env", "symlink", "post-create",
 	"pre-remove", "tracker-intake", "tracker-repo", "tracker-assignee", "reviewer",
+	"archive-on-merge-default", "inherit-archive-on-merge-default",
 }
 
 // buildProjectConfig turns the set-config flags into the typed config sent to
@@ -380,6 +386,9 @@ var projectConfigFlags = []string{
 // config, so fields the CLI has no flag for (effort, ...) survive.
 // The daemon validates the values.
 func buildProjectConfig(opts projectSetConfigOptions, changed func(name string) bool, current func() (projectConfig, error)) (projectConfig, error) {
+	if changed("archive-on-merge-default") && changed("inherit-archive-on-merge-default") {
+		return projectConfig{}, usageError{errors.New("--archive-on-merge-default and --inherit-archive-on-merge-default cannot be used together")}
+	}
 	if opts.clear {
 		return projectConfig{}, nil
 	}
@@ -437,6 +446,13 @@ func buildProjectConfig(opts projectSetConfigOptions, changed func(name string) 
 	}
 	if changed("reviewer") {
 		cfg.Reviewers = reviewersForFlags(opts.reviewers)
+	}
+	if changed("archive-on-merge-default") {
+		value := opts.archiveOnMergeDefault
+		cfg.TerminateOnPRMerge = &value
+	}
+	if changed("inherit-archive-on-merge-default") {
+		cfg.TerminateOnPRMerge = nil
 	}
 	return cfg, nil
 }

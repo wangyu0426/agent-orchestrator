@@ -213,6 +213,28 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsForm", () => {
+	it("saves an explicit project opt-out for new workers", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+				autoReview: false,
+			},
+		});
+		renderSettings();
+		const setting = await screen.findByRole("button", { name: "Worker archive on merge" });
+		await chooseOption(setting, "Keep session running");
+		await waitFor(() => expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}", expect.objectContaining({
+			body: expect.objectContaining({ config: expect.objectContaining({ terminateOnPrMerge: false }) }),
+		})));
+	});
+
 	it("saves a changed project setting without a submit action", async () => {
 		mockProject({
 			id: "proj-1",

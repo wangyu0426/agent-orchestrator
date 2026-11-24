@@ -106,6 +106,11 @@ type commander interface {
 	CancelTaskPreparation(context.Context, domain.TaskPreparationToken) error
 }
 
+type mergeArchiveCommander interface {
+	PreviewMergedArchive(context.Context, domain.ProjectID) ([]sessionmanager.MergeArchiveCandidate, error)
+	ApplyMergedArchive(context.Context, []domain.SessionID) []sessionmanager.MergeArchiveApplyResult
+}
+
 // interfaceTransitionCommander is an optional command capability. Keeping it
 // separate avoids widening every focused session-service fake while production
 // can expose the feature through the concrete Session Manager.
@@ -1583,6 +1588,31 @@ func (s *Service) SetAutoReview(ctx context.Context, id domain.SessionID, enable
 
 // Cleanup delegates terminal workspace cleanup to the internal manager and
 // reports both reclaimed and preserved (skipped) workspaces.
+// PreviewMergedArchive lists worker sessions whose tracked PRs include an
+// authoritative merge, with a reason for any session the merge cleanup gates
+// currently defer.
+func (s *Service) PreviewMergedArchive(ctx context.Context, project domain.ProjectID) ([]sessionmanager.MergeArchiveCandidate, error) {
+	manager, ok := s.manager.(mergeArchiveCommander)
+	if !ok {
+		return nil, errors.New("merge archive preview is unavailable")
+	}
+	return manager.PreviewMergedArchive(ctx, project)
+}
+
+// ApplyMergedArchive acts only on explicitly selected session IDs and repeats
+// every safety check under the session operation lock.
+func (s *Service) ApplyMergedArchive(ctx context.Context, ids []domain.SessionID) []sessionmanager.MergeArchiveApplyResult {
+	manager, ok := s.manager.(mergeArchiveCommander)
+	if !ok {
+		results := make([]sessionmanager.MergeArchiveApplyResult, 0, len(ids))
+		for _, id := range ids {
+			results = append(results, sessionmanager.MergeArchiveApplyResult{SessionID: id, Reason: "merge archive apply is unavailable"})
+		}
+		return results
+	}
+	return manager.ApplyMergedArchive(ctx, ids)
+}
+
 func (s *Service) Cleanup(ctx context.Context, project domain.ProjectID) (CleanupOutcome, error) {
 	res, err := s.manager.Cleanup(ctx, project)
 	if err != nil {

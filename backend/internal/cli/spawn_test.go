@@ -1217,6 +1217,55 @@ func TestSpawnEffortFlagWiring(t *testing.T) {
 	}
 }
 
+func TestSpawnArchiveOnMergeFlagPreservesTrueAndFalseOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want bool
+	}{
+		{name: "enable", arg: "--archive-on-merge=true", want: true},
+		{name: "opt out", arg: "--archive-on-merge=false", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setConfigEnv(t)
+			var req spawnRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+					_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","path":"/repo/demo"}}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
+					_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.WriteString(w, `{"session":{"id":"demo-archive","status":"idle"}}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			writeRunFileFor(t, cfg, srv)
+
+			_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "spawn", "--project", "demo", "--agent", "codex", "--name", "worker", tc.arg)
+			if err != nil {
+				t.Fatalf("spawn failed: %v stderr=%s", err, errOut)
+			}
+			if req.TerminateOnPRMerge == nil || *req.TerminateOnPRMerge != tc.want {
+				t.Fatalf("terminateOnPrMerge = %v, want %v", req.TerminateOnPRMerge, tc.want)
+			}
+		})
+	}
+}
+
+func TestSpawnArchiveOnMergeRejectsOrchestrator(t *testing.T) {
+	_, _, err := executeCLI(t, Deps{}, "spawn", "--project", "demo", "--name", "orchestrator", "--kind", "orchestrator", "--archive-on-merge=false")
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "worker sessions only") {
+		t.Fatalf("archive policy on orchestrator = %v, want usage error", err)
+	}
+}
+
 // TestSpawnEffortSurfacesDaemonUnsupportedEffort asserts `ao spawn --effort`
 // on a harness that cannot honor it fails with the daemon's UNSUPPORTED_EFFORT
 // envelope instead of a CLI-side harness allowlist: the daemon owns which

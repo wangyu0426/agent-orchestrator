@@ -14333,6 +14333,81 @@ paths:
         decorated
       tags:
       - sessions
+  /api/v1/sessions/archive-merged/apply:
+    post:
+      operationId: applyMergedSessionArchive
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyMergedArchiveRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyMergedArchiveResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Archive explicitly selected merged worker sessions after rechecking
+        eligibility
+      tags:
+      - sessions
+  /api/v1/sessions/archive-merged/preview:
+    post:
+      operationId: previewMergedSessionArchive
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeArchivePreviewRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeArchivePreviewResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Preview merged worker sessions and their archive eligibility
+      tags:
+      - sessions
   /api/v1/sessions/cleanup:
     post:
       operationId: cleanupSessions
@@ -14634,6 +14709,44 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Choose how long archived sessions are kept before they are deleted
+      tags:
+      - settings
+  /api/v1/settings/terminate-on-pr-merge:
+    patch:
+      operationId: updateTerminateOnPRMergeDefault
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTerminateOnPRMergeDefaultRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Choose whether new worker sessions archive after their pull requests
+        merge
       tags:
       - settings
   /api/v1/settings/version-refresh:
@@ -16421,6 +16534,26 @@ components:
       - processCount
       - cpuPercent
       - cpuMeasured
+      type: object
+    ApplyMergedArchiveRequest:
+      properties:
+        sessionIds:
+          items:
+            type: string
+          maxItems: 500
+          minItems: 1
+          type: array
+      required:
+      - sessionIds
+      type: object
+    ApplyMergedArchiveResponse:
+      properties:
+        results:
+          items:
+            $ref: '#/components/schemas/MergeArchiveApplyResultResponse'
+          type: array
+      required:
+      - results
       type: object
     ArtifactFileResponse:
       properties:
@@ -20332,6 +20465,10 @@ components:
           type: string
         taskPreparation:
           type: string
+        terminateOnPrMerge:
+          type:
+          - "null"
+          - boolean
       required:
       - projectId
       - brief
@@ -21625,6 +21762,51 @@ components:
       - pressureRaw
       - pressureSource
       type: object
+    MergeArchiveApplyResultResponse:
+      properties:
+        archived:
+          type: boolean
+        reason:
+          type: string
+        sessionId:
+          type: string
+        workspaceFreed:
+          type: boolean
+      required:
+      - sessionId
+      - archived
+      - workspaceFreed
+      type: object
+    MergeArchiveCandidateResponse:
+      properties:
+        displayName:
+          type: string
+        eligible:
+          type: boolean
+        projectId:
+          type: string
+        reason:
+          type: string
+        sessionId:
+          type: string
+      required:
+      - sessionId
+      - eligible
+      type: object
+    MergeArchivePreviewRequest:
+      properties:
+        projectId:
+          type: string
+      type: object
+    MergeArchivePreviewResponse:
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/MergeArchiveCandidateResponse'
+          type: array
+      required:
+      - candidates
+      type: object
     MergePRRequest:
       properties:
         allowNoChecks:
@@ -22349,6 +22531,10 @@ components:
           items:
             type: string
           type: array
+        terminateOnPrMerge:
+          type:
+          - "null"
+          - boolean
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
         worker:
@@ -24743,6 +24929,10 @@ components:
           description: Days an archived session whose worktree is released is kept
             before the daemon deletes it permanently; 0 keeps it.
           type: integer
+        terminateOnPrMergeDefault:
+          description: Whether new worker sessions are archived after all their pull
+            requests reach terminal state and at least one merged.
+          type: boolean
         trackerIntakeEnabled:
           type: boolean
         versionRefresh:
@@ -24759,6 +24949,7 @@ components:
       - computerUse
       - accountHandoff
       - sessionRetentionDays
+      - terminateOnPrMergeDefault
       - cloudEnabled
       - cloudControlPlaneUrl
       - trackerIntakeEnabled
@@ -25349,6 +25540,10 @@ components:
           enum:
           - artifact
           type: string
+        terminateOnPrMerge:
+          type:
+          - "null"
+          - boolean
         trackerProvider:
           enum:
           - github
@@ -26149,6 +26344,15 @@ components:
           type: string
       required:
       - title
+      type: object
+    UpdateTerminateOnPRMergeDefaultRequest:
+      properties:
+        enabled:
+          type:
+          - "null"
+          - boolean
+      required:
+      - enabled
       type: object
     UpdateVersionRefreshRequest:
       properties:

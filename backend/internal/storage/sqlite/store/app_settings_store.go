@@ -34,7 +34,10 @@ type AppSettings struct {
 	// daemon deletes it; 0 keeps it.
 	SessionRetentionDays int
 	AccountHandoff       bool
-	UpdatedAt            time.Time
+	// TerminateOnPRMergeDefault applies to new worker sessions only. Existing
+	// sessions retain their persisted per-session value.
+	TerminateOnPRMergeDefault bool
+	UpdatedAt                 time.Time
 }
 
 // GetAppSettings reads the preference row.
@@ -51,12 +54,13 @@ func (s *Store) GetAppSettings(ctx context.Context) (AppSettings, error) {
 		HarnessDefaults: defaults,
 		// Normalized on read: a value written by a build that knows a mode this
 		// one does not must still resolve to something dispatchable.
-		DefaultSessionMode:   domain.NormalizeSessionMode(row.DefaultSessionMode),
-		VersionRefresh:       row.VersionRefresh,
-		ComputerUse:          row.ComputerUse,
-		SessionRetentionDays: int(row.SessionRetentionDays),
-		AccountHandoff:       row.AccountHandoff,
-		UpdatedAt:            row.UpdatedAt,
+		DefaultSessionMode:        domain.NormalizeSessionMode(row.DefaultSessionMode),
+		VersionRefresh:            row.VersionRefresh,
+		ComputerUse:               row.ComputerUse,
+		SessionRetentionDays:      int(row.SessionRetentionDays),
+		AccountHandoff:            row.AccountHandoff,
+		TerminateOnPRMergeDefault: row.TerminateOnPRMergeDefault,
+		UpdatedAt:                 row.UpdatedAt,
 	}, nil
 }
 
@@ -124,6 +128,20 @@ func (s *Store) SetAccountHandoff(ctx context.Context, enabled bool, now time.Ti
 		UpdatedAt:      now,
 	}); err != nil {
 		return fmt.Errorf("set account handoff: %w", err)
+	}
+	return nil
+}
+
+// SetTerminateOnPRMergeDefault persists the merge archive policy for future
+// worker sessions.
+func (s *Store) SetTerminateOnPRMergeDefault(ctx context.Context, enabled bool, now time.Time) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := s.qw.SetTerminateOnPRMergeDefault(ctx, gen.SetTerminateOnPRMergeDefaultParams{
+		TerminateOnPRMergeDefault: enabled,
+		UpdatedAt:                 now,
+	}); err != nil {
+		return fmt.Errorf("set terminate-on-merge default: %w", err)
 	}
 	return nil
 }
