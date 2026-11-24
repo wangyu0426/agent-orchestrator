@@ -14442,6 +14442,43 @@ paths:
       summary: Clean up terminated session workspaces
       tags:
       - sessions
+  /api/v1/sessions/temp-gc:
+    post:
+      operationId: collectSessionTemp
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionTempGCRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTempGCResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Collect safe AO-owned session temporary directories
+      tags:
+      - sessions
   /api/v1/settings:
     get:
       operationId: getSettings
@@ -24606,6 +24643,69 @@ components:
       - tool
       - startedAt
       - failed
+      type: object
+    SessionTempGCEntry:
+      properties:
+        action:
+          enum:
+          - removed
+          - would_remove
+          - skipped
+          - failed
+          type: string
+        bytes:
+          format: int64
+          type: integer
+        error:
+          type: string
+        reason:
+          type: string
+        sessionId:
+          type: string
+      required:
+      - action
+      - bytes
+      type: object
+    SessionTempGCRequest:
+      properties:
+        dryRun:
+          description: When true, report eligible directories and byte estimates without
+            removing them.
+          type: boolean
+        limit:
+          description: Maximum owned directories to inspect in this pass; omitted
+            or zero uses the daemon's bounded batch size.
+          maximum: 256
+          minimum: 0
+          type: integer
+      type: object
+    SessionTempGCResponse:
+      properties:
+        dryRun:
+          type: boolean
+        entries:
+          items:
+            $ref: '#/components/schemas/SessionTempGCEntry'
+          type: array
+        more:
+          type: boolean
+        reclaimedBytes:
+          format: int64
+          type: integer
+        removed:
+          type: integer
+        root:
+          type: string
+        scanned:
+          type: integer
+      required:
+      - root
+      - scanned
+      - removed
+      - reclaimedBytes
+      - more
+      - dryRun
+      - entries
       type: object
     SessionWait:
       properties:

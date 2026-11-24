@@ -4693,6 +4693,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/temp-gc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Collect safe AO-owned session temporary directories */
+        post: operations["collectSessionTemp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings": {
         parameters: {
             query?: never;
@@ -8644,6 +8661,31 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
             tool: string;
+        };
+        SessionTempGCEntry: {
+            /** @enum {string} */
+            action: "removed" | "would_remove" | "skipped" | "failed";
+            /** Format: int64 */
+            bytes: number;
+            error?: string;
+            reason?: string;
+            sessionId?: string;
+        };
+        SessionTempGCRequest: {
+            /** @description When true, report eligible directories and byte estimates without removing them. */
+            dryRun?: boolean;
+            /** @description Maximum owned directories to inspect in this pass; omitted or zero uses the daemon's bounded batch size. */
+            limit?: number;
+        };
+        SessionTempGCResponse: {
+            dryRun: boolean;
+            entries: components["schemas"]["SessionTempGCEntry"][];
+            more: boolean;
+            /** Format: int64 */
+            reclaimedBytes: number;
+            removed: number;
+            root: string;
+            scanned: number;
         };
         SessionWait: {
             /** @enum {string} */
@@ -27321,6 +27363,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CleanupSessionsResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    collectSessionTemp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionTempGCRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionTempGCResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Internal Server Error */

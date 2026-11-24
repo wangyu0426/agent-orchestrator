@@ -604,6 +604,10 @@ func (m *Manager) runInterfaceTransition(
 				return
 			}
 			env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
+			if tempErr := m.applySessionTempEnv(ctx, rec.ID, env); tempErr != nil {
+				fail("HANDOFF_STORAGE_BRIDGE_FAILED", tempErr)
+				return
+			}
 			m.augmentAgentRuntimeEnv(bridge, env)
 			if bridgeErr := storageBridge.PrepareInterfaceHandoffStorage(ctx, ports.SessionRef{
 				ID: string(rec.ID), WorkspacePath: rec.Metadata.WorkspacePath,
@@ -1039,6 +1043,9 @@ func (m *Manager) persistedNativeConversationID(
 		return "", err
 	}
 	env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
+	if err := m.applySessionTempEnv(ctx, rec.ID, env); err != nil {
+		return "", fmt.Errorf("prepare session temporary directory: %w", err)
+	}
 	exists, err := probe.NativeConversationExists(ctx, ports.SessionRef{
 		ID:            string(rec.ID),
 		WorkspacePath: rec.Metadata.WorkspacePath,
@@ -1086,6 +1093,9 @@ func (m *Manager) preflightInterfaceTarget(
 	}
 	config := restoredAgentConfig(rec, project.Config)
 	env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
+	if err := m.applySessionTempEnv(ctx, rec.ID, env); err != nil {
+		return err
+	}
 	pinRuntimePermissionEnv(env, config.Permissions)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.preflightLaunchAuth(ctx, agent, rec, env); err != nil {

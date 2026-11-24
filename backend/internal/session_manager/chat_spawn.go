@@ -248,6 +248,10 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	// Chat Service retains this unprivileged base environment. The bearer is
 	// minted inside its per-session launch gate and is never cached for reuse.
 	env := m.runtimeEnvForHarness(id, in.record.ProjectID, in.record.IssueID, in.project.Config.Env, in.record.Harness)
+	if err := m.applySessionTempEnv(ctx, id, env); err != nil {
+		m.rollbackSeedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, false, in.promptQueued)
+		return domain.SessionRecord{}, wrapSpawnStage(id, ErrChatController, err)
+	}
 	if agent, ok := m.agents.Agent(in.cfg.Harness); ok {
 		m.augmentAgentRuntimeEnv(agent, env)
 		// Chat launches go through the same workspace preparation as terminal
@@ -351,8 +355,8 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	})
 	if err != nil {
 		if completionErr != nil || controllerCommitted {
-			m.stopChatAfterSpawnFailure(ctx, id)
-			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+			workspaceDestroyed := m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, controllerStopped)
 			if in.promptQueued {
 				if workspaceDestroyed {
 					m.clearProvisionedWorkspace(ctx, id, in.workspace.Path)
@@ -385,8 +389,8 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	// provider either accepts the turn or reports why.
 	if in.prompt != "" && !in.promptQueued {
 		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt); err != nil {
-			m.stopChatAfterSpawnFailure(ctx, id)
-			m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, true)
+			controllerStopped := m.stopChatAfterSpawnFailure(ctx, id)
+			m.rollbackPreparedSpawnWorkspaceAfterFailure(ctx, in.record, in.workspace, in.workspaceProject, controllerStopped)
 			m.markSpawnFailedTerminatedAfterFailure(ctx, id, false)
 			return domain.SessionRecord{}, wrapSpawnStage(id, ErrSpawnDeliverPrompt, agentlaunch.RedactError(err, in.project.Config.Env))
 		}
@@ -429,22 +433,24 @@ func (m *Manager) aoMCPServers(ctx context.Context, harness domain.AgentHarness,
 	}}
 }
 
-func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.SessionID) bool {
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	defer cancel()
-	m.stopChatBestEffort(cleanupCtx, id)
+	return m.stopChatBestEffort(cleanupCtx, id)
 }
 
 // stopChatBestEffort closes a controller during rollback. A failure here is
 // logged rather than returned: the spawn is already failing, and the caller's
 // error is the one worth surfacing.
-func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) {
+func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) bool {
 	if m.chat == nil {
-		return
+		return false
 	}
 	if err := m.chat.StopChat(ctx, id); err != nil {
 		m.logger.Warn("spawn rollback: close chat controller", "sessionID", id, "error", err)
+		return false
 	}
+	return true
 }
 
 // sendChat routes an outbound message into a chat session's conversation.
@@ -574,6 +580,9 @@ func (m *Manager) resumeChatController(
 		}
 	} else {
 		env = m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
+		if err := m.applySessionTempEnv(ctx, rec.ID, env); err != nil {
+			return RestoreResult{}, relaunchFailed("temporary directory", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
 	}
 	if agent, ok := m.agents.Agent(rec.Harness); ok {
 		m.augmentAgentRuntimeEnv(agent, env)

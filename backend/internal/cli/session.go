@@ -45,6 +45,35 @@ type sessionArchiveMergedOptions struct {
 	json    bool
 }
 
+type sessionTempGCOptions struct {
+	yes    bool
+	dryRun bool
+	limit  int
+}
+
+type sessionTempGCRequest struct {
+	DryRun bool `json:"dryRun"`
+	Limit  int  `json:"limit,omitempty"`
+}
+
+type sessionTempGCResponse struct {
+	Root           string               `json:"root"`
+	Scanned        int                  `json:"scanned"`
+	Removed        int                  `json:"removed"`
+	ReclaimedBytes int64                `json:"reclaimedBytes"`
+	More           bool                 `json:"more"`
+	DryRun         bool                 `json:"dryRun"`
+	Entries        []sessionTempGCEntry `json:"entries"`
+}
+
+type sessionTempGCEntry struct {
+	SessionID string `json:"sessionId,omitempty"`
+	Action    string `json:"action"`
+	Reason    string `json:"reason,omitempty"`
+	Bytes     int64  `json:"bytes"`
+	Error     string `json:"error,omitempty"`
+}
+
 type sessionDeleteOptions struct {
 	project string
 	yes     bool
@@ -278,6 +307,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionRenameCommand(ctx))
 	cmd.AddCommand(newSessionCleanupCommand(ctx))
 	cmd.AddCommand(newSessionArchiveMergedCommand(ctx))
+	cmd.AddCommand(newSessionTempGCCommand(ctx))
 	cmd.AddCommand(newSessionDeleteCommand(ctx))
 	cmd.AddCommand(newSessionClaimPRCommand(ctx))
 	cmd.AddCommand(newSessionHistoryCommand(ctx))
@@ -468,6 +498,23 @@ func newSessionArchiveMergedCommand(ctx *commandContext) *cobra.Command {
 	addSessionProjectFlag(cmd.Flags(), &opts.project, "Filter by project ID")
 	cmd.Flags().BoolVar(&opts.apply, "apply", false, "Explicitly archive the sessions reported as eligible by this preview")
 	cmd.Flags().BoolVar(&opts.json, "json", false, "Output preview and apply results as JSON")
+	return cmd
+}
+
+func newSessionTempGCCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionTempGCOptions
+	cmd := &cobra.Command{
+		Use:   "temp-gc",
+		Short: "Collect safe-to-remove session temporary files",
+		Long:  "Preview and collect only AO-owned session temporary directories past retention whose session is terminal and whose worker process exit is confirmed. Unknown or live sessions are preserved.",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return ctx.collectSessionTemp(cmd.Context(), cmd, opts)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Preview eligible directories without removing anything")
+	cmd.Flags().BoolVarP(&opts.yes, "yes", "y", false, "Skip the deletion confirmation prompt")
+	cmd.Flags().IntVar(&opts.limit, "limit", 64, "Maximum owned directories to inspect (1-256)")
 	return cmd
 }
 
@@ -1183,6 +1230,103 @@ func (c *commandContext) cleanupSessions(ctx context.Context, cmd *cobra.Command
 	}
 	_, err = fmt.Fprintf(out, "%s.\n", summary)
 	return err
+}
+
+func (c *commandContext) collectSessionTemp(ctx context.Context, cmd *cobra.Command, opts sessionTempGCOptions) error {
+	if opts.limit < 1 || opts.limit > 256 {
+		return usageError{errors.New("--limit must be between 1 and 256")}
+	}
+	preview, err := c.runSessionTempGC(ctx, sessionTempGCRequest{DryRun: true, Limit: opts.limit})
+	if err != nil {
+		return err
+	}
+	if err := printSessionTempGC(cmd, preview); err != nil {
+		return err
+	}
+	if opts.dryRun {
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "(dry-run: no session temp directories were removed)")
+		return err
+	}
+	eligible := 0
+	var estimated int64
+	for _, entry := range preview.Entries {
+		if entry.Action == "would_remove" {
+			eligible++
+			estimated += entry.Bytes
+		}
+	}
+	if eligible == 0 {
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "No eligible session temp directories to collect.")
+		return err
+	}
+	if !opts.yes {
+		confirmed, err := confirmTyped(cmd, fmt.Sprintf("Collect %d session temp director%s (about %s)? Type yes to confirm: ", eligible, pluralY(eligible), formatBytes(uint64(estimated))))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), "aborted")
+			return err
+		}
+	}
+	result, err := c.runSessionTempGC(ctx, sessionTempGCRequest{Limit: opts.limit})
+	if err != nil {
+		return err
+	}
+	if err := printSessionTempGC(cmd, result); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Reclaimed %s from %d session temp director%s.\n", formatBytes(uint64(result.ReclaimedBytes)), result.Removed, pluralY(result.Removed))
+	return err
+}
+
+func (c *commandContext) runSessionTempGC(ctx context.Context, request sessionTempGCRequest) (sessionTempGCResponse, error) {
+	var result sessionTempGCResponse
+	if err := c.postJSON(ctx, apiPath("sessions/temp-gc", nil), request, &result); err != nil {
+		return sessionTempGCResponse{}, err
+	}
+	return result, nil
+}
+
+func printSessionTempGC(cmd *cobra.Command, result sessionTempGCResponse) error {
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "AO session temp root: %s\nInspected: %d (more: %t)\n", result.Root, result.Scanned, result.More); err != nil {
+		return err
+	}
+	for _, entry := range result.Entries {
+		label := entry.SessionID
+		if label == "" {
+			label = "unowned entry"
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s", entry.Action, label); err != nil {
+			return err
+		}
+		if entry.Bytes > 0 {
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), " (%s)", formatBytes(uint64(entry.Bytes))); err != nil {
+				return err
+			}
+		}
+		if entry.Reason != "" {
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), " — %s", entry.Reason); err != nil {
+				return err
+			}
+		}
+		if entry.Error != "" {
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), ": %s", entry.Error); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(cmd.OutOrStdout()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pluralY(count int) string {
+	if count == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 func (c *commandContext) previewCleanupSessions(ctx context.Context, project string) ([]sessionDTO, error) {

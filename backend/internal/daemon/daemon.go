@@ -1556,6 +1556,9 @@ func Run(buildVersion string) (retErr error) {
 			ticker := time.NewTicker(workspaceCleanupSweepTick)
 			defer ticker.Stop()
 			for {
+				if err := sessMgr.ReconcileSessionTemp(ctx); err != nil && ctx.Err() == nil {
+					log.Warn("session temp cleanup reconcile failed", "err", err)
+				}
 				if err := sessMgr.ReconcileWorkspaceCleanup(ctx); err != nil && ctx.Err() == nil {
 					log.Warn("workspace cleanup reconcile failed", "err", err)
 				}

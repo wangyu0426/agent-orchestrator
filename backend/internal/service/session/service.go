@@ -113,6 +113,10 @@ type mergeArchiveCommander interface {
 	ApplyMergedArchive(context.Context, []domain.SessionID) []sessionmanager.MergeArchiveApplyResult
 }
 
+type sessionTempCollector interface {
+	CollectSessionTemp(context.Context, bool, int) (sessionmanager.SessionTempGCResult, error)
+}
+
 // interfaceTransitionCommander is an optional command capability. Keeping it
 // separate avoids widening every focused session-service fake while production
 // can expose the feature through the concrete Session Manager.
@@ -1675,6 +1679,16 @@ func (s *Service) Cleanup(ctx context.Context, project domain.ProjectID) (Cleanu
 		out.Skipped = append(out.Skipped, CleanupSkipped{SessionID: skip.SessionID, Code: skip.Code, Reason: skip.Reason})
 	}
 	return out, nil
+}
+
+// CollectSessionTemp delegates one bounded AO-owned temp collection pass. The
+// session manager applies retention and exact lifecycle checks before removal.
+func (s *Service) CollectSessionTemp(ctx context.Context, dryRun bool, limit int) (sessionmanager.SessionTempGCResult, error) {
+	collector, ok := s.manager.(sessionTempCollector)
+	if !ok {
+		return sessionmanager.SessionTempGCResult{}, fmt.Errorf("session temp collection is unavailable")
+	}
+	return collector.CollectSessionTemp(ctx, dryRun, limit)
 }
 
 // TeardownProject stops every live session in a project concurrently, then asks

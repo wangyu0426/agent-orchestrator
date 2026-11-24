@@ -227,6 +227,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/cleanup", c.cleanup)
 	r.Post("/sessions/archive-merged/preview", c.previewMergedArchive)
 	r.Post("/sessions/archive-merged/apply", c.applyMergedArchive)
+	r.Post("/sessions/temp-gc", c.sessionTempGC)
 	r.Get("/sessions/{sessionId}", c.get)
 	r.Get("/sessions/{sessionId}/preview", c.preview)
 	r.Post("/sessions/{sessionId}/preview", c.setPreview)
@@ -2310,6 +2311,49 @@ func (c *SessionsController) applyMergedArchive(w http.ResponseWriter, r *http.R
 		})
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)
+}
+
+type sessionTempGCService interface {
+	CollectSessionTemp(context.Context, bool, int) (sessionmanager.SessionTempGCResult, error)
+}
+
+func (c *SessionsController) sessionTempGC(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/sessions/temp-gc")
+		return
+	}
+	svc, ok := c.Svc.(sessionTempGCService)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/sessions/temp-gc")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var in SessionTempGCRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if in.Limit < 0 || in.Limit > 256 {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_LIMIT", "Limit must be between 0 and 256", nil)
+		return
+	}
+	result, err := svc.CollectSessionTemp(r.Context(), in.DryRun, in.Limit)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	entries := make([]SessionTempGCEntry, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		entries = append(entries, SessionTempGCEntry{
+			SessionID: entry.SessionID, Action: entry.Action, Reason: entry.Reason,
+			Bytes: entry.Bytes, Error: entry.Error,
+		})
+	}
+	envelope.WriteJSON(w, http.StatusOK, SessionTempGCResponse{
+		Root: result.Root, Scanned: result.Scanned, Removed: result.Removed,
+		ReclaimedBytes: result.ReclaimedBytes, More: result.More, DryRun: result.DryRun,
+		Entries: entries,
+	})
 }
 
 func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {

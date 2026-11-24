@@ -14,7 +14,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	// Clear every recognised var so we observe pure defaults regardless of the
 	// surrounding environment.
-	for _, k := range []string{"AO_TELEMETRY_RETENTION", "AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_INSTALLER_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS", "AO_TELEMETRY_METRICS", "AO_TELEMETRY_REMOTE", "AO_TELEMETRY_POSTHOG_KEY", "AO_TELEMETRY_POSTHOG_HOST", "AO_TELEMETRY_DISABLED_EVENTS", "AO_TELEMETRY_APP_VERSION", "AO_HARNESS_UPDATE_CHECKS", "AO_HARNESS_UPDATE_INTERVAL"} {
+	for _, k := range []string{"AO_TELEMETRY_RETENTION", "AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_INSTALLER_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_TEMP_ROOT", "AO_TEMP_RETENTION", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS", "AO_TELEMETRY_METRICS", "AO_TELEMETRY_REMOTE", "AO_TELEMETRY_POSTHOG_KEY", "AO_TELEMETRY_POSTHOG_HOST", "AO_TELEMETRY_DISABLED_EVENTS", "AO_TELEMETRY_APP_VERSION", "AO_HARNESS_UPDATE_CHECKS", "AO_HARNESS_UPDATE_INTERVAL"} {
 		t.Setenv(k, "")
 	}
 
@@ -58,6 +58,12 @@ func TestLoadDefaults(t *testing.T) {
 	if wantStateDir := filepath.Join(homeDir, ".ao"); cfg.StateDir != wantStateDir {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, wantStateDir)
 	}
+	if wantTempRoot := filepath.Join(homeDir, ".ao", "tmp"); cfg.TempRoot != wantTempRoot {
+		t.Errorf("TempRoot = %q, want %q", cfg.TempRoot, wantTempRoot)
+	}
+	if cfg.TempRetention != DefaultTempRetention {
+		t.Errorf("TempRetention = %s, want %s", cfg.TempRetention, DefaultTempRetention)
+	}
 	if cfg.Telemetry.Remote != TelemetryRemoteOff || cfg.Telemetry.PostHogHost != DefaultTelemetryPostHogHost {
 		t.Fatalf("Telemetry defaults = %+v", cfg.Telemetry)
 	}
@@ -72,6 +78,7 @@ func TestLoadAbsolutizesRelativeOverrides(t *testing.T) {
 	// be re-resolved against the new cwd and double-nest state.
 	t.Setenv("AO_RUN_FILE", "rel-running.json")
 	t.Setenv("AO_DATA_DIR", "rel-data")
+	t.Setenv("AO_TEMP_ROOT", "rel-temp")
 
 	cfg, err := Load()
 	if err != nil {
@@ -96,6 +103,9 @@ func TestLoadAbsolutizesRelativeOverrides(t *testing.T) {
 	if want := filepath.Join(cwd, "rel-running.json"); cfg.RunFilePath != want {
 		t.Errorf("RunFilePath = %q, want %q", cfg.RunFilePath, want)
 	}
+	if want := filepath.Join(cwd, "rel-temp"); cfg.TempRoot != want {
+		t.Errorf("TempRoot = %q, want %q", cfg.TempRoot, want)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -109,6 +119,8 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("AO_INSTALLER_SHUTDOWN_TIMEOUT", "2s")
 	t.Setenv("AO_RUN_FILE", runFilePath)
 	t.Setenv("AO_DATA_DIR", dataDir)
+	t.Setenv("AO_TEMP_ROOT", filepath.Join(overrideDir, "ao-test-temp"))
+	t.Setenv("AO_TEMP_RETENTION", "12h")
 	t.Setenv("AO_TELEMETRY_EVENTS", "on")
 	t.Setenv("AO_TELEMETRY_METRICS", "off")
 	t.Setenv("AO_TELEMETRY_REMOTE", "posthog")
@@ -140,6 +152,12 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.StateDir != dataDir {
 		t.Errorf("StateDir = %q, want explicit DataDir %q", cfg.StateDir, dataDir)
 	}
+	if want := filepath.Join(overrideDir, "ao-test-temp"); cfg.TempRoot != want {
+		t.Errorf("TempRoot = %q, want %q", cfg.TempRoot, want)
+	}
+	if cfg.TempRetention != 12*time.Hour {
+		t.Errorf("TempRetention = %s, want 12h", cfg.TempRetention)
+	}
 	if !cfg.Telemetry.Events || cfg.Telemetry.Metrics {
 		t.Fatalf("Telemetry toggles = %+v", cfg.Telemetry)
 	}
@@ -164,6 +182,8 @@ func TestLoadInvalid(t *testing.T) {
 		{"negative request timeout", map[string]string{"AO_REQUEST_TIMEOUT": "-1s"}},
 		{"zero shutdown timeout", map[string]string{"AO_SHUTDOWN_TIMEOUT": "0s"}},
 		{"negative shutdown timeout", map[string]string{"AO_SHUTDOWN_TIMEOUT": "-5s"}},
+		{"bad temp retention", map[string]string{"AO_TEMP_RETENTION": "later"}},
+		{"zero temp retention", map[string]string{"AO_TEMP_RETENTION": "0s"}},
 		{"bad installer shutdown timeout", map[string]string{"AO_INSTALLER_SHUTDOWN_TIMEOUT": "later"}},
 		{"zero installer shutdown timeout", map[string]string{"AO_INSTALLER_SHUTDOWN_TIMEOUT": "0s"}},
 		{"null origin", map[string]string{"AO_ALLOWED_ORIGINS": "app://renderer,null"}},

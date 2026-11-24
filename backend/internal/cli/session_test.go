@@ -85,6 +85,17 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","prs":[{"url":`+jsonQuote(req.PR)+`,"number":142,"state":"open","ci":"passing","review":"review_required","mergeability":"mergeable","reviewComments":false,"updatedAt":"2026-06-04T12:00:00Z"}],"branchChanged":true,"takenOverFrom":["demo-0"]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/cleanup":
 			_, _ = io.WriteString(w, `{"ok":true,"cleaned":["demo-old","demo-orch"],"skipped":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/temp-gc":
+			var request sessionTempGCRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if request.DryRun {
+				_, _ = io.WriteString(w, `{"root":"/ao/tmp","scanned":2,"dryRun":true,"entries":[{"sessionId":"demo-old","action":"would_remove","bytes":1024}]}`)
+			} else {
+				_, _ = io.WriteString(w, `{"root":"/ao/tmp","scanned":2,"removed":1,"reclaimedBytes":1024,"dryRun":false,"entries":[{"sessionId":"demo-old","action":"removed","bytes":1024}]}`)
+			}
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/kill":
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","freed":true}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/restore":
@@ -870,6 +881,44 @@ func TestSessionCleanup_PromptFailsWithoutInput(t *testing.T) {
 		t.Fatalf("output missing confirmation prompt:\n%s", out)
 	}
 	want := []string{"GET /api/v1/sessions?active=false&project=demo"}
+	if got := log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+}
+
+func TestSessionTempGC_DryRunDoesNotDelete(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "session", "temp-gc", "--dry-run")
+	if err != nil {
+		t.Fatalf("session temp-gc --dry-run failed: %v\nstderr=%s", err, errOut)
+	}
+	for _, want := range []string{"AO session temp root: /ao/tmp", "would_remove: demo-old (1.0 KB)", "(dry-run: no session temp directories were removed)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("temp-gc output missing %q:\n%s", want, out)
+		}
+	}
+	want := []string{"POST /api/v1/sessions/temp-gc"}
+	if got := log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+}
+
+func TestSessionTempGC_YesPreviewsThenCollects(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "session", "temp-gc", "--yes")
+	if err != nil {
+		t.Fatalf("session temp-gc --yes failed: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, "Reclaimed 1.0 KB from 1 session temp directory.") {
+		t.Fatalf("temp-gc output missing reclaimed summary:\n%s", out)
+	}
+	want := []string{"POST /api/v1/sessions/temp-gc", "POST /api/v1/sessions/temp-gc"}
 	if got := log.all(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("requests = %#v, want %#v", got, want)
 	}
