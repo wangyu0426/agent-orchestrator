@@ -18,7 +18,9 @@ import (
 type Source string
 
 const (
-	SourceNative     Source = "native"
+	// SourceNative indicates the decision came from native SCM review state.
+	SourceNative Source = "native"
+	// SourceStructured indicates the decision came from a structured AO-REVIEW body.
 	SourceStructured Source = "structured"
 )
 
@@ -27,7 +29,9 @@ const (
 type DeliveryStatus string
 
 const (
-	DeliveryPending   DeliveryStatus = "pending"
+	// DeliveryPending means the feedback has not yet been durably handed off.
+	DeliveryPending DeliveryStatus = "pending"
+	// DeliveryDelivered means the feedback was durably handed off to the worker.
 	DeliveryDelivered DeliveryStatus = "delivered"
 )
 
@@ -270,22 +274,36 @@ func Evaluate(in EvalInput) Evaluation {
 					Signature:   Signature(parsed.Decision, parsed.HeadSHA, parsed.Feedback),
 				}
 			case domain.ReviewApproved:
-				delete(activeReqByReviewer, reviewerKey)
 				stale := currentHead == "" || parsed.HeadSHA != currentHead
-				effDecision := domain.ReviewApproved
 				if stale {
-					effDecision = domain.ReviewNone
+					// An ineligible/stale approval for an older HEAD must not
+					// silently clear an active REQUEST_CHANGES from this reviewer.
+					if _, hasActiveCR := activeReqByReviewer[reviewerKey]; !hasActiveCR {
+						byReviewer[reviewerKey] = EffectiveReviewerDecision{
+							Reviewer:    normalizeLogin(r.Author),
+							Source:      SourceStructured,
+							Decision:    domain.ReviewNone,
+							ReviewID:    r.ID,
+							ReviewURL:   r.URL,
+							ReviewedSHA: parsed.HeadSHA,
+							Feedback:    parsed.Feedback,
+							SubmittedAt: r.SubmittedAt,
+							Stale:       true,
+						}
+					}
+					continue
 				}
+				delete(activeReqByReviewer, reviewerKey)
 				byReviewer[reviewerKey] = EffectiveReviewerDecision{
 					Reviewer:    normalizeLogin(r.Author),
 					Source:      SourceStructured,
-					Decision:    effDecision,
+					Decision:    domain.ReviewApproved,
 					ReviewID:    r.ID,
 					ReviewURL:   r.URL,
 					ReviewedSHA: parsed.HeadSHA,
 					Feedback:    parsed.Feedback,
 					SubmittedAt: r.SubmittedAt,
-					Stale:       stale,
+					Stale:       false,
 				}
 			}
 		}
@@ -457,7 +475,7 @@ func isFullCommitSHA(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}

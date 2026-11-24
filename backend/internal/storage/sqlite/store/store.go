@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 // Store is the SQLite-backed persistence layer. It routes writes to a single
@@ -39,7 +40,15 @@ type Store struct {
 	// searchReset empties the index in place (ResetSessionSearchIndex).
 	searchReset func(context.Context) error
 	// searchErr is why the index could not be opened, when it could not.
-	searchErr error
+	searchErr        error
+	structuredReview structuredreview.Policy
+}
+
+// SetStructuredReviewPolicy configures the opt-in structured review-body policy
+// used during startup reconciliation so it stays in parity with live lifecycle
+// merge-readiness checks.
+func (s *Store) SetStructuredReviewPolicy(policy structuredreview.Policy) {
+	s.structuredReview = policy
 }
 
 // SetSearchIndex installs the session search database's writer, its attached

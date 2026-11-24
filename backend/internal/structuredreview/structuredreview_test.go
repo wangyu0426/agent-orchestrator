@@ -174,6 +174,39 @@ func TestEvaluate_Issue21ScenarioAndSameAccount(t *testing.T) {
 		t.Fatalf("new commit alone cleared REQUEST_CHANGES: got %q", evalNewHead.EffectiveDecision)
 	}
 
+	// Stale/ineligible APPROVE targeted at sha1 while CurrentHeadSHA is sha2
+	// must NOT silently clear the active REQUEST_CHANGES on sha1.
+	evalStaleApproveAfterCR := Evaluate(EvalInput{
+		Policy:         policy,
+		PRAuthor:       "wangyu0426",
+		CurrentHeadSHA: sha2,
+		GitHubDecision: domain.ReviewNone,
+		Reviews: []domain.PullRequestReview{
+			{
+				ID:          "PRR_1",
+				Author:      "wangyu0426",
+				State:       domain.ReviewNone,
+				TargetSHA:   sha1,
+				SubmittedAt: t0,
+				Body:        "AO-REVIEW: REQUEST_CHANGES\nHEAD: " + sha1 + "\n\n[P2] Finding 1",
+			},
+			{
+				ID:          "PRR_stale_ok",
+				Author:      "wangyu0426",
+				State:       domain.ReviewNone,
+				TargetSHA:   sha1,
+				SubmittedAt: t0.Add(time.Minute),
+				Body:        "AO-REVIEW: APPROVE\nHEAD: " + sha1,
+			},
+		},
+	})
+	if evalStaleApproveAfterCR.EffectiveDecision != domain.ReviewChangesRequest {
+		t.Fatalf("stale APPROVE on sha1 cleared REQUEST_CHANGES when HEAD is sha2: got %q", evalStaleApproveAfterCR.EffectiveDecision)
+	}
+	if len(evalStaleApproveAfterCR.ActiveChangeRequests) != 1 || evalStaleApproveAfterCR.ActiveChangeRequests[0].Review.ID != "PRR_1" {
+		t.Fatalf("expected PRR_1 to remain active after stale APPROVE, got %+v", evalStaleApproveAfterCR.ActiveChangeRequests)
+	}
+
 	// Explicit structured APPROVE on sha2 supersedes PRR_1.
 	evalApproved := Evaluate(EvalInput{
 		Policy:         policy,

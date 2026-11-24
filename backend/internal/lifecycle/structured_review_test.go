@@ -118,6 +118,19 @@ func TestApplyPRObservation_StructuredReview_Issue21ExactOnceAndRestart(t *testi
 	if ready {
 		t.Fatalf("expected PR with active structured REQUEST_CHANGES not to be ready to merge")
 	}
+
+	// PRReviewDiagnostics exposes delivered status while still unaddressed,
+	// keeping GitHub's native decision separate from AO's local decision.
+	diag, ok, err := restarted.PRReviewDiagnostics(context.Background(), prURL)
+	if err != nil || !ok {
+		t.Fatalf("PRReviewDiagnostics: ok=%v err=%v", ok, err)
+	}
+	if diag.GitHubDecision != domain.ReviewNone || diag.EffectiveDecision != domain.ReviewChangesRequest || diag.Source != structuredreview.SourceStructured {
+		t.Fatalf("unexpected diagnostics: %+v", diag)
+	}
+	if len(diag.PendingFeedback) != 1 || diag.PendingFeedback[0].DeliveryStatus != structuredreview.DeliveryDelivered {
+		t.Fatalf("expected 1 delivered pending feedback item, got %+v", diag.PendingFeedback)
+	}
 }
 
 func TestApplyPRObservation_StructuredReview_DeliveryFailureRetries(t *testing.T) {

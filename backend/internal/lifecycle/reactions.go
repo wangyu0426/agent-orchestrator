@@ -1012,6 +1012,44 @@ func formatStructuredReviewChangesRequestedMessage(req structuredreview.ActiveCh
 	return msg.String()
 }
 
+// PRReviewDiagnostics computes AO's structured review diagnostics for prURL,
+// keeping GitHub's native decision separate from AO's local effective decision
+// and exposing delivery status (pending vs delivered) for active feedback.
+func (m *Manager) PRReviewDiagnostics(ctx context.Context, prURL string) (structuredreview.Diagnostics, bool, error) {
+	pr, ok, err := m.store.GetPR(ctx, prURL)
+	if err != nil || !ok {
+		return structuredreview.Diagnostics{}, ok, err
+	}
+	reviews, err := m.store.ListPRReviews(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("list persisted reviews for %s: %w", prURL, err)
+	}
+	comments, err := m.store.ListPRComments(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("list persisted comments for %s: %w", prURL, err)
+	}
+	sigRaw, err := m.store.GetPRLastNudgeSignature(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("read nudge signature for %s: %w", prURL, err)
+	}
+	unresolved := false
+	for _, c := range withoutPRAuthorReplies(comments, pr.Author) {
+		if domain.IsActionableReviewComment(c.Resolved, c.IsBot, c.File, c.Line) {
+			unresolved = true
+			break
+		}
+	}
+	eval := structuredreview.Evaluate(structuredreview.EvalInput{
+		Policy:               m.structuredReview,
+		PRAuthor:             pr.Author,
+		CurrentHeadSHA:       pr.HeadSHA,
+		GitHubDecision:       pr.Review,
+		Reviews:              reviews,
+		HasUnresolvedThreads: unresolved,
+	})
+	return structuredreview.BuildDiagnostics(eval, prURL, sigRaw), true, nil
+}
+
 func formatReviewCommentsMessage(comments []ports.PRCommentObservation) string {
 	if len(comments) == 0 {
 		return "A reviewer left feedback on your PR. Address it and push. Fetch the review details only if you need additional context beyond what Orchestrator has provided here."

@@ -49,7 +49,7 @@ Configure them via daemon environment variables:
 
 - Native GitHub `APPROVED` and `CHANGES_REQUESTED` reviews are preserved and evaluated alongside structured decisions per reviewer, ordered by `SubmittedAt` (tie-broken by review ID).
 - An informal `COMMENTED` review never clears an earlier `REQUEST_CHANGES` decision.
-- Pushing a new commit alone does **not** clear a structured `REQUEST_CHANGES`; an explicit eligible re-review/decision (structured or native) is required.
+- Pushing a new commit alone does **not** clear a structured `REQUEST_CHANGES`; an explicit eligible re-review/decision (structured `APPROVE` matching the current `HEAD`, or a native GitHub review) is required. An ineligible or stale `AO-REVIEW: APPROVE` targeted at an older commit never clears an active `REQUEST_CHANGES`.
 - Any active `CHANGES_REQUESTED` (native or structured) takes precedence over `APPROVED` from another reviewer.
 - A structured `APPROVE` never overrides native `CHANGES_REQUESTED`, native `REVIEW_REQUIRED`, or unresolved actionable inline threads.
 
