@@ -8,6 +8,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
@@ -96,5 +97,49 @@ func TestWorkerQuotaReconcilesRemainingRoutesInAdmissionOrder(t *testing.T) {
 				t.Fatalf("second sweep repeated handoff: switches=%v err=%v", chat.switches, err)
 			}
 		})
+	}
+}
+
+func TestWorkerQuotaPreservesManualModelChoiceAfterDefaultAdmission(t *testing.T) {
+	ctx := t.Context()
+	store := sqlitetest.MustOpen(t)
+	now := time.Now().UTC()
+	fallback := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini"}
+	record, err := store.CreateSession(ctx, domain.SessionRecord{
+		Kind: domain.KindWorker, Mode: domain.SessionModeChat, Harness: domain.HarnessCodex,
+		WorkerQuotaRemaining: []workerquota.Target{fallback}, CreatedAt: now, UpdatedAt: now,
+		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := sessionmanager.New(sessionmanager.Deps{Store: store})
+	if err := manager.PersistChatModel(ctx, record.ID, "manual-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	chat := &quotaChatStub{failedAt: now}
+	sweep := workerQuotaSweep{
+		policy: &workerquota.Policy{}, store: store, chat: chat, log: slog.New(slog.DiscardHandler),
+	}
+	if err := sweep.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.switches) != 0 || chat.parks != 0 {
+		t.Fatalf("manual model choice triggered quota recovery: switches=%v parks=%d", chat.switches, chat.parks)
+	}
+	sessions, err := store.WorkerQuotaSessions(ctx)
+	if err != nil || len(sessions) != 1 || sessions[0].Attempt != "" {
+		t.Fatalf("manual model choice consumed the handoff reservation: %+v, %v", sessions, err)
+	}
+
+	if err := manager.PersistChatModel(ctx, record.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweep.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.switches) != 1 || chat.switches[0].TargetHarness != fallback.Harness || chat.parks != 0 {
+		t.Fatalf("provider default failed to regain quota recovery: switches=%v parks=%d", chat.switches, chat.parks)
 	}
 }

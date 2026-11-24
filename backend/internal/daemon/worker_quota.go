@@ -61,8 +61,9 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 	if worker.Target.Harness == rec.Harness {
 		current = worker.Target
 	}
-	// Manual provider or model choices after launch also take precedence.
-	if current.Harness != rec.Harness || (current.Model != "" && current.Model != rec.Metadata.Model) {
+	// An empty admitted model uses the provider default. A later nonempty
+	// selection is a manual override, just like a change between named models.
+	if current.Harness != rec.Harness || current.Model != rec.Metadata.Model {
 		return nil
 	}
 	if worker.Reason == "handoff started" && rec.Harness == worker.Target.Harness {
