@@ -439,15 +439,11 @@ func (m *Manager) stopChatAfterSpawnFailure(ctx context.Context, id domain.Sessi
 	return m.stopChatBestEffort(cleanupCtx, id)
 }
 
-// stopChatBestEffort closes a controller during rollback. A failure here is
-// logged rather than returned: the spawn is already failing, and the caller's
-// error is the one worth surfacing.
+// stopChatBestEffort closes a controller when teardown can continue after a
+// failure. Its result distinguishes confirmed exit from unknown liveness.
 func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) bool {
-	if m.chat == nil {
-		return false
-	}
-	if err := m.chat.StopChat(ctx, id); err != nil {
-		m.logger.Warn("spawn rollback: close chat controller", "sessionID", id, "error", err)
+	if err := m.stopChatController(ctx, id); err != nil {
+		m.logger.Warn("stop chat controller", "sessionID", id, "error", err)
 		return false
 	}
 	return true

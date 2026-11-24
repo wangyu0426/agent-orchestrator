@@ -109,11 +109,11 @@ func (m *Manager) sessionTempEligibility(ctx context.Context, owner sessiontemp.
 		return sessiontemp.Eligibility{Reason: "runtime handle is missing without confirmed exit evidence"}, nil
 	}
 	if mode == domain.SessionModeChat {
-		if m.chat == nil {
-			return sessiontemp.Eligibility{Reason: "chat controller liveness is unavailable"}, nil
-		}
-		if m.chat.HasLiveChatController(rec.ID) {
+		if m.chat != nil && m.chat.HasLiveChatController(rec.ID) {
 			return sessiontemp.Eligibility{Reason: "chat controller is still live"}, nil
+		}
+		if owner.ExitedAt.IsZero() {
+			return sessiontemp.Eligibility{Reason: "chat controller exit is not durably confirmed"}, nil
 		}
 	}
 	exitedAt := owner.ExitedAt
@@ -163,6 +163,20 @@ func (m *Manager) markSessionTempExited(ctx context.Context, id domain.SessionID
 	if err := m.sessionTemps.MarkExited(ctx, string(id)); err != nil {
 		m.logger.Warn("record session temp process exit failed", "sessionID", id, "error", err)
 	}
+}
+
+// stopChatController records temp cleanup evidence only after the Chat
+// launcher confirms that the controller/provider host stopped successfully.
+// A missing in-memory controller by itself is never exit evidence.
+func (m *Manager) stopChatController(ctx context.Context, id domain.SessionID) error {
+	if m.chat == nil {
+		return ErrIncompleteHandle
+	}
+	if err := m.chat.StopChat(ctx, id); err != nil {
+		return err
+	}
+	m.markSessionTempExited(ctx, id)
+	return nil
 }
 
 func (m *Manager) markSessionTempExitedIfConclusive(ctx context.Context, rec domain.SessionRecord) {

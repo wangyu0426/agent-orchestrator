@@ -3692,10 +3692,7 @@ func (m *Manager) releaseTerminalRuntime(ctx context.Context, rec domain.Session
 // never terminates the AO session or releases its worktree.
 func (m *Manager) stopAgentController(ctx context.Context, rec domain.SessionRecord) error {
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		if m.chat == nil {
-			return ErrIncompleteHandle
-		}
-		return m.chat.StopChat(ctx, rec.ID)
+		return m.stopChatController(ctx, rec.ID)
 	}
 	handle := ports.RuntimeHandle{ID: strings.TrimSpace(rec.Metadata.RuntimeHandleID)}
 	if handle.ID == "" || strings.TrimSpace(rec.Metadata.RuntimeLaunchID) == "" {

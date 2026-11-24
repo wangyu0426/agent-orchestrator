@@ -64,9 +64,9 @@ func TestSessionTempEligibilityFailsClosed(t *testing.T) {
 			wantReason: "runtime handle is missing without confirmed exit evidence",
 		},
 		{
-			name:       "chat controller liveness unavailable",
+			name:       "chat controller liveness unavailable without durable exit evidence",
 			record:     domain.SessionRecord{ID: "session-chat-unknown", Mode: domain.SessionModeChat, IsTerminated: true},
-			wantReason: "chat controller liveness is unavailable",
+			wantReason: "chat controller exit is not durably confirmed",
 		},
 		{
 			name:       "live chat controller",
@@ -75,9 +75,16 @@ func TestSessionTempEligibilityFailsClosed(t *testing.T) {
 			wantReason: "chat controller is still live",
 		},
 		{
-			name:        "stopped chat controller",
-			record:      domain.SessionRecord{ID: "session-chat-dead", Mode: domain.SessionModeChat, IsTerminated: true, UpdatedAt: now.Add(-30 * 24 * time.Hour)},
+			name:       "chat controller missing after restart without durable exit evidence",
+			record:     domain.SessionRecord{ID: "session-chat-dead", Mode: domain.SessionModeChat, IsTerminated: true, UpdatedAt: now.Add(-30 * 24 * time.Hour)},
+			chat:       &recordingLauncher{},
+			wantReason: "chat controller exit is not durably confirmed",
+		},
+		{
+			name:        "stopped chat controller with durable exit evidence",
+			record:      domain.SessionRecord{ID: "session-chat-stopped", Mode: domain.SessionModeChat, IsTerminated: true, UpdatedAt: now.Add(-30 * 24 * time.Hour)},
 			chat:        &recordingLauncher{},
+			owner:       sessiontemp.Owner{ExitedAt: now},
 			wantCollect: true,
 			wantExit:    now,
 		},
@@ -88,7 +95,9 @@ func TestSessionTempEligibilityFailsClosed(t *testing.T) {
 			store := newFakeStore()
 			store.sessions[tt.record.ID] = tt.record
 			manager := New(Deps{Store: store, Runtime: tt.runtime, Chat: tt.chat, Clock: func() time.Time { return now }})
-			decision, err := manager.sessionTempEligibility(context.Background(), sessiontemp.Owner{SessionID: string(tt.record.ID)})
+			owner := tt.owner
+			owner.SessionID = string(tt.record.ID)
+			decision, err := manager.sessionTempEligibility(context.Background(), owner)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,6 +111,85 @@ func TestSessionTempEligibilityFailsClosed(t *testing.T) {
 				t.Fatalf("exit time = %s, want confirmed time %s", decision.ExitedAt, tt.wantExit)
 			}
 		})
+	}
+}
+
+func TestFailedChatHostStopWithoutControllerDoesNotAuthorizeTempGC(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	stopErr := errors.New("provider host stop failed")
+	launcher := &recordingLauncher{stopErr: stopErr}
+	manager, store, _ := newChatManager(launcher)
+	manager.sessionTemps = sessiontemp.New(privateSessionTempRoot(t), time.Nanosecond)
+	manager.clock = func() time.Time { return now.Add(time.Hour) }
+	store.sessions["session-chat-orphan"] = domain.SessionRecord{
+		ID: "session-chat-orphan", ProjectID: chatTestProject, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	if _, err := manager.sessionTemps.Ensure(context.Background(), "session-chat-orphan"); err != nil {
+		t.Fatal(err)
+	}
+
+	// This manager has no attached Chat controller, as after a daemon restart.
+	if _, err := manager.ExitAgent(context.Background(), "session-chat-orphan"); !errors.Is(err, stopErr) {
+		t.Fatalf("ExitAgent without a local controller = %v, want host stop error", err)
+	}
+	rec := store.sessions["session-chat-orphan"]
+	rec.IsTerminated = true
+	store.sessions["session-chat-orphan"] = rec
+	manager.markSessionTempExitedIfConclusive(context.Background(), rec)
+	dir, found, err := manager.sessionTemps.Lookup(context.Background(), string(rec.ID))
+	if err != nil || !found {
+		t.Fatalf("session temp directory lookup found=%v err=%v", found, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".ao-session-temp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner sessiontemp.Owner
+	if err := json.Unmarshal(data, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if !owner.ExitedAt.IsZero() {
+		t.Fatalf("failed host teardown persisted exit evidence: %+v", owner)
+	}
+	result, err := manager.CollectSessionTemp(context.Background(), false, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 0 || len(result.Entries) != 1 || result.Entries[0].Action != "skipped" ||
+		!strings.Contains(result.Entries[0].Reason, "durably confirmed") {
+		t.Fatalf("failed host stop was treated as confirmed exit: %+v", result)
+	}
+}
+
+func TestSuccessfulChatStopRecordsExitAndAllowsRetainedTempCollection(t *testing.T) {
+	now := time.Now().UTC()
+	launcher := &recordingLauncher{}
+	manager, store, _ := newChatManager(launcher)
+	manager.sessionTemps = sessiontemp.New(privateSessionTempRoot(t), time.Nanosecond)
+	manager.clock = func() time.Time { return now.Add(time.Hour) }
+	store.sessions["session-chat-stopped"] = domain.SessionRecord{
+		ID: "session-chat-stopped", ProjectID: chatTestProject, Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	if _, err := manager.sessionTemps.Ensure(context.Background(), "session-chat-stopped"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.ExitAgent(context.Background(), "session-chat-stopped"); err != nil {
+		t.Fatalf("ExitAgent after successful Chat stop: %v", err)
+	}
+	rec := store.sessions["session-chat-stopped"]
+	rec.IsTerminated = true
+	store.sessions["session-chat-stopped"] = rec
+	result, err := manager.CollectSessionTemp(context.Background(), false, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 1 || len(result.Entries) != 1 || result.Entries[0].Action != "removed" {
+		t.Fatalf("successfully stopped terminal Chat temp was not collectible: %+v", result)
 	}
 }
 

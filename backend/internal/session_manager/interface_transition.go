@@ -1398,10 +1398,7 @@ func (m *Manager) abortSourceHandoff(transition domain.SessionInterfaceTransitio
 
 func (m *Manager) stopSourceController(ctx context.Context, rec domain.SessionRecord) error {
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		if m.chat == nil {
-			return nil
-		}
-		return m.chat.StopChat(ctx, rec.ID)
+		return m.stopChatController(ctx, rec.ID)
 	}
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
