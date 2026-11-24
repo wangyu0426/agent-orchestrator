@@ -29,7 +29,7 @@ export async function saveEnvironmentMachine(host: Host, draft: EnvironmentMachi
 		if (error instanceof DifferentMachineError || error instanceof AccountManagedHostError) throw new MachineSaveError(error.message, "host");
 		const status = error instanceof IncompatibleHostVersionError ? 426 : error instanceof ApiError ? error.status : undefined;
 		const kind = classifyConnectionFailure(status);
-		if (kind === "auth") throw new MachineSaveError("That password was rejected. Check it and try again.", "password");
+		if (kind === "auth") throw new MachineSaveError("That code or password was rejected. Get a new code and try again.", "password");
 		const copy = describeConnectionFailure(kind, { host: draft.config.host, port: draft.config.httpPort, platform });
 		throw new MachineSaveError(copy.message, "host");
 	}
@@ -40,6 +40,7 @@ export async function saveEnvironmentMachine(host: Host, draft: EnvironmentMachi
 
 /** Forgetting a machine failed and its saved connection is still there. */
 export class ForgetMachineError extends Error {
+	readonly code: string = "FORGET_MACHINE_ERROR";
 	constructor(message: string) {
 		super(message);
 		this.name = "ForgetMachineError";
