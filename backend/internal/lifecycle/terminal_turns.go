@@ -16,6 +16,10 @@ type terminalTurnRecorder interface {
 	RecordTerminalTurnResponse(context.Context, domain.SessionID, string, time.Time) error
 }
 
+type completedTerminalTurnRecorder interface {
+	RecordCompletedTerminalTurn(context.Context, domain.TerminalTurn, string, time.Time) error
+}
+
 // recordTerminalTurn keeps AO's own record of a Terminal UI turn: the request
 // from the prompt hook and the agent's final message from the stop hook. Chat
 // turns live in the conversation tables, so the caller records only in terminal
@@ -45,7 +49,20 @@ func (m *Manager) recordTerminalTurn(ctx context.Context, rec domain.SessionReco
 		// The turn is over even when the hook carries no text. Closing it
 		// keeps the next request from piling onto this one.
 		if s.SubagentID == "" && !staleTerminalStop(rec, s) {
-			err = recorder.RecordTerminalTurnResponse(ctx, rec.ID, strings.TrimSpace(s.FinalAssistantMessage), at)
+			resp := strings.TrimSpace(s.FinalAssistantMessage)
+			if rec.Harness == domain.HarnessAgy && resp != "" {
+				if completeRecorder, ok := m.store.(completedTerminalTurnRecorder); ok {
+					err = completeRecorder.RecordCompletedTerminalTurn(ctx, domain.TerminalTurn{
+						SessionID:       rec.ID,
+						Harness:         rec.Harness,
+						UserRequest:     strings.TrimSpace(s.TurnUserRequest),
+						RequestedAt:     at,
+						NativeSessionID: cmp.Or(s.AgentSessionID, rec.Metadata.AgentSessionID),
+					}, resp, at)
+					break
+				}
+			}
+			err = recorder.RecordTerminalTurnResponse(ctx, rec.ID, resp, at)
 		}
 	}
 	if err != nil {

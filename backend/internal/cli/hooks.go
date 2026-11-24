@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/activitydispatch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/copilot"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/cursor"
@@ -971,6 +972,27 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	if domain.AgentHarness(agent) == domain.HarnessCopilot && event == "stop" && conversation.FinalAssistantMessage == "" {
 		// Copilot's stop hook names its event log instead of carrying the answer.
 		conversation.FinalAssistantMessage = capHookText(copilot.FinalAssistantMessage(payload), maxHookInteractionLen)
+	}
+	if domain.AgentHarness(agent) == domain.HarnessAgy {
+		if event == "stop" {
+			resolved := agy.ResolveStopTranscript(payload)
+			if resolved.TranscriptPath != "" {
+				conversation.TranscriptPath = capHookText(resolved.TranscriptPath, maxHookTranscriptPath)
+			}
+			if conversation.FinalAssistantMessage == "" && resolved.FinalAssistantMessage != "" {
+				conversation.FinalAssistantMessage = capHookText(resolved.FinalAssistantMessage, maxHookInteractionLen)
+			}
+			if conversation.TurnUserRequest == "" && resolved.TurnUserRequest != "" {
+				conversation.TurnUserRequest = capHookText(resolved.TurnUserRequest, maxHookInteractionLen)
+			}
+			if conversation.ProviderTurnID == "" && resolved.ProviderTurnID != "" {
+				conversation.ProviderTurnID = resolved.ProviderTurnID
+			}
+		} else if history.TranscriptPath != "" {
+			if validPath, ok := agy.ValidateTranscriptPath(history.TranscriptPath, agentSessionID); ok {
+				conversation.TranscriptPath = capHookText(validPath, maxHookTranscriptPath)
+			}
+		}
 	}
 	path := "sessions/" + url.PathEscape(sessionID) + "/activity"
 	req := setActivityAPIRequest{
