@@ -345,11 +345,12 @@ type subject struct {
 // Head names are scoped to repo's provider and host. Each base has a separate
 // set because overlapping workspace checkouts can have different push targets.
 type sessionRepo struct {
-	session   domain.SessionRecord
-	repo      ports.SCMRepo
-	headNames map[string]struct{}
-	branch    string
-	workspace bool
+	session      domain.SessionRecord
+	repo         ports.SCMRepo
+	headNames    map[string]struct{}
+	branch       string
+	remoteBranch string
+	workspace    bool
 }
 
 type repoGuardState struct {
@@ -890,7 +891,8 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 			continue
 		}
 		branch := strings.TrimSpace(sess.Metadata.Branch)
-		if branch == "" {
+		remoteBranch := normalizedRemoteBranch(sess.BranchState)
+		if branch == "" && remoteBranch == "" {
 			continue
 		}
 		proj, ok := projects[sess.ProjectID]
@@ -979,6 +981,7 @@ func (o *Observer) resolveScanRepos(ctx context.Context, proj domain.ProjectReco
 func checkoutSessionRepos(sess domain.SessionRecord, branch string, workspace bool, checkouts ...[]ports.SCMRepo) []sessionRepo {
 	var result []sessionRepo
 	byBase := make(map[string]int)
+	remoteBranch := normalizedRemoteBranch(sess.BranchState)
 	for _, checkout := range checkouts {
 		for _, base := range checkout {
 			key := strings.ToLower(prKey(base, 0))
@@ -987,7 +990,7 @@ func checkoutSessionRepos(sess domain.SessionRecord, branch string, workspace bo
 				position = len(result)
 				byBase[key] = position
 				result = append(result, sessionRepo{
-					session: sess, repo: base, branch: branch, workspace: workspace,
+					session: sess, repo: base, branch: branch, remoteBranch: remoteBranch, workspace: workspace,
 					headNames: make(map[string]struct{}),
 				})
 			}
@@ -1394,28 +1397,38 @@ func matchSession(candidates []sessionRepo, sourceBranch string) (sessionRepo, b
 			ambiguous = true
 		}
 	}
+	type ownedBranch struct {
+		name      string
+		temporary int
+	}
 	for _, sr := range candidates {
-		if sr.branch == "" {
-			continue
-		}
+		remoteBranch := firstNonEmpty(sr.remoteBranch, normalizedRemoteBranch(sr.session.BranchState))
 		// A renamed task keeps owning its temporary branch, which the agent may
-		// have built on. It ranks below any session's current branch, so a later
-		// task given that name still wins its own PRs.
-		for temporary, owned := range []string{sr.branch, sr.session.TemporaryBranch} {
-			if owned == "" {
-				continue
-			}
-			rank := func(length int) int { return 2*length + 1 - temporary }
-			if owned == sourceBranch {
+		// have built on. It ranks below any session's current branch (metadata
+		// or persisted remote branch), so a later task given that name still
+		// wins its own PRs.
+		ownedBranches := make([]ownedBranch, 0, 3)
+		if sr.branch != "" {
+			ownedBranches = append(ownedBranches, ownedBranch{name: sr.branch, temporary: 0})
+		}
+		if remoteBranch != "" && remoteBranch != sr.branch {
+			ownedBranches = append(ownedBranches, ownedBranch{name: remoteBranch, temporary: 0})
+		}
+		if sr.session.TemporaryBranch != "" {
+			ownedBranches = append(ownedBranches, ownedBranch{name: sr.session.TemporaryBranch, temporary: 1})
+		}
+		for _, owned := range ownedBranches {
+			rank := func(length int) int { return 2*length + 1 - owned.temporary }
+			if owned.name == sourceBranch {
 				consider(sr, rank(len(sourceBranch)+1))
 			}
-			for _, prefix := range sessionBranchPrefixes(owned) {
+			for _, prefix := range sessionBranchPrefixes(owned.name) {
 				if prefix == sourceBranch || strings.HasPrefix(sourceBranch, prefix+"/") {
 					consider(sr, rank(len(prefix)))
 				}
 			}
-			if workspaceHyphenBranch(sr, owned) && strings.HasPrefix(sourceBranch, owned+"-") && len(sourceBranch) > len(owned)+1 {
-				consider(sr, rank(len(owned)))
+			if workspaceHyphenBranch(sr, owned.name) && strings.HasPrefix(sourceBranch, owned.name+"-") && len(sourceBranch) > len(owned.name)+1 {
+				consider(sr, rank(len(owned.name)))
 			}
 		}
 	}
@@ -1447,6 +1460,33 @@ func sessionBranchPrefixes(branch string) []string {
 		prefixes = append(prefixes, namespace)
 	}
 	return prefixes
+}
+
+// normalizedRemoteBranch extracts the repository-relative branch name from a
+// session's persisted branch_state.remoteBranch (e.g. "origin/feat/x" or
+// "refs/remotes/origin/feat/x" -> "feat/x").
+func normalizedRemoteBranch(state *domain.SessionBranchState) string {
+	if state == nil {
+		return ""
+	}
+	rb := strings.TrimSpace(state.RemoteBranch)
+	if rb == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(rb, "refs/remotes/"); ok {
+		_, branch, hasSlash := strings.Cut(rest, "/")
+		if !hasSlash {
+			return ""
+		}
+		return strings.TrimSpace(branch)
+	}
+	if rest, ok := strings.CutPrefix(rb, "refs/heads/"); ok {
+		return strings.TrimSpace(rest)
+	}
+	if rest, ok := strings.CutPrefix(rb, "origin/"); ok {
+		return strings.TrimSpace(rest)
+	}
+	return rb
 }
 
 // trackedPRRef is the provider ref for a tracked PR. It carries the provider
