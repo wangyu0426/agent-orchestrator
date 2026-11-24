@@ -2972,8 +2972,11 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	}
 	ctx, cancelTeardown := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancelTeardown()
-	if err := m.cancelAsyncChatSpawn(ctx, id); err != nil {
-		return KillResult{}, fmt.Errorf("kill %s: cancel provisioning: %w", id, err)
+	// Automatic archive must never cancel a worker that is still provisioning.
+	if !archiveOnMerge {
+		if err := m.cancelAsyncChatSpawn(ctx, id); err != nil {
+			return KillResult{}, fmt.Errorf("kill %s: cancel provisioning: %w", id, err)
+		}
 	}
 
 	if err := m.beginAgentOperation(ctx, id, agentOperationKill); err != nil {
@@ -3013,6 +3016,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		workspaceProject = true
 	}
 	var releaseArchiveInput func()
+	var stopArchiveChat func(context.Context) error
 	if archiveOnMerge {
 		release, reason, err := m.mergeArchiveEligibility(ctx, rec, workspaceProjectRows, workspaceProject, true)
 		if release != nil {
@@ -3021,6 +3025,21 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		}
 		if reason != "" {
 			return KillResult{}, &MergeArchiveDeferredError{SessionID: id, Reason: reason, Cause: err}
+		}
+		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			fence, ok := m.chat.(chatMergeArchiveFencer)
+			if !ok {
+				return KillResult{}, &MergeArchiveDeferredError{SessionID: id, Reason: "chat_input_ownership_unknown"}
+			}
+			stop, release, err := fence.PrepareChatMergeArchive(ctx, rec, true)
+			if err != nil || stop == nil || release == nil {
+				if release != nil {
+					release()
+				}
+				return KillResult{}, &MergeArchiveDeferredError{SessionID: id, Reason: "chat_not_quiescent", Cause: err}
+			}
+			stopArchiveChat = stop
+			defer release()
 		}
 	}
 	if archiveOnMerge {
@@ -3057,10 +3076,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	// read does not show work that is no longer running.
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		if archiveOnMerge {
-			if m.chat == nil {
-				return KillResult{}, fmt.Errorf("archive merged session %s: chat controller is unavailable", id)
-			}
-			if err := m.chat.StopChat(ctx, id); err != nil {
+			if err := stopArchiveChat(ctx); err != nil {
 				return KillResult{}, fmt.Errorf("archive merged session %s: stop chat controller: %w", id, err)
 			}
 		} else {

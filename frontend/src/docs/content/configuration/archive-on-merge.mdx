@@ -5,6 +5,8 @@ description: Configure archive-on-merge defaults and safely reclaim existing mer
 
 New local worker sessions archive automatically after Orchestrator authoritatively observes that at least one tracked pull request merged and every tracked pull request is terminal. The worker must also be idle or have a confirmed process exit, its owned process state must be known, and its worktree must be clean. A busy worker, open or unknown pull request, active handoff, unknown process, or unpreserved workspace work is deferred and retried by the normal observer.
 
+Chat workers additionally require a live, quiescent controller, a settled turn, an empty queue, no pending interactions or independent side chats, and a provider that can confirm it has no background work. Chat input is fenced through automatic teardown. Sleeping or detached Chat controllers and providers without a background-work probe are deferred rather than stopped on uncertain evidence.
+
 Archiving releases the worker's owned agent runtime and related session resources, then applies the existing workspace cleanup rules. Session history and metadata remain available. A dirty or otherwise unsafe workspace is preserved for recovery.
 
 ## Set defaults for new workers

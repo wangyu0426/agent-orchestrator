@@ -11,6 +11,13 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
+// chatMergeArchiveFencer proves Chat quiescence and, for apply, holds
+// controller admission until the manager finishes the archive. The returned
+// stop function uses that same gate rather than reacquiring it.
+type chatMergeArchiveFencer interface {
+	PrepareChatMergeArchive(context.Context, domain.SessionRecord, bool) (func(context.Context) error, func(), error)
+}
+
 type mergeArchivePRStore interface {
 	ListPRsBySession(context.Context, domain.SessionID) ([]domain.PullRequest, error)
 }
@@ -185,8 +192,17 @@ func (m *Manager) mergeArchiveEligibility(
 		if m.chat == nil {
 			return nil, "chat_process_ownership_unknown", nil
 		}
-		if !m.chat.HasLiveChatController(rec.ID) && rec.HibernatedAt == nil {
+		if !m.chat.HasLiveChatController(rec.ID) || rec.HibernatedAt != nil {
 			return nil, "chat_process_ownership_unknown", nil
+		}
+		fence, ok := m.chat.(chatMergeArchiveFencer)
+		if !ok {
+			return nil, "chat_input_ownership_unknown", nil
+		}
+		if !holdInput {
+			if _, _, err := fence.PrepareChatMergeArchive(ctx, rec, false); err != nil {
+				return nil, "chat_not_quiescent", err
+			}
 		}
 	} else {
 		handle := runtimeHandle(rec.Metadata)
