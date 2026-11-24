@@ -176,3 +176,13 @@ Commit `openapi.yaml` and `frontend/src/api/schema.ts` together with the Go chan
 - Respect the existing lifecycle rule: failed or unknown runtime probes are not proof of death. Distinguish idle, waiting, probe unavailable, and confirmed exit using durable lifecycle evidence; do not reap on inference alone. Exercise a regression for any newly identified false-death path.
 - Keep provider capabilities and lifecycle adapters behind existing ports. Do not move orchestration or review policy into the frontend, or refactor provider interfaces merely to adopt engineering-memory guidance.
 - Record advisory findings without changing runtime review gates, dispatch authority, or session state. Changes to automated review behavior require a separately scoped implementation task and verification.
+
+## Independent issue delivery
+
+- Plan one independently reviewable and mergeable slice per issue, based on main, with explicit core acceptance and necessary tests. Do not introduce cross-PR blockers for unrelated work or product-wide completeness; sequence or redesign genuine technical dependencies instead of merging broken code.
+- Once core implementation and applicable local tests pass, mark the PR Ready for Review without waiting for unrelated PRs, optional screenshots, extra verification, or non-core polish. Required remote checks still gate merge; Ready does not mean merged or all CI passed.
+- Record deferred non-core work and environment-limited optional validation as linked follow-ups; report actual test results and gaps. Never defer essential correctness/security or explicit core acceptance evidence to claim completion.
+- If genuinely blocked, hand off the concrete blocker and reproducible state rather than waiting indefinitely in Draft. Report PR URL, head SHA, delivered scope, tests, gaps and follow-ups; preserve existing worker lifecycle and owner approval/merge authority.
+- Review the delivered slice, not the entire product. Require rework only for evidenced material defects within scope or failed required checks; advisory work remains separate.
+
+- For AO-managed issue authoring and worker/reviewer handoffs, apply this policy to the target repository's scoped task contract. Do not change automated lifecycle or dispatch logic merely to document this policy; implement and test runtime changes separately if requested.
