@@ -981,7 +981,14 @@ func (o *Observer) resolveScanRepos(ctx context.Context, proj domain.ProjectReco
 func checkoutSessionRepos(sess domain.SessionRecord, branch string, workspace bool, checkouts ...[]ports.SCMRepo) []sessionRepo {
 	var result []sessionRepo
 	byBase := make(map[string]int)
-	remoteBranch := normalizedRemoteBranch(sess.BranchState)
+	// SessionBranchState is recorded at the session level without per-checkout
+	// repo provenance. Only attach it to single-repo checkouts; fail closed
+	// for multi-repo workspaces so a branch observed in one repo cannot match
+	// a same-named PR in another checkout.
+	var remoteBranch string
+	if !workspace {
+		remoteBranch = normalizedRemoteBranch(sess.BranchState)
+	}
 	for _, checkout := range checkouts {
 		for _, base := range checkout {
 			key := strings.ToLower(prKey(base, 0))
@@ -1402,7 +1409,7 @@ func matchSession(candidates []sessionRepo, sourceBranch string) (sessionRepo, b
 		temporary int
 	}
 	for _, sr := range candidates {
-		remoteBranch := firstNonEmpty(sr.remoteBranch, normalizedRemoteBranch(sr.session.BranchState))
+		remoteBranch := sr.remoteBranch
 		// A renamed task keeps owning its temporary branch, which the agent may
 		// have built on. It ranks below any session's current branch (metadata
 		// or persisted remote branch), so a later task given that name still

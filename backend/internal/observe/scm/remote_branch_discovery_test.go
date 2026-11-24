@@ -453,3 +453,78 @@ func TestPoll_RestartReconciliationAndExplicitClaimPrecedence(t *testing.T) {
 		t.Fatalf("sess3 stole PR #144 after restart: %+v, err=%v", got3After, err)
 	}
 }
+
+func TestPoll_WorkspaceDoesNotLeakSessionRemoteBranchAcrossRepos(t *testing.T) {
+	repoA := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "repo-a", Repo: "o/repo-a"}
+	repoB := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "repo-b", Repo: "o/repo-b"}
+
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.Branch = "ao/work-on-tracker-16/root"
+	store.sessions[0].BranchState = &domain.SessionBranchState{
+		Branch:       "feat/issue-16",
+		RemoteBranch: "origin/feat/issue-16",
+	}
+	store.projects["p"] = domain.ProjectRecord{
+		ID:   "p",
+		Kind: domain.ProjectKindWorkspace,
+	}
+	store.workspaceRepos = map[string][]domain.WorkspaceRepoRecord{
+		"p": {
+			{Name: "repo-a", RelativePath: "repo-a", RepoOriginURL: "https://github.com/o/repo-a.git"},
+			{Name: "repo-b", RelativePath: "repo-b", RepoOriginURL: "https://github.com/o/repo-b.git"},
+		},
+	}
+
+	// Unrelated PR in repo-b with the same branch name as session's remoteBranch.
+	prB := testObs(201)
+	prB.Repo = "o/repo-b"
+	prB.PR.URL = "https://github.com/o/repo-b/pull/201"
+	prB.PR.HTMLURL = prB.PR.URL
+	prB.PR.SourceBranch = "feat/issue-16"
+	prB.PR.HeadRepo = "o/repo-b"
+	prB.PR.BaseRepo = "o/repo-b"
+	prB.PR.Author = "alice"
+
+	// Legitimate PR in repo-a matching the session's metadata branch.
+	prA := testObs(202)
+	prA.Repo = "o/repo-a"
+	prA.PR.URL = "https://github.com/o/repo-a/pull/202"
+	prA.PR.HTMLURL = prA.PR.URL
+	prA.PR.SourceBranch = "ao/work-on-tracker-16/root"
+	prA.PR.HeadRepo = "o/repo-a"
+	prA.PR.BaseRepo = "o/repo-a"
+	prA.PR.Author = "alice"
+
+	provider := &fakeProvider{
+		identity: ports.SCMIdentity{Login: "alice", Human: true},
+		repoGuards: map[string]ports.SCMGuardResult{
+			prKey(repoA, 0): {ETag: "a-v1"},
+			prKey(repoB, 0): {ETag: "b-v1"},
+		},
+		openPRs: map[string][]ports.SCMPRObservation{
+			prKey(repoA, 0): {prA.PR},
+			prKey(repoB, 0): {prB.PR},
+		},
+		observations: map[string]ports.SCMObservation{
+			prKey(repoA, 202): prA,
+			prKey(repoB, 201): prB,
+		},
+	}
+	lc := &fakeLifecycle{}
+	obs := New(provider, store, lc, Config{
+		Logger:                 quietSlog(),
+		Clock:                  func() time.Time { return time.Unix(1, 0).UTC() },
+		ScopedIdentityResolver: provider,
+	})
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(lc.observed) != 1 || lc.observed[0].PR.Number != 202 || lc.observed[0].Repo != "o/repo-a" {
+		t.Fatalf("workspace leaked remoteBranch across repos: observed=%+v; want only repo-a PR #202", lc.observed)
+	}
+	for _, w := range store.writes {
+		if w.pr.Repo == "o/repo-b" || w.pr.Number == 201 {
+			t.Fatalf("unrelated workspace repo PR #201 was falsely associated: %+v", w.pr)
+		}
+	}
+}
