@@ -43,14 +43,15 @@ func (s *quotaScriptedSource) Read(_ context.Context, targets []workerquota.Targ
 }
 
 type quotaScriptedChat struct {
-	mu               sync.Mutex
-	preflightErrs    map[domain.AgentHarness]error
-	startErrs        map[domain.AgentHarness]error
-	backgroundErrs   map[domain.AgentHarness]error
-	preflightCalls   []domain.AgentHarness
-	startCalls       []sessionmanager.ChatStart
-	backgroundCalls  []domain.AgentHarness
-	stopped          []domain.SessionID
+	mu              sync.Mutex
+	preflightErrs   map[domain.AgentHarness]error
+	preflightSeq    map[domain.AgentHarness][]error
+	startErrs       map[domain.AgentHarness]error
+	backgroundErrs  map[domain.AgentHarness]error
+	preflightCalls  []domain.AgentHarness
+	startCalls      []sessionmanager.ChatStart
+	backgroundCalls []domain.AgentHarness
+	stopped         []domain.SessionID
 }
 
 func (c *quotaScriptedChat) SupportsChat(domain.AgentHarness) bool { return true }
@@ -59,6 +60,13 @@ func (c *quotaScriptedChat) PreflightChat(_ context.Context, harness domain.Agen
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.preflightCalls = append(c.preflightCalls, harness)
+	if seq := c.preflightSeq[harness]; len(seq) > 0 {
+		err := seq[0]
+		if len(seq) > 1 {
+			c.preflightSeq[harness] = seq[1:]
+		}
+		return err
+	}
 	return c.preflightErrs[harness]
 }
 
@@ -506,4 +514,154 @@ func TestWorkerQuotaConfiguredPrimaryModeOverride(t *testing.T) {
 	if stack.rt.created != 1 || len(chat.startCalls) != 0 {
 		t.Fatalf("runtime created=%d chat starts=%d; want TUI only", stack.rt.created, len(chat.startCalls))
 	}
+}
+
+func TestWorkerQuotaOmittedModePreflightTransitions(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+	t.Run("preflight fails then would succeed launches TUI under TUI breaker and skips paused TUI to next route", func(t *testing.T) {
+		source := &quotaScriptedSource{now: now, blocked: map[domain.AgentHarness]bool{domain.HarnessCodex: true}}
+		chat := &quotaScriptedChat{
+			preflightSeq: map[domain.AgentHarness][]error{
+				// First check fails with auth required; any duplicate second check would return nil.
+				domain.HarnessAgy: {ports.ErrChatAuthRequired, nil},
+			},
+		}
+		policy := &workerquota.Policy{
+			Fallbacks: []workerquota.Target{
+				{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"},
+				{Harness: domain.HarnessClaudeCode, Model: "sonnet", Mode: domain.SessionModeChat},
+			},
+			Source: source,
+		}
+		stack := newQuotaTestStack(t, policy, chat, &quotaReadinessSpy{})
+		stack.rt.created = 0
+
+		// Pre-pause AGY Chat to verify an omitted-mode TUI fallback is not blocked by a paused Chat route.
+		chat.mu.Lock()
+		chat.startErrs = map[domain.AgentHarness]error{domain.HarnessAgy: ports.ErrChatAuthRequired}
+		chat.mu.Unlock()
+		// Seed 3 AGY/Chat failures directly using an explicit Chat route before testing omitted mode.
+		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeChat}}
+		intakeCfg := ports.SpawnConfig{
+			ProjectID: "ao", IssueID: "github:acme/ao#40", Kind: domain.KindWorker,
+			Prompt: "Pause chat first", CreatedBy: domain.SessionCreatedByAutomation,
+		}
+		for range 3 {
+			if _, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg); err == nil {
+				t.Fatal("expected AGY chat auth failure")
+			}
+		}
+
+		// Now switch fallback back to omitted mode, where preflight #1 fails and preflight #2 would succeed.
+		chat.mu.Lock()
+		chat.startErrs[domain.HarnessAgy] = nil
+		chat.preflightCalls = nil
+		chat.startCalls = nil
+		chat.preflightSeq[domain.HarnessAgy] = []error{ports.ErrChatAuthRequired, nil}
+		chat.mu.Unlock()
+		policy.Fallbacks = []workerquota.Target{
+			{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"},
+			{Harness: domain.HarnessClaudeCode, Model: "sonnet", Mode: domain.SessionModeChat},
+		}
+
+		sess, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg)
+		if err != nil {
+			t.Fatalf("omitted-mode TUI fallback failed: %v", err)
+		}
+		if sess.Harness != domain.HarnessAgy || sess.Mode != domain.SessionModeTUI {
+			t.Fatalf("session = %+v, want agy/tui (must not start Chat under TUI reservation)", sess)
+		}
+		if len(chat.preflightCalls) != 1 || len(chat.startCalls) != 0 {
+			t.Fatalf("preflight calls=%v chat starts=%d, want single preflight and zero chat starts", chat.preflightCalls, len(chat.startCalls))
+		}
+
+		// Conversely, if AGY/TUI is paused and preflight resolves to TUI, admission re-selects the healthy next route.
+		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeTUI}}
+		// Fail AGY/TUI 3 times via an unsupported model? Actually use binary-missing runtime error on TUI?
+		// Wait: AGENT_BINARY_NOT_FOUND pauses AGY/TUI. Use a failing runtime? LookPath isn't enough if stubAgent returns ["launch"].
+		// Better: pause AGY/TUI cleanly via explicit TUI with failing model? ValidateSpawnModel rejects before admission? No, admitter runs before validateSpawnModel!
+		// Wait: agy accepts any model in modelcatalog, so use an unknown/unsupported effort to trip UNSUPPORTED_EFFORT on AGY/TUI!
+		policy.Fallbacks = []workerquota.Target{{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Effort: "invalid-effort", Mode: domain.SessionModeTUI}}
+		for range 3 {
+			if _, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg); err == nil {
+				t.Fatal("expected AGY TUI config failure")
+			}
+		}
+		chat.mu.Lock()
+		chat.preflightSeq[domain.HarnessAgy] = []error{ports.ErrChatAuthRequired, nil}
+		chat.mu.Unlock()
+		policy.Fallbacks = []workerquota.Target{
+			{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Effort: "invalid-effort"},
+			{Harness: domain.HarnessClaudeCode, Model: "sonnet", Mode: domain.SessionModeChat},
+		}
+		intakeCfg.IssueID = "github:acme/ao#41"
+		sess, _, _, err = stack.svc.Spawn(t.Context(), intakeCfg)
+		if err != nil {
+			t.Fatalf("expected re-selection to claude-code when resolved TUI is paused: %v", err)
+		}
+		if sess.Harness != domain.HarnessClaudeCode || sess.Mode != domain.SessionModeChat {
+			t.Fatalf("re-selected session = %+v, want claude-code/chat", sess)
+		}
+	})
+
+	t.Run("preflight succeeds then would fail stays bound to Chat and charges Chat or skips paused Chat", func(t *testing.T) {
+		source := &quotaScriptedSource{now: now, blocked: map[domain.AgentHarness]bool{domain.HarnessCodex: true}}
+		chat := &quotaScriptedChat{
+			preflightSeq: map[domain.AgentHarness][]error{
+				domain.HarnessAgy: {nil, ports.ErrChatAuthRequired},
+			},
+			startErrs: map[domain.AgentHarness]error{
+				domain.HarnessAgy: ports.ErrChatAuthRequired,
+			},
+		}
+		policy := &workerquota.Policy{
+			Fallbacks: []workerquota.Target{
+				{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"},
+			},
+			Source: source,
+		}
+		stack := newQuotaTestStack(t, policy, chat, &quotaReadinessSpy{})
+		intakeCfg := ports.SpawnConfig{
+			ProjectID: "ao", IssueID: "github:acme/ao#42", Kind: domain.KindWorker,
+			Prompt: "Charge chat auth failures to chat", CreatedBy: domain.SessionCreatedByAutomation,
+		}
+		for i := range 3 {
+			chat.mu.Lock()
+			chat.preflightSeq[domain.HarnessAgy] = []error{nil, ports.ErrChatAuthRequired}
+			chat.mu.Unlock()
+			_, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg)
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) || apiErr.Code != "CHAT_AUTH_REQUIRED" {
+				t.Fatalf("attempt %d err = %v, want CHAT_AUTH_REQUIRED", i+1, err)
+			}
+			if apiErr.Details["harness"] != "agy" || apiErr.Details["mode"] != "chat" {
+				t.Fatalf("attempt %d details = %+v, want agy/chat", i+1, apiErr.Details)
+			}
+		}
+		if stack.rt.created != 0 {
+			t.Fatalf("unexpected TUI runtime launches = %d", stack.rt.created)
+		}
+		project, _, _ := stack.store.GetProject(t.Context(), "ao")
+		pauses := stack.svc.AutoSpawnPauses(t.Context(), project)
+		if len(pauses) != 1 || pauses[0].Harness != domain.HarnessAgy || pauses[0].Mode != domain.SessionModeChat {
+			t.Fatalf("pauses = %+v, want agy/chat pause", pauses)
+		}
+
+		// With AGY/Chat paused and preflight #1 succeeding, admission skips AGY/Chat and launches the healthy fallback.
+		chat.mu.Lock()
+		chat.preflightSeq[domain.HarnessAgy] = []error{nil, ports.ErrChatAuthRequired}
+		chat.mu.Unlock()
+		policy.Fallbacks = []workerquota.Target{
+			{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low"},
+			{Harness: domain.HarnessClaudeCode, Model: "sonnet", Mode: domain.SessionModeChat},
+		}
+		sess, _, _, err := stack.svc.Spawn(t.Context(), intakeCfg)
+		if err != nil {
+			t.Fatalf("healthy fallback failed when AGY/Chat was paused: %v", err)
+		}
+		if sess.Harness != domain.HarnessClaudeCode || sess.Mode != domain.SessionModeChat {
+			t.Fatalf("session = %+v, want claude-code/chat", sess)
+		}
+	})
 }

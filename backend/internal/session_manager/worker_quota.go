@@ -40,23 +40,41 @@ func automaticQuotaWorker(cfg ports.SpawnConfig) bool {
 		cfg.RequestedMode == ""
 }
 
+type quotaSelection struct {
+	active           bool
+	remaining        []workerquota.Target
+	mode             domain.SessionMode
+	chatPreflighted  bool
+	chatPreflightErr error
+}
+
 func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectRecord) ([]workerquota.Target, error) {
+	sel, err := m.selectWorkerQuota(ctx, cfg, project)
+	if err != nil {
+		return nil, err
+	}
+	return sel.remaining, nil
+}
+
+func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectRecord) (quotaSelection, error) {
 	policy := m.workerQuota
 	if policy == nil || !automaticQuotaWorker(*cfg) {
-		return nil, nil
+		return quotaSelection{}, nil
 	}
 	harness := effectiveHarness("", cfg.Kind, project.Config)
 	base := effectiveAgentConfig(harness, cfg.Kind, project.Config)
 	primary := workerquota.Target{Harness: harness, Model: base.Model, Effort: base.Effort}
 	targets := policy.Targets(primary)
 	if len(targets) == 0 {
-		return nil, nil
+		return quotaSelection{}, nil
 	}
 	defaults := policy.DefaultModels(ctx, *project, targets)
 	windows := m.workerQuotaWindows(ctx, targets, defaults)
 	admitter := autoSpawnAdmitterFrom(ctx)
 	var selected workerquota.Target
-	var effectiveMode domain.SessionMode
+	var selectedMode domain.SessionMode
+	var selectedPreflighted bool
+	var selectedPreflightErr error
 	var remaining []workerquota.Target
 	var blocked bool
 	var firstPauseErr error
@@ -65,36 +83,48 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 			blocked = true
 			continue
 		}
-		if (policy.Primary == nil && route == primary) || m.quotaTargetReady(ctx, route, project.Config, *cfg) {
-			routeModel := route.Model
-			if routeModel == "" {
-				routeModel = defaults[route.Harness]
-			}
-			routeMode := m.effectiveQuotaRouteMode(ctx, route, project.Config, *cfg)
-			if admitter != nil {
-				admitted, pauseErr := admitter.TryAdmit(route.Harness, routeModel, route.Effort, routeMode)
-				if !admitted {
-					if firstPauseErr == nil {
-						firstPauseErr = pauseErr
-					}
-					continue
-				}
-			}
-			selected, effectiveMode, remaining = route, routeMode, targets[i+1:]
-			break
+		bypassReady := policy.Primary == nil && route == primary
+		ready, preflighted := true, false
+		if !bypassReady {
+			ready, preflighted = m.quotaTargetReady(ctx, route, project.Config, *cfg)
 		}
+		if !ready {
+			continue
+		}
+		routeModel := route.Model
+		if routeModel == "" {
+			routeModel = defaults[route.Harness]
+		}
+		var routeMode domain.SessionMode
+		var preflightErr error
+		if preflighted {
+			routeMode = domain.SessionModeChat
+		} else {
+			routeMode, preflighted, preflightErr = m.resolveQuotaRouteMode(ctx, route, project.Config, *cfg)
+		}
+		if admitter != nil {
+			admitted, pauseErr := admitter.TryAdmit(route.Harness, routeModel, route.Effort, routeMode)
+			if !admitted {
+				if firstPauseErr == nil {
+					firstPauseErr = pauseErr
+				}
+				continue
+			}
+		}
+		selected, selectedMode, selectedPreflighted, selectedPreflightErr, remaining = route, routeMode, preflighted, preflightErr, targets[i+1:]
+		break
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return quotaSelection{}, err
 	}
 	if selected.Harness == "" {
 		if firstPauseErr != nil {
-			return nil, firstPauseErr
+			return quotaSelection{}, firstPauseErr
 		}
 		if blocked {
-			return nil, workerquota.ErrDeferred
+			return quotaSelection{}, workerquota.ErrDeferred
 		}
-		return nil, workerquota.ErrNoReadyRoute
+		return quotaSelection{}, workerquota.ErrNoReadyRoute
 	}
 	if selected != primary {
 		cfg.Harness = selected.Harness
@@ -115,9 +145,15 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 	if selected != primary || selected.Mode != "" {
 		m.logger.Info("worker quota selected configured route",
 			"project", cfg.ProjectID, "harness", selected.Harness,
-			"model", cfg.AgentConfig.Model, "effort", selected.Effort, "mode", effectiveMode)
+			"model", cfg.AgentConfig.Model, "effort", selected.Effort, "mode", selectedMode)
 	}
-	return remaining, nil
+	return quotaSelection{
+		active:           true,
+		remaining:        remaining,
+		mode:             selectedMode,
+		chatPreflighted:  selectedPreflighted,
+		chatPreflightErr: selectedPreflightErr,
+	}, nil
 }
 
 func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.Target, defaults map[domain.AgentHarness]string) map[workerquota.Target][]workerquota.Window {
@@ -139,52 +175,52 @@ func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.
 	return windows
 }
 
-func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) bool {
+func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (ready, chatPreflighted bool) {
 	if _, ok := m.agents.Agent(target.Harness); !ok || validateSpawnModel(target.Harness, target.Model) != nil {
-		return false
+		return false, false
 	}
 	if !target.Harness.SupportsMode(target.Mode) {
-		return false
+		return false, false
 	}
 	if target.Mode == domain.SessionModeTUI && m.validateRuntimePrerequisites() != nil {
-		return false
+		return false, false
 	}
 	if m.agentReadiness != nil {
 		readiness, err := m.agentReadiness.EnsureAgentReadiness(ctx, string(target.Harness), domain.AgentReadinessPurposeLaunch)
 		if err != nil || readiness.Installation.State == domain.AgentInstallationNotInstalled {
-			return false
+			return false, false
 		}
 		if readiness.Authentication.State == domain.AgentAuthenticationUnauthorized && readiness.Authentication.Freshness == domain.AgentReadinessFresh {
 			if !(target.Harness == domain.HarnessAgy && target.Mode == domain.SessionModeTUI) {
-				return false
+				return false, false
 			}
 		}
 	}
 	if target.Mode == domain.SessionModeChat || (target.Mode == "" && (cfg.RequestedMode == domain.SessionModeChat || target.Harness.ChatOnly())) {
 		if m.chat == nil || !m.chat.SupportsChat(target.Harness) {
-			return false
+			return false, false
 		}
 		targetCfg := cfg
 		targetCfg.Harness = target.Harness
 		permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
-		return m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)) == nil
+		return m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)) == nil, true
 	}
-	return true
+	return true, false
 }
 
-func (m *Manager) effectiveQuotaRouteMode(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) domain.SessionMode {
+func (m *Manager) resolveQuotaRouteMode(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (mode domain.SessionMode, chatPreflighted bool, preflightErr error) {
 	if target.Mode != "" {
-		return target.Mode
+		return target.Mode, false, nil
 	}
 	if target.Harness.ChatOnly() {
-		return domain.SessionModeChat
+		return domain.SessionModeChat, false, nil
 	}
-	mode := m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
+	mode = m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
 	if mode != domain.SessionModeChat {
-		return mode
+		return mode, false, nil
 	}
 	if m.chat == nil {
-		return domain.SessionModeTUI
+		return domain.SessionModeTUI, true, nil
 	}
 	targetCfg := cfg
 	targetCfg.Harness = target.Harness
@@ -195,10 +231,11 @@ func (m *Manager) effectiveQuotaRouteMode(ctx context.Context, target workerquot
 			errors.Is(err, ports.ErrChatDriverIncompatible) ||
 			errors.Is(err, ports.ErrChatAuthRequired)
 		if fallbackAllowed {
-			return domain.SessionModeTUI
+			return domain.SessionModeTUI, true, nil
 		}
+		return domain.SessionModeChat, true, err
 	}
-	return domain.SessionModeChat
+	return domain.SessionModeChat, true, nil
 }
 
 func (m *Manager) quotaTargetPermissions(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) ports.PermissionMode {

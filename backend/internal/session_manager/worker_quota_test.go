@@ -26,9 +26,9 @@ func (r quotaTestReadiness) EnsureAgentReadiness(_ context.Context, agentID stri
 		Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
 	}, nil
 }
-func (quotaTestReadiness) InvalidateAgentInstallation(string) {}
+func (quotaTestReadiness) InvalidateAgentInstallation(string)   {}
 func (quotaTestReadiness) InvalidateAgentAuthentication(string) {}
-func (quotaTestReadiness) RecheckAgent(string) {}
+func (quotaTestReadiness) RecheckAgent(string)                  {}
 
 type testQuotaSource struct {
 	now     time.Time

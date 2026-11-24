@@ -1160,10 +1160,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		cfg.AgentConfig.Permissions = permissions
 	}
-	remainingRoutes, quotaErr := m.selectWorkerQuotaTarget(ctx, &cfg, &project)
+	quota, quotaErr := m.selectWorkerQuota(ctx, &cfg, &project)
 	if quotaErr != nil {
 		return domain.SessionRecord{}, 0, 0, quotaErr
 	}
+	remainingRoutes := quota.remaining
 
 	// A per-project role override picks the harness when the spawn names none,
 	// so a project can default workers to one agent and orchestrators to another.
@@ -1173,7 +1174,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	NoteSpawnHarness(ctx, cfg.Harness)
 	admitter := autoSpawnAdmitterFrom(ctx)
-	if admitter != nil && remainingRoutes == nil {
+	if admitter != nil && !quota.active {
 		initialMode := m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
 		if cfg.Harness.ChatOnly() && cfg.RequestedMode != domain.SessionModeTUI {
 			initialMode = domain.SessionModeChat
@@ -1232,6 +1233,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	// if it is unavailable for this harness or installation, fall back to TUI.
 	modeExplicitlyRequested := cfg.RequestedMode.Valid()
 	mode := m.resolveSessionMode(ctx, cfg.Kind, cfg.RequestedMode)
+	if quota.active && quota.mode != "" {
+		mode = quota.mode
+	}
 	NoteSpawnLaunch(ctx, mode, false)
 	if mode == domain.SessionModeChat && m.chat != nil && cfg.AgentConfig.Permissions == "" &&
 		effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config).Permissions == "" {
@@ -1249,7 +1253,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 	}
 	if mode == domain.SessionModeChat {
-		if m.chat == nil {
+		if quota.active && quota.chatPreflighted {
+			if quota.chatPreflightErr != nil {
+				return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", agentlaunch.RedactError(quota.chatPreflightErr, project.Config.Env))
+			}
+		} else if m.chat == nil {
 			if modeExplicitlyRequested {
 				return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: chat mode is not available in this build", ports.ErrChatUnsupported)
 			}
