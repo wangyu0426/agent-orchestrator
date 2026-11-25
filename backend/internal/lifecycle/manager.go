@@ -721,6 +721,19 @@ retryProjection:
 	// Conversation text is meaningful only inside one provider identity, owner
 	// generation, and main turn. Reduce it as one durable state machine so a Stop
 	// whose UserPromptSubmit was lost can never borrow the prior turn's prompt.
+	if rec.Harness == domain.HarnessAgy && s.TranscriptPath != "" && !agyTranscriptMatchesSession(rec, s) {
+		// Sanitize transcript-derived and identity-binding fields before any
+		// metadata, checkpoint, or terminal-turn projection so a mismatched or
+		// cross-session transcript signal can never corrupt NativeTranscriptPath
+		// or rebind AgentSessionID, while preserving valid activity health.
+		s.TranscriptPath = ""
+		s.AgentSessionID = ""
+		s.FinalAssistantMessage = ""
+		s.TurnUserRequest = ""
+		s.ProviderTurnID = ""
+		s.LatestAssistantUpdate = ""
+		s.LatestUserPrompt = ""
+	}
 	checkpoint := rec.Metadata
 	previousNativeID := rec.Metadata.AgentSessionID
 	if previousNativeID == "" {

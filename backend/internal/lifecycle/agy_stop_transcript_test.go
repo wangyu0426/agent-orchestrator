@@ -107,13 +107,35 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 	}
 
 	// Cross-session transcript path mismatch (session bound to conv-1, but
-	// transcriptPath points to brain/conv-2) must not persist a turn.
+	// transcriptPath points to brain/conv-2) must not persist a turn or corrupt
+	// NativeTranscriptPath / AgentSessionID.
 	crossSession := stopSignal
+	crossSession.Timestamp = now.Add(40 * time.Second)
 	crossSession.ProviderTurnID = "step:99"
 	crossSession.TranscriptPath = "/home/test/.gemini/antigravity-cli/brain/conv-2/.system_generated/logs/transcript.jsonl"
 	crossSession.FinalAssistantMessage = "leaked from conv-2"
 	if err := mgr.ApplyActivitySignal(ctx, rec.ID, crossSession); err != nil {
 		t.Fatalf("cross-session stop signal: %v", err)
+	}
+	// A newer Stop carrying conv-2 as both AgentSessionID and TranscriptPath
+	// must also be rejected without replacing the conv-1 binding or path.
+	rebindAttempt := crossSession
+	rebindAttempt.Timestamp = now.Add(50 * time.Second)
+	rebindAttempt.AgentSessionID = "conv-2"
+	rebindAttempt.ProviderTurnID = "step:100"
+	if err := mgr.ApplyActivitySignal(ctx, rec.ID, rebindAttempt); err != nil {
+		t.Fatalf("rebind attempt stop signal: %v", err)
+	}
+
+	afterCross, ok, err := st.GetSession(ctx, rec.ID)
+	if err != nil || !ok {
+		t.Fatalf("get session after cross-session: ok=%v err=%v", ok, err)
+	}
+	if afterCross.Metadata.AgentSessionID != "conv-1" {
+		t.Fatalf("AgentSessionID = %q, want conv-1 (must not rebind)", afterCross.Metadata.AgentSessionID)
+	}
+	if afterCross.Metadata.NativeTranscriptPath != stopSignal.TranscriptPath {
+		t.Fatalf("NativeTranscriptPath = %q, want %q (must not be overwritten)", afterCross.Metadata.NativeTranscriptPath, stopSignal.TranscriptPath)
 	}
 	turns, err = st.ListTerminalTurns(ctx, rec.ID)
 	if err != nil {
@@ -124,9 +146,9 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 	}
 
 	// Simulate recovery/relaunch: RuntimeLaunchID advances and FirstSignalAt resets.
-	gotRec.Metadata.RuntimeLaunchID = "launch-2"
-	gotRec.FirstSignalAt = time.Time{}
-	if err := st.UpdateSession(ctx, gotRec); err != nil {
+	afterCross.Metadata.RuntimeLaunchID = "launch-2"
+	afterCross.FirstSignalAt = time.Time{}
+	if err := st.UpdateSession(ctx, afterCross); err != nil {
 		t.Fatalf("update session for recovery: %v", err)
 	}
 
