@@ -558,15 +558,39 @@ func TestNativeConversationExistsModeScoped(t *testing.T) {
 	}
 	_ = db.Close()
 
-	// Chat probe must NOT find the CLI-only database.
+	// Chat probe MUST also find the CLI database (built-in `agy acp` stores there).
 	exists, err = plugin.NativeConversationExists(context.Background(), chatRef, "conv-2", env)
-	if err != nil || exists {
-		t.Fatalf("chat probe found CLI database: exists = %v, err = %v; want false, nil", exists, err)
+	if err != nil || !exists {
+		t.Fatalf("chat probe failed to find CLI database: exists = %v, err = %v; want true, nil", exists, err)
 	}
 
 	// TUI probe MUST find the CLI database.
 	exists, err = plugin.NativeConversationExists(context.Background(), tuiRef, "conv-2", env)
 	if err != nil || !exists {
 		t.Fatalf("tui probe failed to find CLI database: exists = %v, err = %v; want true, nil", exists, err)
+	}
+}
+
+func TestPrepareInterfaceHandoffStorageChatToTUIAllowsNativeCLIStorage(t *testing.T) {
+	home := t.TempDir()
+	cliDB := filepath.Join(home, CLIStorageDir, "conversations", "conv-cli-acp.db")
+	if err := os.MkdirAll(filepath.Dir(cliDB), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cliDB, []byte("cli-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := New()
+	err := plugin.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeChat,
+		domain.SessionModeTUI,
+		"conv-cli-acp",
+		map[string]string{"GEMINI_HOME": home},
+	)
+	if err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI) for antigravity-cli db: %v", err)
 	}
 }

@@ -122,14 +122,14 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 	}
 }
 
-// cliLaunchArgs starts `agy acp` with its Chat data in antigravity-acp, where
-// the separate server keeps it, so AO's history checks and the Chat/terminal
-// handoff find it, and a Chat started on the separate server resumes. `agy acp`
-// ignores the GEMINI_HOME variable and stores under its --gemini-dir, so a
-// GEMINI_HOME set for the session or inherited by the daemon is passed as that
-// flag, the same precedence agy.GeminiHome uses.
+// cliLaunchArgs starts `agy acp` using the user's normal logged-in CLI profile
+// (default --app-data-dir antigravity-cli) rather than overriding --app-data-dir
+// to antigravity-acp, which lacks the host CLI's persisted authentication.
+// `agy acp` ignores the GEMINI_HOME variable and stores under its --gemini-dir,
+// so a GEMINI_HOME set for the session or inherited by the daemon is passed as
+// that flag, the same precedence agy.GeminiHome uses.
 func cliLaunchArgs(env map[string]string, getenv func(string) string) []string {
-	args := []string{"acp", "--app-data-dir", agy.ACPStorageDir}
+	args := []string{"acp"}
 	home := strings.TrimSpace(env["GEMINI_HOME"])
 	if home == "" {
 		home = strings.TrimSpace(getenv("GEMINI_HOME"))
@@ -216,10 +216,14 @@ func sessionMode(permission ports.PermissionMode) string {
 }
 
 func sessionOptions(settings ports.ChatTurnSettings) []acpdriver.SessionOption {
+	var options []acpdriver.SessionOption
 	if model := strings.TrimSpace(settings.Model); model != "" {
-		return []acpdriver.SessionOption{{ID: "model", Value: model}}
+		options = append(options, acpdriver.SessionOption{ID: "model", Value: model})
 	}
-	return nil
+	if effort := strings.TrimSpace(settings.Effort); effort != "" {
+		options = append(options, acpdriver.SessionOption{ID: "thought_level", Value: effort})
+	}
+	return options
 }
 
 // sessionPreamble delivers AO's standing instructions as a text block ahead of

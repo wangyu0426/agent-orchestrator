@@ -196,10 +196,12 @@ func (p *Plugin) NativeConversationExists(
 	if err != nil {
 		return false, err
 	}
-	modeDirs := []string{ACPStorageDir, CLIStorageDir}
+	modeDirs := []string{CLIStorageDir, ACPStorageDir}
 	if rawMode := session.Metadata[ports.MetadataKeySessionMode]; rawMode != "" {
 		if mode := domain.NormalizeSessionMode(domain.SessionMode(rawMode)); mode == domain.SessionModeChat {
-			modeDirs = []string{ACPStorageDir}
+			// Built-in `agy acp` stores conversations in antigravity-cli, while
+			// the separate agy_acp_server stores them in antigravity-acp.
+			modeDirs = []string{CLIStorageDir, ACPStorageDir}
 		} else if mode == domain.SessionModeTUI {
 			modeDirs = []string{CLIStorageDir}
 		}
@@ -251,6 +253,17 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	}
 	switch {
 	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
+		id := strings.TrimSpace(nativeConversationID)
+		if id != "" && validConversationID(id) {
+			acpDB := filepath.Join(home, ACPStorageDir, "conversations", id+".db")
+			cliDB := filepath.Join(home, CLIStorageDir, "conversations", id+".db")
+			if _, err := os.Stat(acpDB); errors.Is(err, os.ErrNotExist) {
+				if _, cliErr := os.Stat(cliDB); cliErr == nil {
+					// Built-in `agy acp` already stores conversations in antigravity-cli.
+					return nil
+				}
+			}
+		}
 		return BridgeConversationToCLI(home, nativeConversationID)
 	case from == domain.SessionModeTUI && to == domain.SessionModeChat:
 		return BridgeConversationToACP(home, nativeConversationID)
