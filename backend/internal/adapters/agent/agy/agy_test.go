@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -588,6 +589,14 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 	if err := os.WriteFile(acpDB, []byte("stale-acp-snapshot"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	older := time.Now().Add(-time.Minute)
+	newer := time.Now()
+	if err := os.Chtimes(acpDB, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cliDB, newer, newer); err != nil {
+		t.Fatal(err)
+	}
 
 	plugin := &Plugin{
 		resolvedBinary: "/usr/local/bin/agy",
@@ -596,7 +605,7 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 	env := map[string]string{"GEMINI_HOME": home}
 
 	// Chat -> TUI under native `agy acp` must NOT overwrite the active CLI DB
-	// with a stale antigravity-acp copy.
+	// with an older antigravity-acp copy.
 	if err := plugin.PrepareInterfaceHandoffStorage(
 		context.Background(),
 		ports.SessionRef{},
@@ -613,6 +622,33 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 	}
 	if string(got) != "newer-native-acp-db" {
 		t.Fatalf("cliDB = %q, want %q (must not overwrite with stale ACP snapshot)", string(got), "newer-native-acp-db")
+	}
+
+	// If an old-profile Chat session updated antigravity-acp AFTER an earlier
+	// TUI->Chat bridge, antigravity-acp is newer and MUST be bridged into CLI.
+	if err := os.WriteFile(acpDB, []byte("newer-old-profile-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evenNewer := newer.Add(time.Minute)
+	if err := os.Chtimes(acpDB, evenNewer, evenNewer); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeChat,
+		domain.SessionModeTUI,
+		id,
+		env,
+	); err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI, newer ACP): %v", err)
+	}
+	got, err = os.ReadFile(cliDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newer-old-profile-acp-db" {
+		t.Fatalf("cliDB = %q, want %q (must bridge newer old-profile ACP DB)", string(got), "newer-old-profile-acp-db")
 	}
 
 	// TUI -> Chat under native `agy acp` must NOT create a stale copy in antigravity-acp.
@@ -638,6 +674,9 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 
 	// With AO_AGY_ACP_SERVER_PATH set (legacy separate server), Chat -> TUI
 	// still bridges antigravity-acp -> antigravity-cli.
+	if err := os.WriteFile(acpDB, []byte("legacy-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	legacyEnv := map[string]string{
 		"GEMINI_HOME":            home,
 		"AO_AGY_ACP_SERVER_PATH": "/opt/agy_acp_server",
@@ -656,7 +695,7 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "stale-acp-snapshot" {
-		t.Fatalf("legacy server cliDB = %q, want %q", string(got), "stale-acp-snapshot")
+	if string(got) != "legacy-acp-db" {
+		t.Fatalf("legacy server cliDB = %q, want %q", string(got), "legacy-acp-db")
 	}
 }

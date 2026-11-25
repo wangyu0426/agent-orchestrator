@@ -259,15 +259,18 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	switch {
 	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
 		if nativeCLIACP {
-			// Native `agy acp` writes directly to antigravity-cli. Never
-			// overwrite the active CLI database with a stale antigravity-acp
-			// snapshot; only bridge if the conversation exists solely in
-			// antigravity-acp (e.g., created by an older agy_acp_server).
+			// Native `agy acp` writes directly to antigravity-cli, while an
+			// older Chat session (prior to upgrade or under agy_acp_server) may
+			// have written newer turns to antigravity-acp. Only skip bridging
+			// when antigravity-cli exists and is at least as fresh as any
+			// antigravity-acp database.
 			id := strings.TrimSpace(nativeConversationID)
 			if id != "" && validConversationID(id) {
-				cliDB := filepath.Join(home, CLIStorageDir, "conversations", id+".db")
-				if _, err := os.Stat(cliDB); err == nil {
-					return nil
+				if cliMod, cliOK := conversationModTime(filepath.Join(home, CLIStorageDir), id); cliOK {
+					acpMod, acpOK := conversationModTime(filepath.Join(home, ACPStorageDir), id)
+					if !acpOK || !acpMod.After(cliMod) {
+						return nil
+					}
 				}
 			}
 		}
@@ -282,6 +285,19 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	default:
 		return nil
 	}
+}
+
+func conversationModTime(storageRoot, id string) (time.Time, bool) {
+	dbPath := filepath.Join(storageRoot, "conversations", id+".db")
+	info, err := os.Stat(dbPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return time.Time{}, false
+	}
+	newest := info.ModTime()
+	if walInfo, err := os.Stat(dbPath + "-wal"); err == nil && walInfo.Mode().IsRegular() && walInfo.ModTime().After(newest) {
+		newest = walInfo.ModTime()
+	}
+	return newest, true
 }
 
 const (
