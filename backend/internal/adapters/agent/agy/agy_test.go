@@ -672,14 +672,23 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 		t.Fatalf("TUI->Chat under native agy acp unexpectedly wrote %s (stat err=%v)", acpDB2, err)
 	}
 
-	// With AO_AGY_ACP_SERVER_PATH set (legacy separate server), Chat -> TUI
-	// still bridges antigravity-acp -> antigravity-cli.
-	if err := os.WriteFile(acpDB, []byte("legacy-acp-db"), 0o600); err != nil {
+	// A project-only AO_AGY_ACP_SERVER_PATH in session env (not process env)
+	// must NOT diverge from agyacp's resolver: native CLI storage stays active.
+	if err := os.WriteFile(cliDB, []byte("newer-native-acp-db"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacyEnv := map[string]string{
-		"GEMINI_HOME":            home,
-		"AO_AGY_ACP_SERVER_PATH": "/opt/agy_acp_server",
+	if err := os.WriteFile(acpDB, []byte("older-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(acpDB, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cliDB, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	projectOnlyEnv := map[string]string{
+		"GEMINI_HOME":       home,
+		ACPServerPathEnvVar: "/opt/agy_acp_server",
 	}
 	if err := plugin.PrepareInterfaceHandoffStorage(
 		context.Background(),
@@ -687,7 +696,55 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 		domain.SessionModeChat,
 		domain.SessionModeTUI,
 		id,
-		legacyEnv,
+		projectOnlyEnv,
+	); err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(project-only override): %v", err)
+	}
+	got, err = os.ReadFile(cliDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newer-native-acp-db" {
+		t.Fatalf("project-only override overwrote cliDB = %q, want %q", string(got), "newer-native-acp-db")
+	}
+
+	// A version probe failure must fail closed rather than authorizing
+	// destructive bridging over the CLI database.
+	failingProbe := &Plugin{
+		resolvedBinary: "/usr/local/bin/agy",
+		cliVersionFn:   func(context.Context, string) (string, error) { return "", errors.New("probe failed") },
+	}
+	if err := failingProbe.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeChat,
+		domain.SessionModeTUI,
+		id,
+		env,
+	); err == nil {
+		t.Fatal("expected probe failure to return an error instead of bridging")
+	}
+	got, err = os.ReadFile(cliDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "newer-native-acp-db" {
+		t.Fatalf("probe failure overwrote cliDB = %q, want %q", string(got), "newer-native-acp-db")
+	}
+
+	// With AO_AGY_ACP_SERVER_PATH set in process env (legacy separate server),
+	// Chat -> TUI still bridges antigravity-acp -> antigravity-cli.
+	t.Setenv(ACPServerPathEnvVar, "/opt/agy_acp_server")
+	if err := os.WriteFile(acpDB, []byte("legacy-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeChat,
+		domain.SessionModeTUI,
+		id,
+		env,
 	); err != nil {
 		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI, legacy server): %v", err)
 	}

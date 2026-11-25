@@ -255,7 +255,10 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	if err != nil {
 		return err
 	}
-	nativeCLIACP := p.chatUsesCLIStorage(ctx, env)
+	nativeCLIACP, err := p.chatUsesCLIStorage(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve Antigravity ACP backend for handoff: %w", err)
+	}
 	switch {
 	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
 		if nativeCLIACP {
@@ -301,7 +304,15 @@ func conversationModTime(storageRoot, id string) (time.Time, bool) {
 }
 
 const (
-	acpServerPathEnvVar  = "AO_AGY_ACP_SERVER_PATH"
+	// ACPServerPathEnvVar points AO at an exact legacy agy_acp_server executable.
+	// Shared between agy storage handoff and agyacp process launch so both
+	// consult the daemon's process environment identically.
+	ACPServerPathEnvVar = "AO_AGY_ACP_SERVER_PATH"
+
+	// MinimumCLIACPVersion is the first agy CLI release whose built-in
+	// `agy acp` AO launches.
+	MinimumCLIACPVersion = "1.5.4"
+
 	minNativeCLIACPMajor = 1
 	minNativeCLIACPMinor = 5
 	minNativeCLIACPPatch = 4
@@ -312,13 +323,22 @@ var agyVersionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
 // chatUsesCLIStorage reports whether AO's Chat backend for agy launches the
 // built-in `agy acp` subcommand (which shares antigravity-cli storage with
 // TUI) rather than the separate agy_acp_server (which uses antigravity-acp).
-func (p *Plugin) chatUsesCLIStorage(ctx context.Context, env map[string]string) bool {
-	if strings.TrimSpace(env[acpServerPathEnvVar]) != "" || strings.TrimSpace(os.Getenv(acpServerPathEnvVar)) != "" {
-		return false
+// It mirrors agyacp's resolver contract by consulting only the daemon process
+// environment for ACPServerPathEnvVar, and fails closed on probe errors so a
+// transient probe failure never authorizes destructive bridging.
+func (p *Plugin) chatUsesCLIStorage(ctx context.Context) (bool, error) {
+	if strings.TrimSpace(os.Getenv(ACPServerPathEnvVar)) != "" {
+		return false, nil
 	}
 	binary, err := p.agyBinary(ctx)
-	if err != nil || binary == "" {
-		return false
+	if err != nil {
+		if errors.Is(err, ports.ErrAgentBinaryNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if binary == "" {
+		return false, nil
 	}
 	versionFn := p.cliVersionFn
 	if versionFn == nil {
@@ -326,9 +346,9 @@ func (p *Plugin) chatUsesCLIStorage(ctx context.Context, env map[string]string) 
 	}
 	raw, err := versionFn(ctx, binary)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("probe agy --version: %w", err)
 	}
-	return isNativeCLIACPVersion(raw)
+	return IsNativeCLIACPVersion(raw), nil
 }
 
 func probeCLIVersion(ctx context.Context, binary string) (string, error) {
@@ -341,7 +361,8 @@ func probeCLIVersion(ctx context.Context, binary string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func isNativeCLIACPVersion(raw string) bool {
+// IsNativeCLIACPVersion reports whether raw is a semver >= MinimumCLIACPVersion.
+func IsNativeCLIACPVersion(raw string) bool {
 	match := agyVersionPattern.FindStringSubmatch(strings.TrimSpace(raw))
 	if len(match) != 4 {
 		return false
