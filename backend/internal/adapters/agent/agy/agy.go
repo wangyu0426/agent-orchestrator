@@ -259,48 +259,29 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	if err != nil {
 		return fmt.Errorf("resolve Antigravity ACP backend for handoff: %w", err)
 	}
-	switch {
-	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
-		if nativeCLIACP {
-			// Native `agy acp` writes directly to antigravity-cli, while an
-			// older Chat session (prior to upgrade or under agy_acp_server) may
-			// have written newer turns to antigravity-acp. Only skip bridging
-			// when antigravity-cli exists and is at least as fresh as any
-			// antigravity-acp database.
-			id := strings.TrimSpace(nativeConversationID)
-			if id != "" && validConversationID(id) {
-				if cliMod, cliOK := conversationModTime(filepath.Join(home, CLIStorageDir), id); cliOK {
-					acpMod, acpOK := conversationModTime(filepath.Join(home, ACPStorageDir), id)
-					if !acpOK || !acpMod.After(cliMod) {
-						return nil
-					}
-				}
+	if nativeCLIACP && ((from == domain.SessionModeChat && to == domain.SessionModeTUI) || (from == domain.SessionModeTUI && to == domain.SessionModeChat)) {
+		// Native `agy acp` and TUI share antigravity-cli storage; no copying in
+		// either direction. Fail closed if unexpected antigravity-acp history
+		// exists rather than overwriting or silently migrating it.
+		id := strings.TrimSpace(nativeConversationID)
+		if id != "" && validConversationID(id) {
+			acpDB := filepath.Join(home, ACPStorageDir, "conversations", id+".db")
+			if _, statErr := os.Stat(acpDB); statErr == nil {
+				return fmt.Errorf("unexpected legacy Antigravity ACP conversation %s in %s; refusing to overwrite native %s storage", id, ACPStorageDir, CLIStorageDir)
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("inspect Antigravity ACP storage for %s: %w", id, statErr)
 			}
 		}
+		return nil
+	}
+	switch {
+	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
 		return BridgeConversationToCLI(home, nativeConversationID)
 	case from == domain.SessionModeTUI && to == domain.SessionModeChat:
-		if nativeCLIACP {
-			// Native `agy acp` reads directly from antigravity-cli, so no
-			// copy into antigravity-acp is needed.
-			return nil
-		}
 		return BridgeConversationToACP(home, nativeConversationID)
 	default:
 		return nil
 	}
-}
-
-func conversationModTime(storageRoot, id string) (time.Time, bool) {
-	dbPath := filepath.Join(storageRoot, "conversations", id+".db")
-	info, err := os.Stat(dbPath)
-	if err != nil || !info.Mode().IsRegular() {
-		return time.Time{}, false
-	}
-	newest := info.ModTime()
-	if walInfo, err := os.Stat(dbPath + "-wal"); err == nil && walInfo.Mode().IsRegular() && walInfo.ModTime().After(newest) {
-		newest = walInfo.ModTime()
-	}
-	return newest, true
 }
 
 const (
