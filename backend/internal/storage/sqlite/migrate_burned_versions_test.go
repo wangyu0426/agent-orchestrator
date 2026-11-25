@@ -273,6 +273,7 @@ var shippedMigrations = map[int64]string{
 	20261124024118378: "20261124024118378_worker_quota_failover.sql",
 	20261124061652631: "20261124061652631_terminate_on_pr_merge_default.sql",
 	20261124063412660: "20261124063412660_worker_quota_route_order.sql",
+	20261125023619438: "20261125023619438_reviewer_quota_deferral.sql",
 	20261124225346234: "20261124225346234_terminal_turn_provider_id.sql",
 }
 

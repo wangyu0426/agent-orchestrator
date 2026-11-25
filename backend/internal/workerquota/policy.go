@@ -9,11 +9,44 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+// Role identifies which AO execution role a quota policy governs.
+type Role string
+
+const (
+	// RoleWorker governs automatic worker session launches and in-flight handoffs.
+	RoleWorker Role = "worker"
+	// RoleReviewer governs automatic PR reviewer invocations.
+	RoleReviewer Role = "reviewer"
+	// RoleOrchestrator governs automatic orchestrator launches and in-flight parking.
+	RoleOrchestrator Role = "orchestrator"
+)
+
 // ErrDeferred indicates that quota blocked every otherwise eligible route.
 var ErrDeferred = errors.New("automatic worker deferred: all eligible providers have exhausted quota")
 
 // ErrNoReadyRoute indicates that no configured provider could be launched.
 var ErrNoReadyRoute = errors.New("no configured worker quota route is ready to launch")
+
+// DeferredError wraps ErrDeferred with role attribution and an optional
+// reset-aware retry deadline computed from the exhausted quota windows.
+type DeferredError struct {
+	Role    Role
+	RetryAt time.Time
+	Reason  string
+}
+
+func (e *DeferredError) Error() string {
+	role := e.Role
+	if role == "" {
+		role = RoleWorker
+	}
+	if e.Reason != "" {
+		return "automatic " + string(role) + " deferred: " + e.Reason
+	}
+	return "automatic " + string(role) + " deferred: all eligible providers have exhausted quota"
+}
+
+func (e *DeferredError) Unwrap() error { return ErrDeferred }
 
 // Target describes a worker launch choice.
 type Target = domain.WorkerQuotaTarget
@@ -51,8 +84,61 @@ func Select(targets []Target, windows map[Target][]Window, now time.Time) (Targe
 	return Target{}, false
 }
 
-// Policy applies one ordered worker configuration across projects.
+// NextResetAt returns the earliest future reset (or validity expiry when reset
+// is unknown) among currently exhausted windows for the given targets. It is
+// used to compute a bounded, reset-aware retry deadline when all routes for a
+// role are exhausted.
+func NextResetAt(targets []Target, windows map[Target][]Window, now time.Time) (time.Time, bool) {
+	var earliest time.Time
+	for _, target := range targets {
+		for _, w := range windows[target] {
+			if !w.Exhausted || w.ObservedAt.IsZero() || w.ObservedAt.After(now) ||
+				!now.Before(w.ValidUntil) || (!w.ResetAt.IsZero() && !now.Before(w.ResetAt)) {
+				continue
+			}
+			candidate := w.ResetAt
+			if candidate.IsZero() || w.ValidUntil.Before(candidate) {
+				candidate = w.ValidUntil
+			}
+			if candidate.After(now) && (earliest.IsZero() || candidate.Before(earliest)) {
+				earliest = candidate
+			}
+		}
+	}
+	return earliest, !earliest.IsZero()
+}
+
+// RolePolicies holds independent opt-in quota policies for Worker, Reviewer,
+// and Orchestrator. All enabled roles share the same Quotum source and native
+// failure evidence.
+type RolePolicies struct {
+	Worker       *Policy
+	Reviewer     *Policy
+	Orchestrator *Policy
+}
+
+// AnyEnabled reports whether at least one role has quota failover configured.
+func (r RolePolicies) AnyEnabled() bool {
+	return r.Worker != nil || r.Reviewer != nil || r.Orchestrator != nil
+}
+
+// ForRole returns the policy for role, or nil when that role is not opted in.
+func (r RolePolicies) ForRole(role Role) *Policy {
+	switch role {
+	case RoleWorker:
+		return r.Worker
+	case RoleReviewer:
+		return r.Reviewer
+	case RoleOrchestrator:
+		return r.Orchestrator
+	default:
+		return nil
+	}
+}
+
+// Policy applies one ordered configuration across projects for a single role.
 type Policy struct {
+	Role                 Role
 	Primary              *Target
 	Fallbacks            []Target
 	Source               Source
@@ -110,33 +196,40 @@ func (p *Policy) DefaultModels(ctx context.Context, project domain.ProjectRecord
 }
 
 // Windows reads the optional Quotum snapshot and durable native reset evidence.
-// Quotum bindings describe the computer login only. Saved accounts may use the
-// same model name while consuming a different quota.
+// Quotum bindings describe the computer login only. Saved accounts (non-empty
+// Target.Account) may use the same model name while consuming a different quota.
 func (p *Policy) Windows(ctx context.Context, targets []Target, failures []Failure, now time.Time, defaults map[domain.AgentHarness]string) (map[Target][]Window, error) {
-	bound := make([]Target, 0, len(targets))
+	computerBound := make([]Target, 0, len(targets))
 	for _, target := range targets {
-		if p.ComputerLogin == nil || p.ComputerLogin(ctx, target.Harness) {
-			bound = append(bound, target)
+		if target.Account == "" && (p.ComputerLogin == nil || p.ComputerLogin(ctx, target.Harness)) {
+			computerBound = append(computerBound, target)
 		}
 	}
-	windows := make(map[Target][]Window, len(bound))
+	windows := make(map[Target][]Window, len(targets))
 	var err error
-	if p.Source != nil && len(bound) != 0 {
-		snapshot, readErr := p.Source.Read(ctx, bound)
+	if p.Source != nil && len(computerBound) != 0 {
+		snapshot, readErr := p.Source.Read(ctx, computerBound)
 		err = readErr
 		if readErr == nil {
-			for _, target := range bound {
+			for _, target := range computerBound {
 				windows[target] = snapshot[target]
 			}
 		}
 	}
-	for _, target := range bound {
+	for _, target := range targets {
+		if target.Account == "" && p.ComputerLogin != nil && !p.ComputerLogin(ctx, target.Harness) {
+			continue
+		}
 		model := target.Model
 		if model == "" {
 			model = defaults[target.Harness]
 		}
 		for _, f := range failures {
-			if f.Scope != "" && model != "" && f.Target.Harness == target.Harness && f.Target.Model == model && f.ResetAt.After(now) {
+			scopeMatches := (target.Account == "" && f.Scope != "" && f.Scope == "computer login") ||
+				(target.Account != "" && f.Scope == target.Account)
+			modelMatches := (f.Target.Model == "" && f.Target.Harness == target.Harness) ||
+				(model != "" && f.Target.Model == model && f.Target.Harness == target.Harness)
+			if scopeMatches && modelMatches && f.ResetAt.After(now) {
 				windows[target] = append(windows[target], Window{ObservedAt: f.At, ValidUntil: f.ResetAt, ResetAt: f.ResetAt, Exhausted: true})
 			}
 		}

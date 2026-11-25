@@ -7,7 +7,10 @@ package gen
 
 import (
 	"context"
+	"database/sql"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 const claimWorkerQuotaAttempt = `-- name: ClaimWorkerQuotaAttempt :execrows
@@ -56,6 +59,50 @@ func (q *Queries) DeferAutomationRunForQuota(ctx context.Context, arg DeferAutom
 	return err
 }
 
+const deleteReviewerQuotaDeferral = `-- name: DeleteReviewerQuotaDeferral :exec
+DELETE FROM reviewer_quota_deferral
+WHERE session_id = ?1
+  AND pr_url = ?2
+  AND target_sha = ?3
+`
+
+type DeleteReviewerQuotaDeferralParams struct {
+	SessionID string
+	PRURL     string
+	TargetSha string
+}
+
+func (q *Queries) DeleteReviewerQuotaDeferral(ctx context.Context, arg DeleteReviewerQuotaDeferralParams) error {
+	_, err := q.db.ExecContext(ctx, deleteReviewerQuotaDeferral, arg.SessionID, arg.PRURL, arg.TargetSha)
+	return err
+}
+
+const getReviewerQuotaDeferral = `-- name: GetReviewerQuotaDeferral :one
+SELECT retry_at, reason
+FROM reviewer_quota_deferral
+WHERE session_id = ?1
+  AND pr_url = ?2
+  AND target_sha = ?3
+`
+
+type GetReviewerQuotaDeferralParams struct {
+	SessionID string
+	PRURL     string
+	TargetSha string
+}
+
+type GetReviewerQuotaDeferralRow struct {
+	RetryAt int64
+	Reason  string
+}
+
+func (q *Queries) GetReviewerQuotaDeferral(ctx context.Context, arg GetReviewerQuotaDeferralParams) (GetReviewerQuotaDeferralRow, error) {
+	row := q.db.QueryRowContext(ctx, getReviewerQuotaDeferral, arg.SessionID, arg.PRURL, arg.TargetSha)
+	var i GetReviewerQuotaDeferralRow
+	err := row.Scan(&i.RetryAt, &i.Reason)
+	return i, err
+}
+
 const insertWorkerQuotaSession = `-- name: InsertWorkerQuotaSession :exec
 INSERT INTO worker_quota_session (session_id, harness, model, effort, remaining_routes)
 VALUES (?, ?, ?, ?, ?)
@@ -78,6 +125,47 @@ func (q *Queries) InsertWorkerQuotaSession(ctx context.Context, arg InsertWorker
 		arg.RemainingRoutes,
 	)
 	return err
+}
+
+const listReviewerQuotaFailures = `-- name: ListReviewerQuotaFailures :many
+SELECT
+    review.harness AS failure_harness,
+    turn.completed_at AS failure_at,
+    turn.usage_limit_resets_at AS reset_at
+FROM conversation_turns AS turn
+JOIN review ON review.id = turn.handled_by_review_id
+WHERE turn.handled_by_review_id IS NOT NULL
+  AND turn.completed_at IS NOT NULL
+  AND (turn.failure_code = 'quota_exhausted' OR turn.usage_limit_resets_at IS NOT NULL)
+`
+
+type ListReviewerQuotaFailuresRow struct {
+	FailureHarness domain.ReviewerHarness
+	FailureAt      sql.NullTime
+	ResetAt        sql.NullTime
+}
+
+func (q *Queries) ListReviewerQuotaFailures(ctx context.Context) ([]ListReviewerQuotaFailuresRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReviewerQuotaFailures)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReviewerQuotaFailuresRow{}
+	for rows.Next() {
+		var i ListReviewerQuotaFailuresRow
+		if err := rows.Scan(&i.FailureHarness, &i.FailureAt, &i.ResetAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listWorkerQuotaFailures = `-- name: ListWorkerQuotaFailures :many
@@ -205,4 +293,34 @@ func (q *Queries) SetWorkerQuotaReason(ctx context.Context, arg SetWorkerQuotaRe
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertReviewerQuotaDeferral = `-- name: UpsertReviewerQuotaDeferral :exec
+INSERT INTO reviewer_quota_deferral (session_id, pr_url, target_sha, retry_at, reason, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(session_id, pr_url, target_sha) DO UPDATE SET
+    retry_at = excluded.retry_at,
+    reason = excluded.reason,
+    updated_at = excluded.updated_at
+`
+
+type UpsertReviewerQuotaDeferralParams struct {
+	SessionID string
+	PRURL     string
+	TargetSha string
+	RetryAt   int64
+	Reason    string
+	UpdatedAt int64
+}
+
+func (q *Queries) UpsertReviewerQuotaDeferral(ctx context.Context, arg UpsertReviewerQuotaDeferralParams) error {
+	_, err := q.db.ExecContext(ctx, upsertReviewerQuotaDeferral,
+		arg.SessionID,
+		arg.PRURL,
+		arg.TargetSha,
+		arg.RetryAt,
+		arg.Reason,
+		arg.UpdatedAt,
+	)
+	return err
 }

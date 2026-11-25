@@ -54,7 +54,7 @@ func (s workerQuotaSweep) poll(ctx context.Context) error {
 
 func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Session) error {
 	rec, found, err := s.store.GetSession(ctx, worker.ID)
-	if err != nil || !found || rec.IsTerminated || rec.Kind != domain.KindWorker ||
+	if err != nil || !found || rec.IsTerminated || (rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator) ||
 		rec.Activity.State != domain.ActivityIdle || rec.ProvisionState.WithDefault() != domain.SessionProvisionReady {
 		return err
 	}
@@ -91,6 +91,11 @@ func (s workerQuotaSweep) reconcile(ctx context.Context, worker workerquota.Sess
 	}
 	if err := s.store.RecordWorkerQuotaFailure(ctx, rec.ID, failure); err != nil {
 		return err
+	}
+	if rec.Kind == domain.KindOrchestrator {
+		// In-flight orchestrator switching could replay tool calls or dispatch
+		// duplicate workers; park safely and preserve durable state instead.
+		return s.park(ctx, rec, turn, failure.At, "automatic orchestrator in-flight handoff unsupported to avoid duplicate dispatches")
 	}
 	if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 		return s.park(ctx, rec, turn, failure.At, "automatic Terminal UI handoff unavailable")

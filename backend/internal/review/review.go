@@ -268,6 +268,10 @@ type TriggerOptions struct {
 	// the worker's branch just before this trigger and found none, so a
 	// no-PR error may say so.
 	BranchPRLookupFoundNone bool
+	// DeduplicateAcrossHarnesses prevents automatic quota-routed passes from
+	// starting a duplicate review on a PR head that already has a running,
+	// approved, or changes-requested pass under another reviewer harness.
+	DeduplicateAcrossHarnesses bool
 }
 
 // TriggerWithOptions starts reviews for every PR on the worker session that needs review.
@@ -300,9 +304,6 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 	}
 	if mode != "" && mode != domain.ReviewerInterfaceChat && mode != domain.ReviewerInterfaceTUI {
 		return TriggerResult{}, fmt.Errorf("%w: unknown reviewer interface mode %q", ErrInvalid, mode)
-	}
-	if source == domain.ReviewTriggerAuto && mode != "" {
-		return TriggerResult{}, fmt.Errorf("%w: automatic review cannot override interface mode", ErrInvalid)
 	}
 
 	// Serialise concurrent triggers for this worker so the idempotency check
@@ -478,8 +479,9 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		// so refusing it makes the reviewer choice inert exactly when it is most
 		// useful. Ineligible PRs stay excluded: nothing can review those.
 		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
-		if source == domain.ReviewTriggerAuto && autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
-			eligible = false
+		if source == domain.ReviewTriggerAuto && (autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness, opts.DeduplicateAcrossHarnesses) ||
+			(opts.DeduplicateAcrossHarnesses && crossHarnessHeadCovered(runs, reviewState.PRURL, reviewState.TargetSHA))) {
+			continue
 		}
 		switch {
 		case reviewState.Status == ReviewStateIneligible:
@@ -1338,7 +1340,8 @@ func (e *Engine) TeardownReviewerTerminal(ctx stdctx.Context, workerID domain.Se
 	return nil
 }
 
-func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, harness domain.ReviewerHarness) bool {
+func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, harness domain.ReviewerHarness, quotaManaged ...bool) bool {
+	ignoreQuotaFailures := len(quotaManaged) > 0 && quotaManaged[0]
 	failedAutoRuns := 0
 	for _, run := range runs {
 		if run.PRURL != prURL || run.TargetSHA != targetSHA || (run.Harness != harness && run.Harness != "") {
@@ -1347,11 +1350,23 @@ func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, har
 		if run.Status == domain.ReviewRunRunning || run.Status == domain.ReviewRunCancelled || run.Verdict == domain.VerdictApproved || run.Verdict == domain.VerdictChangesRequested {
 			return true
 		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto {
+		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && (!ignoreQuotaFailures || !domain.IsQuotaFailedReviewRun(run)) {
 			failedAutoRuns++
 			if failedAutoRuns >= autoReviewFailedRetryLimit {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func crossHarnessHeadCovered(runs []domain.ReviewRun, prURL, targetSHA string) bool {
+	for _, run := range runs {
+		if run.PRURL != prURL || run.TargetSHA != targetSHA {
+			continue
+		}
+		if run.Status == domain.ReviewRunRunning || run.Verdict == domain.VerdictApproved || run.Verdict == domain.VerdictChangesRequested {
+			return true
 		}
 	}
 	return false

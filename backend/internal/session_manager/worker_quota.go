@@ -32,12 +32,33 @@ func autoSpawnAdmitterFrom(ctx context.Context) AutoSpawnAdmitter {
 	return admitter
 }
 
-func automaticQuotaWorker(cfg ports.SpawnConfig) bool {
-	return cfg.Kind == domain.KindWorker && cfg.ProjectID != "" &&
-		(cfg.CreatedBy == domain.SessionCreatedByAutomation || cfg.AutomationRunID != nil || cfg.ParentSessionID != "") &&
-		cfg.Harness == "" && cfg.AgentAccountID == "" && cfg.AgentConfig.Model == "" &&
-		cfg.AgentConfig.Mode == "" && cfg.AgentConfig.Effort == "" && !cfg.EffortOverride && !cfg.AgentConfigResolved &&
-		cfg.RequestedMode == ""
+func automaticQuotaSpawn(cfg ports.SpawnConfig) (workerquota.Role, bool) {
+	if cfg.ProjectID == "" ||
+		(cfg.CreatedBy != domain.SessionCreatedByAutomation && cfg.AutomationRunID == nil && cfg.ParentSessionID == "") ||
+		cfg.Harness != "" || cfg.AgentAccountID != "" || cfg.AgentConfig.Model != "" ||
+		cfg.AgentConfig.Mode != "" || cfg.AgentConfig.Effort != "" || cfg.EffortOverride || cfg.AgentConfigResolved ||
+		cfg.RequestedMode != "" {
+		return "", false
+	}
+	switch cfg.Kind {
+	case domain.KindWorker:
+		return workerquota.RoleWorker, true
+	case domain.KindOrchestrator:
+		return workerquota.RoleOrchestrator, true
+	default:
+		return "", false
+	}
+}
+
+func (m *Manager) quotaPolicyForRole(role workerquota.Role) *workerquota.Policy {
+	switch role {
+	case workerquota.RoleWorker:
+		return m.workerQuota
+	case workerquota.RoleOrchestrator:
+		return m.orchestratorQuota
+	default:
+		return nil
+	}
 }
 
 type quotaSelection struct {
@@ -57,8 +78,12 @@ func (m *Manager) selectWorkerQuotaTarget(ctx context.Context, cfg *ports.SpawnC
 }
 
 func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig, project *domain.ProjectRecord) (quotaSelection, error) {
-	policy := m.workerQuota
-	if policy == nil || !automaticQuotaWorker(*cfg) {
+	role, ok := automaticQuotaSpawn(*cfg)
+	if !ok {
+		return quotaSelection{}, nil
+	}
+	policy := m.quotaPolicyForRole(role)
+	if policy == nil {
 		return quotaSelection{}, nil
 	}
 	harness := effectiveHarness("", cfg.Kind, project.Config)
@@ -69,7 +94,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		return quotaSelection{}, nil
 	}
 	defaults := policy.DefaultModels(ctx, *project, targets)
-	windows := m.workerQuotaWindows(ctx, targets, defaults)
+	windows := m.roleQuotaWindows(ctx, policy, targets, defaults)
 	admitter := autoSpawnAdmitterFrom(ctx)
 	var selected workerquota.Target
 	var selectedMode domain.SessionMode
@@ -122,7 +147,8 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 			return quotaSelection{}, firstPauseErr
 		}
 		if blocked {
-			return quotaSelection{}, workerquota.ErrDeferred
+			retryAt, _ := workerquota.NextResetAt(targets, windows, m.clock())
+			return quotaSelection{}, &workerquota.DeferredError{Role: role, RetryAt: retryAt}
 		}
 		return quotaSelection{}, workerquota.ErrNoReadyRoute
 	}
@@ -131,9 +157,16 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		cfg.AgentConfig.Model, cfg.AgentConfig.Effort = selected.Model, selected.Effort
 		cfg.EffortOverride = selected.Effort != ""
 		// Remove provider-specific inherited tuning from this copy of the
-		// project while preserving worker permissions and other project rules.
+		// project while preserving role permissions and other project rules.
 		project.Config.AgentConfig.Model, project.Config.AgentConfig.Effort, project.Config.AgentConfig.Mode = "", "", ""
-		project.Config.Worker.AgentConfig.Model, project.Config.Worker.AgentConfig.Effort, project.Config.Worker.AgentConfig.Mode = "", "", ""
+		if cfg.Kind == domain.KindOrchestrator {
+			project.Config.Orchestrator.AgentConfig.Model, project.Config.Orchestrator.AgentConfig.Effort, project.Config.Orchestrator.AgentConfig.Mode = "", "", ""
+		} else {
+			project.Config.Worker.AgentConfig.Model, project.Config.Worker.AgentConfig.Effort, project.Config.Worker.AgentConfig.Mode = "", "", ""
+		}
+	}
+	if selected.Account != "" {
+		cfg.AgentAccountID = selected.Account
 	}
 	if selected.Mode != "" {
 		cfg.RequestedMode = selected.Mode
@@ -142,10 +175,10 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		cfg.AgentConfig.Model = defaults[selected.Harness]
 		cfg.AgentConfig.Effort = selected.Effort
 	}
-	if selected != primary || selected.Mode != "" {
+	if selected != primary || selected.Mode != "" || selected.Account != "" {
 		m.logger.Info("worker quota selected configured route",
-			"project", cfg.ProjectID, "harness", selected.Harness,
-			"model", cfg.AgentConfig.Model, "effort", selected.Effort, "mode", selectedMode)
+			"role", role, "project", cfg.ProjectID, "harness", selected.Harness,
+			"model", cfg.AgentConfig.Model, "effort", selected.Effort, "mode", selectedMode, "account", selected.Account)
 	}
 	return quotaSelection{
 		active:           true,
@@ -156,7 +189,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 	}, nil
 }
 
-func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.Target, defaults map[domain.AgentHarness]string) map[workerquota.Target][]workerquota.Window {
+func (m *Manager) roleQuotaWindows(ctx context.Context, policy *workerquota.Policy, targets []workerquota.Target, defaults map[domain.AgentHarness]string) map[workerquota.Target][]workerquota.Window {
 	now := m.clock()
 	var failures []workerquota.Failure
 	if store, ok := m.store.(interface {
@@ -168,7 +201,7 @@ func (m *Manager) workerQuotaWindows(ctx context.Context, targets []workerquota.
 			m.logger.Warn("worker quota failure records unavailable", "error", err)
 		}
 	}
-	windows, err := m.workerQuota.Windows(ctx, targets, failures, now, defaults)
+	windows, err := policy.Windows(ctx, targets, failures, now, defaults)
 	if err != nil {
 		m.logger.Debug("worker quota source unavailable", "error", err)
 	}

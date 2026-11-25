@@ -656,7 +656,14 @@ func firstNonEmpty(values ...string) string {
 
 // TriggerAuto starts a daemon-initiated review pass.
 func (s *Service) TriggerAuto(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) (reviewcore.TriggerResult, error) {
-	return s.triggerWithOptions(ctx, workerID, reviewcore.TriggerOptions{Harness: harness, Source: domain.ReviewTriggerAuto})
+	return s.TriggerAutoWithOptions(ctx, workerID, reviewcore.TriggerOptions{Harness: harness, Source: domain.ReviewTriggerAuto})
+}
+
+// TriggerAutoWithOptions starts a daemon-initiated review pass with optional
+// quota-selected model, effort, and interface mode overrides.
+func (s *Service) TriggerAutoWithOptions(ctx context.Context, workerID domain.SessionID, opts reviewcore.TriggerOptions) (reviewcore.TriggerResult, error) {
+	opts.Source = domain.ReviewTriggerAuto
+	return s.triggerWithOptions(ctx, workerID, opts)
 }
 
 // triggerWithOptions is the single instrumented trigger path. Every entry

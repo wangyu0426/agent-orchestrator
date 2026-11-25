@@ -428,11 +428,12 @@ type conversationSettingsStore interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	workerQuota *workerquota.Policy
-	runtime     runtimeController
-	agents      ports.AgentResolver
-	workspace   ports.Workspace
-	store       Store
+	workerQuota       *workerquota.Policy
+	orchestratorQuota *workerquota.Policy
+	runtime           runtimeController
+	agents            ports.AgentResolver
+	workspace         ports.Workspace
+	store             Store
 	// forkSeeds copies a fork source's files into the fork's worktree.
 	forkSeeds forkSeedApplier
 	// claudeSessionFork copies a Claude session into a fork's worktree. It is
@@ -915,12 +916,13 @@ const (
 
 // Deps are the collaborators a Session Manager needs; New wires them together.
 type Deps struct {
-	WorkerQuota *workerquota.Policy
-	Runtime     runtimeController
-	Agents      ports.AgentResolver
-	Workspace   ports.Workspace
-	Store       Store
-	Messenger   ports.AgentMessenger
+	WorkerQuota       *workerquota.Policy
+	OrchestratorQuota *workerquota.Policy
+	Runtime           runtimeController
+	Agents            ports.AgentResolver
+	Workspace         ports.Workspace
+	Store             Store
+	Messenger         ports.AgentMessenger
 	// Defaults supplies the daemon-owned default session interface for spawns that
 	// name no mode. Nil means always use the compatibility default.
 	Defaults SessionModeDefaults
@@ -996,6 +998,7 @@ func New(d Deps) *Manager {
 	mergePolicyDefaults, _ := d.Defaults.(SessionMergePolicyDefaults)
 	m := &Manager{
 		workerQuota:                    d.WorkerQuota,
+		orchestratorQuota:              d.OrchestratorQuota,
 		runtime:                        d.Runtime,
 		agents:                         d.Agents,
 		workspace:                      d.Workspace,
