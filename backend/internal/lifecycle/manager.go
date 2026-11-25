@@ -729,6 +729,29 @@ retryProjection:
 	// Conversation text is meaningful only inside one provider identity, owner
 	// generation, and main turn. Reduce it as one durable state machine so a Stop
 	// whose UserPromptSubmit was lost can never borrow the prior turn's prompt.
+	if rec.Harness == domain.HarnessAgy {
+		boundID := rec.Metadata.AgentSessionID
+		if boundID == "" {
+			boundID = rec.Metadata.ProviderConversationID
+		}
+		sameLaunchMismatchedStop := s.Event == "stop" &&
+			s.AgentSessionID != "" && boundID != "" && s.AgentSessionID != boundID &&
+			(s.LaunchID == "" || rec.Metadata.AgentSessionIDLaunchID == "" || s.LaunchID == rec.Metadata.AgentSessionIDLaunchID)
+		if (s.TranscriptPath != "" && !agyTranscriptMatchesSession(rec, s)) || sameLaunchMismatchedStop {
+			// Sanitize transcript-derived and identity-binding fields before any
+			// metadata, checkpoint, or terminal-turn projection so a mismatched or
+			// cross-session AGY Stop signal (with or without TranscriptPath) can
+			// never corrupt NativeTranscriptPath or rebind AgentSessionID, while
+			// preserving valid activity health and legitimate new-launch transitions.
+			s.TranscriptPath = ""
+			s.AgentSessionID = ""
+			s.FinalAssistantMessage = ""
+			s.TurnUserRequest = ""
+			s.ProviderTurnID = ""
+			s.LatestAssistantUpdate = ""
+			s.LatestUserPrompt = ""
+		}
+	}
 	checkpoint := rec.Metadata
 	previousNativeID := rec.Metadata.AgentSessionID
 	if previousNativeID == "" {

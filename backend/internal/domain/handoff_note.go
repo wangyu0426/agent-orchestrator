@@ -21,6 +21,7 @@ type TerminalTurn struct {
 	SessionID       SessionID
 	Harness         AgentHarness
 	NativeSessionID string
+	ProviderTurnID  string
 	UserRequest     string
 	RequestedAt     time.Time
 }

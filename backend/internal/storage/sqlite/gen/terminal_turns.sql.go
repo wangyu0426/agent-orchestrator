@@ -82,6 +82,41 @@ func (q *Queries) DeleteTerminalTurnsForThread(ctx context.Context, arg DeleteTe
 	return err
 }
 
+const insertCompletedTerminalTurn = `-- name: InsertCompletedTerminalTurn :exec
+INSERT OR IGNORE INTO session_terminal_turns (
+    session_id, harness, native_session_id, provider_turn_id, user_request, agent_response, requested_at, responded_at
+)
+VALUES (
+    ?1, ?2, ?3, ?4,
+    ?5, ?6, ?7, ?8
+)
+`
+
+type InsertCompletedTerminalTurnParams struct {
+	SessionID       string
+	Harness         string
+	NativeSessionID string
+	ProviderTurnID  string
+	UserRequest     string
+	AgentResponse   string
+	RequestedAt     time.Time
+	RespondedAt     sql.NullTime
+}
+
+func (q *Queries) InsertCompletedTerminalTurn(ctx context.Context, arg InsertCompletedTerminalTurnParams) error {
+	_, err := q.db.ExecContext(ctx, insertCompletedTerminalTurn,
+		arg.SessionID,
+		arg.Harness,
+		arg.NativeSessionID,
+		arg.ProviderTurnID,
+		arg.UserRequest,
+		arg.AgentResponse,
+		arg.RequestedAt,
+		arg.RespondedAt,
+	)
+	return err
+}
+
 const insertTerminalTurn = `-- name: InsertTerminalTurn :exec
 INSERT INTO session_terminal_turns (session_id, harness, native_session_id, user_request, requested_at)
 VALUES (?1, ?2, ?3, ?4, ?5)
