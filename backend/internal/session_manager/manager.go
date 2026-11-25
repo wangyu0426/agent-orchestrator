@@ -430,10 +430,10 @@ type conversationSettingsStore interface {
 type Manager struct {
 	workerQuota       *workerquota.Policy
 	orchestratorQuota *workerquota.Policy
-	runtime     runtimeController
-	agents      ports.AgentResolver
-	workspace   ports.Workspace
-	store       Store
+	runtime           runtimeController
+	agents            ports.AgentResolver
+	workspace         ports.Workspace
+	store             Store
 	// forkSeeds copies a fork source's files into the fork's worktree.
 	forkSeeds forkSeedApplier
 	// claudeSessionFork copies a Claude session into a fork's worktree. It is
@@ -918,11 +918,11 @@ const (
 type Deps struct {
 	WorkerQuota       *workerquota.Policy
 	OrchestratorQuota *workerquota.Policy
-	Runtime     runtimeController
-	Agents      ports.AgentResolver
-	Workspace   ports.Workspace
-	Store       Store
-	Messenger   ports.AgentMessenger
+	Runtime           runtimeController
+	Agents            ports.AgentResolver
+	Workspace         ports.Workspace
+	Store             Store
+	Messenger         ports.AgentMessenger
 	// Defaults supplies the daemon-owned default session interface for spawns that
 	// name no mode. Nil means always use the compatibility default.
 	Defaults SessionModeDefaults

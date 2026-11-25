@@ -209,7 +209,7 @@ type Config struct {
 	GitLab GitLabConfig
 	// TrackerIntake gates the issue-intake observer daemon-wide
 	// (AO_TRACKER_INTAKE).
-	TrackerIntake bool
+	TrackerIntake     bool
 	WorkerQuota       *workerquota.Policy
 	ReviewerQuota     *workerquota.Policy
 	OrchestratorQuota *workerquota.Policy
