@@ -587,6 +587,8 @@ func TestReadOnlySessionPinsDefaultModeSandboxAndStrictPolicy(t *testing.T) {
 		"git diff --output=/tmp/out",
 		"git diff --out=/tmp/out",
 		"git diff --ou=/tmp/out",
+		"git diff '--output=/tmp/out'",
+		"git diff \"--output=/tmp/out\"",
 		"git diff --ext-diff HEAD~1..HEAD",
 		"git log --output=/tmp/out",
 		"git show --out=/tmp/out HEAD",
@@ -619,5 +621,17 @@ func TestReadOnlySessionPinsDefaultModeSandboxAndStrictPolicy(t *testing.T) {
 	}
 	if got, handled := ro.PermissionPolicy(ports.PermissionModeAuto, editReq); !handled || got != "deny" {
 		t.Errorf("edit tool call: got (%q, %v), want (deny, true)", got, handled)
+	}
+}
+
+func TestReadOnlyLaunchFailsClosedWithoutNativeCLI(t *testing.T) {
+	dir := t.TempDir()
+	legacy := writeExecutable(t, filepath.Join(dir, "agy_acp_server"))
+	res := testResolver(t, map[string]string{serverPathEnvVar: legacy})
+	cfg := buildConfig(nil, res, nil)
+
+	_, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{ReadOnly: true})
+	if !errors.Is(err, ports.ErrChatDriverIncompatible) {
+		t.Fatalf("Launch(ReadOnly=true) with legacy server = %v, want ErrChatDriverIncompatible", err)
 	}
 }

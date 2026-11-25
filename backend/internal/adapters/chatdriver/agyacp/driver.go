@@ -101,6 +101,9 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 			if target.cli {
 				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.ReadOnly), Env: env}, nil
 			}
+			if cfg.ReadOnly {
+				return acpdriver.Launch{}, fmt.Errorf("%w: AGY read-only reviewer requires native `agy acp`", ports.ErrChatDriverIncompatible)
+			}
 			if env[harnessPathEnvVar] == "" {
 				if harness := resolve.harnessPath(target.path); harness != "" {
 					env[harnessPathEnvVar] = harness
