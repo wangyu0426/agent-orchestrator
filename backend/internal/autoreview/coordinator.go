@@ -93,14 +93,14 @@ type Config struct {
 // New constructs an auto-review coordinator.
 func New(store Store, reviews Trigger, cfg Config) *Coordinator {
 	c := &Coordinator{
-		store:         store,
-		reviews:       reviews,
-		clock:         cfg.Clock,
-		idleThreshold: cfg.IdleThreshold,
-		sweepInterval: cfg.SweepInterval,
-		logger:        cfg.Logger,
-		quota:         cfg.Quota,
-		quotaFailures: cfg.QuotaFailures,
+		store:           store,
+		reviews:         reviews,
+		clock:           cfg.Clock,
+		idleThreshold:   cfg.IdleThreshold,
+		sweepInterval:   cfg.SweepInterval,
+		logger:          cfg.Logger,
+		quota:           cfg.Quota,
+		quotaFailures:   cfg.QuotaFailures,
 		routeReady:      cfg.RouteReady,
 		deferredUntil:   make(map[domain.SessionID]time.Time),
 		lastDeferralSig: make(map[domain.SessionID]string),

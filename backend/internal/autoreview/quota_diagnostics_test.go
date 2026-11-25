@@ -141,8 +141,8 @@ func TestReviewerQuotaSanitizedFixtureColdStartAndPersistedDeferralRecovery(t *t
 	}
 
 	for _, tc := range []struct {
-		name              string
-		preexistingDefer  bool
+		name             string
+		preexistingDefer bool
 	}{
 		{name: "cold_start_positive_sonnet_fallback", preexistingDefer: false},
 		{name: "persisted_deferral_recovers_on_positive_sonnet_fallback", preexistingDefer: true},
