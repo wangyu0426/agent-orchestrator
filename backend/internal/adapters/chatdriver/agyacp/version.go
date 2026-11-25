@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
 )
 
 // serverAgentName is the agentInfo.name Google's Antigravity ACP server reports.
@@ -25,7 +27,7 @@ const cliServerAgentName = "Antigravity ACP Server"
 // before 1.5.4 a turn hangs when a tool call needs a second approval, and a
 // resumed session drops back to the default mode (1.5.4 changelog). AO
 // launches older CLIs' separate server instead.
-const minimumCLIACPVersion = "1.5.4"
+const minimumCLIACPVersion = agy.MinimumCLIACPVersion
 
 var versionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
 

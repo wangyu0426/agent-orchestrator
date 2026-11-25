@@ -131,13 +131,24 @@ func TestLaunchArgsMirrorTheRegistryEntry(t *testing.T) {
 	}
 }
 
-func TestSessionOptionsSelectOnlyAChosenModel(t *testing.T) {
+func TestSessionOptionsSelectModelAndThoughtLevel(t *testing.T) {
 	if got := sessionOptions(ports.ChatTurnSettings{}); got != nil {
-		t.Errorf("empty model options = %v", got)
+		t.Errorf("empty settings options = %v", got)
 	}
-	want := []acpdriver.SessionOption{{ID: "model", Value: "gemini-3.8-flash-high"}}
-	if got := sessionOptions(ports.ChatTurnSettings{Model: " gemini-3.8-flash-high "}); !reflect.DeepEqual(got, want) {
-		t.Errorf("options = %v, want %v", got, want)
+	wantModel := []acpdriver.SessionOption{{ID: "model", Value: "gemini-3.8-flash-high"}}
+	if got := sessionOptions(ports.ChatTurnSettings{Model: " gemini-3.8-flash-high "}); !reflect.DeepEqual(got, wantModel) {
+		t.Errorf("model options = %v, want %v", got, wantModel)
+	}
+	wantEffort := []acpdriver.SessionOption{{ID: "thought_level", Value: "low"}}
+	if got := sessionOptions(ports.ChatTurnSettings{Effort: " low "}); !reflect.DeepEqual(got, wantEffort) {
+		t.Errorf("effort options = %v, want %v", got, wantEffort)
+	}
+	wantBoth := []acpdriver.SessionOption{
+		{ID: "model", Value: "gemini-4-neon"},
+		{ID: "thought_level", Value: "high"},
+	}
+	if got := sessionOptions(ports.ChatTurnSettings{Model: "gemini-4-neon", Effort: "high"}); !reflect.DeepEqual(got, wantBoth) {
+		t.Errorf("model+effort options = %v, want %v", got, wantBoth)
 	}
 }
 
@@ -322,26 +333,29 @@ func TestResolverLaunchesAgyACPFromANewEnoughCLI(t *testing.T) {
 	}
 }
 
-func TestLaunchStartsAgyACPWithTheChatDataFolder(t *testing.T) {
+func TestLaunchStartsAgyACPWithDefaultHostProfile(t *testing.T) {
 	cli := writeExecutable(t, filepath.Join(t.TempDir(), "agy"))
 	r := testResolver(t, nil)
 	r.agyCLI = func(context.Context) (string, error) { return cli, nil }
-	r.cliVersion = func(context.Context, string) (string, error) { return "1.5.6", nil }
+	r.cliVersion = func(context.Context, string) (string, error) { return "1.5.17", nil }
 	cfg := buildConfig(nil, r, nil)
 
 	launch, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"PATH": "/usr/bin"}})
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if launch.Command != cli || !reflect.DeepEqual(launch.Args, []string{"acp", "--app-data-dir", "antigravity-acp"}) {
-		t.Fatalf("launch = %q %v", launch.Command, launch.Args)
+	if launch.Command != cli || !reflect.DeepEqual(launch.Args, []string{"acp"}) {
+		t.Fatalf("launch = %q %v, want [%q acp]", launch.Command, launch.Args, cli)
 	}
 	if _, set := launch.Env[harnessPathEnvVar]; set || launch.Env[disableWorkspaceTrustEnvVar] != "1" || launch.Env["PATH"] != "/usr/bin" {
 		t.Fatalf("launch env = %v", launch.Env)
 	}
+	if _, set := launch.Env["AGY_ACP_FORCE_FILE_STORAGE"]; set {
+		t.Fatalf("unexpected AGY_ACP_FORCE_FILE_STORAGE in launch env: %v", launch.Env)
+	}
 
 	launch, err = cfg.Launch(context.Background(), acpdriver.LaunchConfig{Env: map[string]string{"GEMINI_HOME": "/srv/gemini"}})
-	want := []string{"acp", "--app-data-dir", "antigravity-acp", "--gemini-dir", "/srv/gemini"}
+	want := []string{"acp", "--gemini-dir", "/srv/gemini"}
 	if err != nil || !reflect.DeepEqual(launch.Args, want) {
 		t.Fatalf("launch with GEMINI_HOME = %v, %v; want %v", launch.Args, err, want)
 	}
@@ -351,7 +365,7 @@ func TestLaunchStartsAgyACPWithTheChatDataFolder(t *testing.T) {
 	inherited := testResolver(t, map[string]string{"GEMINI_HOME": "/srv/daemon-gemini"})
 	inherited.agyCLI, inherited.cliVersion = r.agyCLI, r.cliVersion
 	launch, err = buildConfig(nil, inherited, nil).Launch(context.Background(), acpdriver.LaunchConfig{})
-	want = []string{"acp", "--app-data-dir", "antigravity-acp", "--gemini-dir", "/srv/daemon-gemini"}
+	want = []string{"acp", "--gemini-dir", "/srv/daemon-gemini"}
 	if err != nil || !reflect.DeepEqual(launch.Args, want) {
 		t.Fatalf("launch with an inherited GEMINI_HOME = %v, %v; want %v", launch.Args, err, want)
 	}
