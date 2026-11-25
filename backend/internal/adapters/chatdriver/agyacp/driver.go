@@ -298,8 +298,8 @@ func reviewerReadOnlyCommandAllowed(command string) bool {
 	if cmd == "" {
 		return false
 	}
-	// Reject any shell chaining, piping, redirection, or subshell expansion.
-	for _, forbidden := range []string{";", "|", "&", ">", "<", "`", "$(", "\n", "\r"} {
+	// Reject any shell chaining, piping, redirection, quoting, or expansion.
+	for _, forbidden := range []string{";", "|", "&", ">", "<", "`", "$", "\n", "\r", "'", "\"", "\\"} {
 		if strings.Contains(cmd, forbidden) {
 			return false
 		}
@@ -310,26 +310,199 @@ func reviewerReadOnlyCommandAllowed(command string) bool {
 	}
 	switch fields[0] {
 	case "git":
-		switch fields[1] {
-		case "status", "rev-parse", "merge-base", "ls-files":
-			return true
-		case "diff", "log", "show":
-			for _, arg := range fields[2:] {
-				if arg == "--output" || arg == "-o" || strings.HasPrefix(arg, "--output=") || strings.HasPrefix(arg, "-o") {
-					return false
-				}
-			}
-			return true
-		}
+		return gitReadOnlyArgsAllowed(fields[1], fields[2:])
 	case "gh":
 		if len(fields) >= 3 && fields[1] == "pr" {
-			switch fields[2] {
-			case "view", "diff", "checks":
-				return true
-			}
+			return ghPRReadOnlyArgsAllowed(fields[2], fields[3:])
 		}
 	}
 	return false
+}
+
+func gitReadOnlyArgsAllowed(subcmd string, args []string) bool {
+	var allowedFlags map[string]bool
+	allowCountFlag := false
+	allowUnifiedFlag := false
+	switch subcmd {
+	case "status":
+		allowedFlags = map[string]bool{
+			"--short": true, "-s": true, "--branch": true, "-b": true,
+			"--porcelain": true, "--untracked-files=no": true,
+			"--untracked-files=normal": true, "--untracked-files=all": true,
+			"-uno": true, "-u": true,
+		}
+	case "diff":
+		allowedFlags = map[string]bool{
+			"--stat": true, "--numstat": true, "--name-only": true,
+			"--name-status": true, "--cached": true, "--staged": true,
+			"--no-color": true, "--color=never": true,
+			"--no-ext-diff": true, "--no-textconv": true,
+		}
+		allowUnifiedFlag = true
+	case "log":
+		allowedFlags = map[string]bool{
+			"--oneline": true, "--stat": true, "--name-only": true,
+			"--name-status": true, "--no-color": true, "--color=never": true,
+			"--no-merges": true, "--first-parent": true,
+		}
+		allowCountFlag = true
+	case "show":
+		allowedFlags = map[string]bool{
+			"--stat": true, "--name-only": true, "--name-status": true,
+			"--no-patch": true, "-s": true, "--oneline": true,
+			"--no-color": true, "--color=never": true,
+			"--no-ext-diff": true, "--no-textconv": true,
+		}
+	case "rev-parse":
+		allowedFlags = map[string]bool{
+			"--short": true, "--abbrev-ref": true, "--verify": true,
+			"--show-toplevel": true, "--is-inside-work-tree": true,
+		}
+	case "merge-base":
+		allowedFlags = map[string]bool{"--is-ancestor": true}
+	case "ls-files":
+		allowedFlags = map[string]bool{
+			"--cached": true, "--others": true, "--exclude-standard": true,
+			"--modified": true,
+		}
+	default:
+		return false
+	}
+
+	afterDoubleDash := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			if allowedFlags[arg] {
+				continue
+			}
+			if allowCountFlag {
+				if arg == "-n" {
+					if i+1 >= len(args) || !isASCIIPositiveInt(args[i+1]) {
+						return false
+					}
+					i++
+					continue
+				}
+				if strings.HasPrefix(arg, "-n") && isASCIIPositiveInt(arg[2:]) {
+					continue
+				}
+				if strings.HasPrefix(arg, "--max-count=") && isASCIIPositiveInt(strings.TrimPrefix(arg, "--max-count=")) {
+					continue
+				}
+				if len(arg) > 1 && isASCIIPositiveInt(arg[1:]) {
+					continue
+				}
+			}
+			if allowUnifiedFlag {
+				if strings.HasPrefix(arg, "-U") && isASCIINonNegativeInt(arg[2:]) {
+					continue
+				}
+				if strings.HasPrefix(arg, "--unified=") && isASCIINonNegativeInt(strings.TrimPrefix(arg, "--unified=")) {
+					continue
+				}
+			}
+			return false
+		}
+		if !isSafeReadOnlyArg(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func ghPRReadOnlyArgsAllowed(subcmd string, args []string) bool {
+	var allowedFlags map[string]bool
+	allowJSON := false
+	switch subcmd {
+	case "view":
+		allowedFlags = map[string]bool{"--comments": true}
+		allowJSON = true
+	case "diff":
+		allowedFlags = map[string]bool{"--name-only": true, "--patch": true, "--color=never": true}
+	case "checks":
+		allowedFlags = map[string]bool{"--required": true}
+	default:
+		return false
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			if allowedFlags[arg] {
+				continue
+			}
+			if arg == "--repo" || arg == "-R" {
+				if i+1 >= len(args) || !isSafeReadOnlyArg(args[i+1]) {
+					return false
+				}
+				i++
+				continue
+			}
+			if allowJSON && arg == "--json" {
+				if i+1 >= len(args) || !isSafeReadOnlyArg(args[i+1]) {
+					return false
+				}
+				i++
+				continue
+			}
+			return false
+		}
+		if !isSafeReadOnlyArg(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIPositiveInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	nonZero := false
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		if s[i] != '0' {
+			nonZero = true
+		}
+	}
+	return nonZero
+}
+
+func isASCIINonNegativeInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeReadOnlyArg(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '.', '/', '_', '-', ':', '~', '^', '@', '{', '}', ',':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func permissionOption(options []acpsdk.PermissionOption, kind acpsdk.PermissionOptionKind) (acpsdk.PermissionOptionId, bool) {
