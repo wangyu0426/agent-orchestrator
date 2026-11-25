@@ -57,6 +57,12 @@ var _ ports.ReviewerCanceller = (*Reviewer)(nil)
 var _ ports.ReviewerRestorer = (*Reviewer)(nil)
 var _ ports.ReviewerReusePolicy = (*Reviewer)(nil)
 var _ ports.ReviewerStartupAuthObserver = (*Reviewer)(nil)
+var _ ports.ReviewerChatProfile = (*Reviewer)(nil)
+
+// ReviewChatHarness runs AGY review passes over native `agy acp` using the
+// authenticated host CLI profile, with AO's read-only reviewer policy and
+// separate review conversation identity.
+func (*Reviewer) ReviewChatHarness() domain.AgentHarness { return domain.HarnessAgy }
 
 // ReviewProcessReusable reports false so every AGY TUI review pass launches
 // fresh with the exact selected route's model and never reuses a stale pane

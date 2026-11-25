@@ -22,6 +22,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	acpdriver "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -98,7 +99,7 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 				env[disableWorkspaceTrustEnvVar] = "1"
 			}
 			if target.cli {
-				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv), Env: env}, nil
+				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.ReadOnly), Env: env}, nil
 			}
 			if env[harnessPathEnvVar] == "" {
 				if harness := resolve.harnessPath(target.path); harness != "" {
@@ -118,6 +119,7 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 		// allow_always, which would let a cached grant survive a later switch to
 		// a stricter approval mode.
 		PermissionPolicy: permissionPolicy,
+		ReadOnly:         agyReadOnlySession,
 		SteerPrompt:      &acpdriver.SteerPrompt{Supported: cliSteers},
 	}
 }
@@ -128,8 +130,11 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 // `agy acp` ignores the GEMINI_HOME variable and stores under its --gemini-dir,
 // so a GEMINI_HOME set for the session or inherited by the daemon is passed as
 // that flag, the same precedence agy.GeminiHome uses.
-func cliLaunchArgs(env map[string]string, getenv func(string) string) []string {
+func cliLaunchArgs(env map[string]string, getenv func(string) string, readOnly bool) []string {
 	args := []string{"acp"}
+	if readOnly {
+		args = append(args, "--sandbox")
+	}
 	home := strings.TrimSpace(env["GEMINI_HOME"])
 	if home == "" {
 		home = strings.TrimSpace(getenv("GEMINI_HOME"))
@@ -241,4 +246,97 @@ func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
 		"Standing instructions from Agent Orchestrator. Follow them for this whole session:\n" +
 			"<ao_standing_instructions>\n" + standing + "\n</ao_standing_instructions>",
 	)}
+}
+
+// agyReadOnlySession pins AGY review sessions to "default" mode (where `agy acp`
+// asks before every file edit and shell command) and enforces a fail-closed
+// permission policy that allows only read-only PR/git inspection commands and
+// the exact reviewer submit commands, rejecting all edits and other commands
+// without ever parking for human approval.
+func agyReadOnlySession(cfg acpdriver.LaunchConfig) acpdriver.ReadOnlySession {
+	return acpdriver.ReadOnlySession{
+		Mode:             modeDefault,
+		PermissionPolicy: reviewerPermissionPolicy(strings.TrimSpace(cfg.Env["AO_REVIEW_WORKER_SESSION_ID"])),
+	}
+}
+
+func reviewerPermissionPolicy(workerSessionID string) acpdriver.PermissionPolicy {
+	return func(_ ports.PermissionMode, params acpsdk.RequestPermissionRequest) (acpsdk.PermissionOptionId, bool) {
+		if params.ToolCall.Kind != nil && *params.ToolCall.Kind == acpsdk.ToolKindExecute {
+			if command := extractCommand(params.ToolCall.RawInput); command != "" {
+				if claudecode.ReviewerSubmitCommandAllowed(command, workerSessionID) || reviewerReadOnlyCommandAllowed(command) {
+					if id, ok := permissionOption(params.Options, acpsdk.PermissionOptionKindAllowOnce); ok {
+						return id, true
+					}
+				}
+			}
+		}
+		for _, kind := range []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways} {
+			if id, ok := permissionOption(params.Options, kind); ok {
+				return id, true
+			}
+		}
+		return acpdriver.CancelPermission, true
+	}
+}
+
+func extractCommand(rawInput any) string {
+	input, ok := rawInput.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"CommandLine", "command"} {
+		if cmd, _ := input[key].(string); strings.TrimSpace(cmd) != "" {
+			return strings.TrimSpace(cmd)
+		}
+	}
+	return ""
+}
+
+func reviewerReadOnlyCommandAllowed(command string) bool {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return false
+	}
+	// Reject any shell chaining, piping, redirection, or subshell expansion.
+	for _, forbidden := range []string{";", "|", "&", ">", "<", "`", "$(", "\n", "\r"} {
+		if strings.Contains(cmd, forbidden) {
+			return false
+		}
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "git":
+		switch fields[1] {
+		case "status", "rev-parse", "merge-base", "ls-files":
+			return true
+		case "diff", "log", "show":
+			for _, arg := range fields[2:] {
+				if arg == "--output" || arg == "-o" || strings.HasPrefix(arg, "--output=") || strings.HasPrefix(arg, "-o") {
+					return false
+				}
+			}
+			return true
+		}
+	case "gh":
+		if len(fields) >= 3 && fields[1] == "pr" {
+			switch fields[2] {
+			case "view", "diff", "checks":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func permissionOption(options []acpsdk.PermissionOption, kind acpsdk.PermissionOptionKind) (acpsdk.PermissionOptionId, bool) {
+	for _, option := range options {
+		if option.Kind == kind {
+			return option.OptionId, true
+		}
+	}
+	return "", false
 }
