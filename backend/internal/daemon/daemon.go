@@ -1147,8 +1147,15 @@ func Run(buildVersion string) (retErr error) {
 		Quota:         cfg.ReviewerQuota,
 		QuotaFailures: store.WorkerQuotaFailures,
 		RouteReady: func(ctx context.Context, target workerquota.Target) bool {
-			if target.Mode == domain.SessionModeChat && (chatSvc == nil || !chatSvc.SupportsChat(target.Harness)) {
-				return false
+			needsChat := target.Mode == domain.SessionModeChat ||
+				(target.Mode == "" && (target.Harness.ChatOnly() || (chatSvc != nil && chatSvc.SupportsChat(target.Harness))))
+			if needsChat {
+				if chatSvc == nil || !chatSvc.SupportsChat(target.Harness) {
+					return false
+				}
+				if err := chatSvc.PreflightChat(ctx, target.Harness, ports.PermissionModeDefault); err != nil {
+					return false
+				}
 			}
 			if agentSvc != nil {
 				readiness, err := agentSvc.EnsureAgentReadiness(ctx, string(target.Harness), domain.AgentReadinessPurposeLaunch)

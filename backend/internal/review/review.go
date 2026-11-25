@@ -479,11 +479,9 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		// so refusing it makes the reviewer choice inert exactly when it is most
 		// useful. Ineligible PRs stay excluded: nothing can review those.
 		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
-		if source == domain.ReviewTriggerAuto && autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
-			eligible = false
-		}
-		if source == domain.ReviewTriggerAuto && opts.DeduplicateAcrossHarnesses && crossHarnessHeadCovered(runs, reviewState.PRURL, reviewState.TargetSHA) {
-			eligible = false
+		if source == domain.ReviewTriggerAuto && (autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) ||
+			(opts.DeduplicateAcrossHarnesses && crossHarnessHeadCovered(runs, reviewState.PRURL, reviewState.TargetSHA))) {
+			continue
 		}
 		switch {
 		case reviewState.Status == ReviewStateIneligible:

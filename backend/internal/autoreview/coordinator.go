@@ -153,12 +153,10 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	harness := effectiveReviewerHarness(session, project.Config)
 	var selectedRoute *workerquota.Target
 	if c.quota != nil && session.ReviewerHarness == "" {
-		// Reconcile persisted per-(session, PR, HEAD) deferrals: a new HEAD
-		// bypasses an older deferral automatically.
-		if retryAt, deferred := c.activeDeferral(ctx, id, prs, now); deferred {
-			return Result{Reason: "reviewer_quota_deferred", RetryAt: retryAt}, nil
-		}
-		route, retryAt, quotaReason := c.selectReviewerRoute(ctx, project, harness, now)
+		// Always evaluate current routes and fresh quota evidence so positive
+		// quota recovery or newly configured fallbacks can wake a deferred HEAD.
+		deferredRetryAt, hasActiveDeferral := c.activeDeferral(ctx, id, prs, now)
+		route, retryAt, quotaReason, freshPositive := c.selectReviewerRoute(ctx, project, harness, prs, runs, now)
 		if quotaReason != "" {
 			if quotaReason == "reviewer_quota_deferred" {
 				c.persistDeferrals(ctx, id, prs, retryAt, quotaReason, now)
@@ -167,6 +165,14 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 				return Result{Reason: quotaReason, RetryAt: retryAt}, nil
 			}
 			return Result{Reason: quotaReason}, nil
+		}
+		if hasActiveDeferral && !freshPositive {
+			// Retain persisted deferral when no fresh positive quota evidence
+			// is available (e.g. Quotum temporarily unavailable after restart).
+			return Result{Reason: "reviewer_quota_deferred", RetryAt: deferredRetryAt}, nil
+		}
+		if hasActiveDeferral && freshPositive {
+			c.clearDeferrals(ctx, id, prs)
 		}
 		if route.Harness != "" {
 			selectedRoute = &route
@@ -317,7 +323,7 @@ func (c *Coordinator) clearDeferrals(ctx context.Context, id domain.SessionID, p
 	delete(c.deferredUntil, id)
 }
 
-func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, now time.Time) (workerquota.Target, time.Time, string) {
+func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, prs []domain.PullRequest, runs []domain.ReviewRun, now time.Time) (workerquota.Target, time.Time, string, bool) {
 	var primaryModel, primaryEffort string
 	if len(project.Config.Reviewers) > 0 && project.Config.Reviewers[0].Harness == projectHarness {
 		primaryModel = project.Config.Reviewers[0].AgentConfig.Model
@@ -333,7 +339,7 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.Pr
 	}
 	targets := c.quota.Targets(primary)
 	if len(targets) == 0 {
-		return workerquota.Target{}, time.Time{}, ""
+		return workerquota.Target{}, time.Time{}, "", false
 	}
 	defaults := c.quota.DefaultModels(ctx, project, targets)
 	var failures []workerquota.Failure
@@ -357,22 +363,61 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.Pr
 		if c.routeReady != nil && !c.routeReady(ctx, route) {
 			continue
 		}
+		// If this route's harness has already hit the per-SHA auto-retry cap on
+		// every pending PR, yield to the next eligible fallback route instead of
+		// stranding the pending HEAD.
+		if allPendingPRsRetryCapped(prs, runs, domain.ReviewerHarness(route.Harness)) {
+			continue
+		}
 		if route != primary || route.Mode != "" || route.Account != "" {
 			c.logger.Info("auto-review: reviewer quota selected configured route",
 				"role", workerquota.RoleReviewer, "project", project.ID,
 				"harness", route.Harness, "model", route.Model, "effort", route.Effort,
 				"mode", route.Mode, "account", route.Account)
 		}
-		return route, time.Time{}, ""
+		return route, time.Time{}, "", hasFreshPositiveWindow(windows[route], now)
 	}
 	if blocked {
 		retryAt, ok := workerquota.NextResetAt(targets, windows, now)
 		if !ok {
 			retryAt = now.Add(c.sweepInterval)
 		}
-		return workerquota.Target{}, retryAt, "reviewer_quota_deferred"
+		return workerquota.Target{}, retryAt, "reviewer_quota_deferred", false
 	}
-	return workerquota.Target{}, time.Time{}, "reviewer_quota_no_ready_route"
+	return workerquota.Target{}, time.Time{}, "reviewer_quota_no_ready_route", false
+}
+
+func allPendingPRsRetryCapped(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness) bool {
+	pending := 0
+	capped := 0
+	for _, pr := range prs {
+		if pr.URL == "" || pr.HeadSHA == "" || pr.Draft || pr.Merged || pr.Closed {
+			continue
+		}
+		if crossHarnessHeadReason(runs, pr.URL, pr.HeadSHA) != "" {
+			continue
+		}
+		pending++
+		harnessRuns := make([]domain.ReviewRun, 0, len(runs))
+		for _, r := range runs {
+			if r.Harness == harness || r.Harness == "" {
+				harnessRuns = append(harnessRuns, r)
+			}
+		}
+		if existingHeadReason(harnessRuns, pr.URL, pr.HeadSHA) == "failed_same_sha_retry_limit" {
+			capped++
+		}
+	}
+	return pending > 0 && capped == pending
+}
+
+func hasFreshPositiveWindow(windows []workerquota.Window, now time.Time) bool {
+	for _, w := range windows {
+		if !w.Exhausted && !w.ObservedAt.IsZero() && !w.ObservedAt.After(now) && now.Before(w.ValidUntil) {
+			return true
+		}
+	}
+	return false
 }
 
 func crossHarnessHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string {

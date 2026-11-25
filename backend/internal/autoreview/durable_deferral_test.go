@@ -184,3 +184,105 @@ func TestReviewerQuotaLiveChatQuotaExhaustedWithoutResetSwitchesToFallback(t *te
 		t.Fatalf("expected failover to AGY with cross-harness dedup, got %+v", trig.calls[0])
 	}
 }
+
+func TestReviewerQuotaRetryCappedPrimaryYieldsToEligibleFallbackOnSameHead(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	st := &fakeStore{
+		session: domain.SessionRecord{
+			ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+			AutoReviewEnabled: true,
+			Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+		},
+		project: domain.ProjectRecord{
+			ID: "p", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}},
+		},
+		prs: []domain.PullRequest{{URL: "https://github.com/o/r/pull/1", Number: 1, HeadSHA: "sha-1"}},
+		runs: []domain.ReviewRun{
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
+		},
+	}
+	trig := &recordingOptionsTrigger{}
+	coord := New(st, trig, Config{
+		Clock: func() time.Time { return now },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			// Codex quota has recovered (non-exhausted), but Codex already hit its per-SHA retry cap.
+			Source: quotaTestSource{
+				{Harness: domain.HarnessCodex}: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: false}},
+				{Harness: domain.HarnessAgy}:   {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: false}},
+			},
+		},
+	})
+	res, err := coord.EvaluateSession(context.Background(), "p-1")
+	if err != nil || !res.Triggered || len(trig.calls) != 1 {
+		t.Fatalf("expected retry-capped Codex to yield to AGY on same HEAD, got res=%+v err=%v calls=%+v", res, err, trig.calls)
+	}
+	if trig.calls[0].Harness != domain.ReviewerAgy {
+		t.Fatalf("selected harness = %q, want agy", trig.calls[0].Harness)
+	}
+}
+
+func TestReviewerQuotaFreshPositiveEvidenceWakesPersistedDeferralOnSameHead(t *testing.T) {
+	ctx := t.Context()
+	store := sqlitetest.MustOpen(t)
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	resetAt := now.Add(30 * time.Minute)
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID:     "p",
+		Path:   t.TempDir(),
+		Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.CreateSession(ctx, domain.SessionRecord{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AutoReviewEnabled: true,
+		Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+		CreatedAt:         now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteSCMObservation(ctx, domain.PullRequest{
+		URL: "https://github.com/o/r/pull/1", Number: 1, SessionID: sess.ID, HeadSHA: "sha-1", UpdatedAt: now,
+	}, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+
+	// Persist deferral when all routes are exhausted.
+	trig := &recordingOptionsTrigger{}
+	coord1 := New(store, trig, Config{
+		Clock: func() time.Time { return now },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy}},
+			Source: quotaTestSource{
+				{Harness: domain.HarnessCodex}: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(2 * time.Hour), ResetAt: resetAt, Exhausted: true}},
+				{Harness: domain.HarnessAgy}:   {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(2 * time.Hour), ResetAt: now.Add(time.Hour), Exhausted: true}},
+			},
+		},
+	})
+	if res, err := coord1.EvaluateSession(ctx, sess.ID); err != nil || res.Triggered || res.Reason != "reviewer_quota_deferred" {
+		t.Fatalf("coord1 = %+v, err=%v", res, err)
+	}
+
+	// Before resetAt, fresh positive evidence arrives for AGY on the SAME HEAD -> wakes immediately!
+	coord2 := New(store, trig, Config{
+		Clock: func() time.Time { return now.Add(5 * time.Minute) },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			Source: quotaTestSource{
+				{Harness: domain.HarnessCodex}:                            {{ObservedAt: now.Add(4 * time.Minute), ValidUntil: now.Add(2 * time.Hour), ResetAt: resetAt, Exhausted: true}},
+				{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}: {{ObservedAt: now.Add(4 * time.Minute), ValidUntil: now.Add(2 * time.Hour), Exhausted: false}},
+			},
+		},
+	})
+	res, err := coord2.EvaluateSession(ctx, sess.ID)
+	if err != nil || !res.Triggered || len(trig.calls) != 1 || trig.calls[0].Harness != domain.ReviewerAgy {
+		t.Fatalf("fresh positive evidence should wake same HEAD: res=%+v err=%v calls=%+v", res, err, trig.calls)
+	}
+}
