@@ -74,8 +74,9 @@ type Coordinator struct {
 	quotaFailures func(context.Context, time.Time) ([]workerquota.Failure, error)
 	routeReady    func(context.Context, workerquota.Target) bool
 
-	deferMu       sync.Mutex
-	deferredUntil map[domain.SessionID]time.Time
+	deferMu         sync.Mutex
+	deferredUntil   map[domain.SessionID]time.Time
+	lastDeferralSig map[domain.SessionID]string
 }
 
 // Config customizes coordinator timing, logging, and optional reviewer quota failover.
@@ -100,8 +101,9 @@ func New(store Store, reviews Trigger, cfg Config) *Coordinator {
 		logger:        cfg.Logger,
 		quota:         cfg.Quota,
 		quotaFailures: cfg.QuotaFailures,
-		routeReady:    cfg.RouteReady,
-		deferredUntil: make(map[domain.SessionID]time.Time),
+		routeReady:      cfg.RouteReady,
+		deferredUntil:   make(map[domain.SessionID]time.Time),
+		lastDeferralSig: make(map[domain.SessionID]string),
 	}
 	if c.clock == nil {
 		c.clock = time.Now
@@ -156,30 +158,39 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		// Always evaluate current routes and fresh quota evidence so positive
 		// quota recovery or newly configured fallbacks can wake a deferred HEAD.
 		deferredRetryAt, hasActiveDeferral := c.activeDeferral(ctx, id, prs, now)
-		route, retryAt, quotaReason, freshPositive := c.selectReviewerRoute(ctx, project, harness, prs, runs, now, hasActiveDeferral)
-		if quotaReason != "" {
-			if quotaReason == "reviewer_quota_deferred" {
-				c.persistDeferrals(ctx, id, prs, retryAt, quotaReason, now)
-				c.logger.Info("auto-review: all reviewer quota routes exhausted; deferring",
-					"role", workerquota.RoleReviewer, "session_id", id, "retry_at", retryAt)
-				return Result{Reason: quotaReason, RetryAt: retryAt}, nil
+		decision := c.selectReviewerRoute(ctx, id, project, harness, prs, runs, now, hasActiveDeferral)
+		if decision.reason != "" {
+			if decision.reason == "reviewer_quota_deferred" {
+				c.persistDeferrals(ctx, id, prs, decision.retryAt, decision.reason, now)
+				c.logDeferralDecision(id, decision, hasActiveDeferral)
+				return Result{Reason: decision.reason, RetryAt: decision.retryAt}, nil
 			}
 			if hasActiveDeferral {
+				c.logger.Debug("auto-review: retaining active reviewer quota deferral",
+					"role", workerquota.RoleReviewer, "session_id", id,
+					"retry_at", deferredRetryAt, "route_reason", decision.reason,
+					"total_routes", decision.totalRoutes,
+					"exhausted_routes", decision.exhaustedRoutes,
+					"unready_routes", decision.unreadyRoutes,
+					"retry_capped_routes", decision.retryCappedRoutes,
+					"unknown_during_deferral_routes", decision.unknownDuringDeferralRoutes)
 				return Result{Reason: "reviewer_quota_deferred", RetryAt: deferredRetryAt}, nil
 			}
-			return Result{Reason: quotaReason}, nil
+			return Result{Reason: decision.reason}, nil
 		}
-		if hasActiveDeferral && !freshPositive {
+		if hasActiveDeferral && !decision.freshPositive {
 			// Retain persisted deferral when no fresh positive quota evidence
 			// is available (e.g. Quotum temporarily unavailable after restart).
+			c.logger.Debug("auto-review: retaining active reviewer quota deferral; no fresh positive evidence",
+				"role", workerquota.RoleReviewer, "session_id", id, "retry_at", deferredRetryAt)
 			return Result{Reason: "reviewer_quota_deferred", RetryAt: deferredRetryAt}, nil
 		}
-		if hasActiveDeferral && freshPositive {
+		if hasActiveDeferral && decision.freshPositive {
 			c.clearDeferrals(ctx, id, prs)
 		}
-		if route.Harness != "" {
-			selectedRoute = &route
-			harness = domain.ReviewerHarness(route.Harness)
+		if decision.route.Harness != "" {
+			selectedRoute = &decision.route
+			harness = domain.ReviewerHarness(decision.route.Harness)
 		}
 	}
 	if harness == "" {
@@ -314,6 +325,9 @@ func (c *Coordinator) persistDeferrals(ctx context.Context, id domain.SessionID,
 }
 
 func (c *Coordinator) clearDeferrals(ctx context.Context, id domain.SessionID, prs []domain.PullRequest) {
+	c.deferMu.Lock()
+	delete(c.lastDeferralSig, id)
+	c.deferMu.Unlock()
 	if ds, ok := c.store.(DeferralStore); ok {
 		for _, pr := range prs {
 			if pr.URL != "" && pr.HeadSHA != "" {
@@ -327,7 +341,128 @@ func (c *Coordinator) clearDeferrals(ctx context.Context, id domain.SessionID, p
 	delete(c.deferredUntil, id)
 }
 
-func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, prs []domain.PullRequest, runs []domain.ReviewRun, now time.Time, requireFreshPositive bool) (workerquota.Target, time.Time, string, bool) {
+type routeDecision struct {
+	route                       workerquota.Target
+	retryAt                     time.Time
+	retryAtSource               string
+	reason                      string
+	freshPositive               bool
+	totalRoutes                 int
+	exhaustedRoutes             int
+	unreadyRoutes               int
+	retryCappedRoutes           int
+	unknownDuringDeferralRoutes int
+}
+
+type routeWindowSummary struct {
+	matchedWindows int
+	evidence       string
+	observedAt     time.Time
+	validUntil     time.Time
+	resetAt        time.Time
+}
+
+func summarizeRouteWindows(windows []workerquota.Window, now time.Time) routeWindowSummary {
+	summary := routeWindowSummary{
+		matchedWindows: len(windows),
+		evidence:       "unknown",
+	}
+	exhausted := false
+	freshPositive := false
+	for _, w := range windows {
+		if !w.ObservedAt.IsZero() && (summary.observedAt.IsZero() || w.ObservedAt.After(summary.observedAt)) {
+			summary.observedAt = w.ObservedAt
+		}
+		active := !w.ObservedAt.IsZero() && !w.ObservedAt.After(now) && now.Before(w.ValidUntil)
+		if active {
+			if summary.validUntil.IsZero() || w.ValidUntil.Before(summary.validUntil) {
+				summary.validUntil = w.ValidUntil
+			}
+			if !w.ResetAt.IsZero() && now.Before(w.ResetAt) {
+				if summary.resetAt.IsZero() || w.ResetAt.Before(summary.resetAt) {
+					summary.resetAt = w.ResetAt
+				}
+			}
+			if w.Exhausted && (w.ResetAt.IsZero() || now.Before(w.ResetAt)) {
+				exhausted = true
+			} else if !w.Exhausted {
+				freshPositive = true
+			}
+		} else if !w.ValidUntil.IsZero() && summary.validUntil.IsZero() {
+			summary.validUntil = w.ValidUntil
+		}
+	}
+	switch {
+	case exhausted:
+		summary.evidence = "exhausted"
+	case freshPositive:
+		summary.evidence = "available"
+	}
+	return summary
+}
+
+func computeRetryDeadline(targets []workerquota.Target, windows map[workerquota.Target][]workerquota.Window, now time.Time, sweepInterval time.Duration) (time.Time, string) {
+	var earliest time.Time
+	source := "sweep_interval"
+	for _, target := range targets {
+		for _, w := range windows[target] {
+			if !w.Exhausted || w.ObservedAt.IsZero() || w.ObservedAt.After(now) ||
+				!now.Before(w.ValidUntil) || (!w.ResetAt.IsZero() && !now.Before(w.ResetAt)) {
+				continue
+			}
+			candidate := w.ResetAt
+			candidateSource := "quota_reset"
+			if candidate.IsZero() || w.ValidUntil.Before(candidate) {
+				candidate = w.ValidUntil
+				candidateSource = "snapshot_expiry"
+			}
+			if candidate.After(now) && (earliest.IsZero() || candidate.Before(earliest)) {
+				earliest = candidate
+				source = candidateSource
+			}
+		}
+	}
+	if earliest.IsZero() {
+		return now.Add(sweepInterval), "sweep_interval"
+	}
+	return earliest, source
+}
+
+func (c *Coordinator) logDeferralDecision(id domain.SessionID, d routeDecision, hasActiveDeferral bool) {
+	allExhausted := d.totalRoutes > 0 && d.exhaustedRoutes == d.totalRoutes
+	msg := "auto-review: no eligible reviewer quota route available; deferring"
+	if allExhausted {
+		msg = "auto-review: all reviewer quota routes exhausted; deferring"
+	}
+	sig := fmt.Sprintf("%s|%s|%t|%d|%d|%d|%d|%d",
+		d.retryAt.UTC().Format(time.RFC3339), d.retryAtSource, allExhausted,
+		d.totalRoutes, d.exhaustedRoutes, d.unreadyRoutes, d.retryCappedRoutes, d.unknownDuringDeferralRoutes)
+	c.deferMu.Lock()
+	changed := c.lastDeferralSig[id] != sig
+	c.lastDeferralSig[id] = sig
+	c.deferMu.Unlock()
+
+	args := []any{
+		"role", workerquota.RoleReviewer,
+		"session_id", id,
+		"retry_at", d.retryAt,
+		"retry_at_source", d.retryAtSource,
+		"active_deferral", hasActiveDeferral,
+		"all_routes_exhausted", allExhausted,
+		"total_routes", d.totalRoutes,
+		"exhausted_routes", d.exhaustedRoutes,
+		"unready_routes", d.unreadyRoutes,
+		"retry_capped_routes", d.retryCappedRoutes,
+		"unknown_during_deferral_routes", d.unknownDuringDeferralRoutes,
+	}
+	if changed {
+		c.logger.Info(msg, args...)
+	} else {
+		c.logger.Debug(msg, args...)
+	}
+}
+
+func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.SessionID, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, prs []domain.PullRequest, runs []domain.ReviewRun, now time.Time, requireFreshPositive bool) routeDecision {
 	var primaryModel, primaryEffort string
 	if len(project.Config.Reviewers) > 0 && project.Config.Reviewers[0].Harness == projectHarness {
 		primaryModel = project.Config.Reviewers[0].AgentConfig.Model
@@ -343,7 +478,7 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.Pr
 	}
 	targets := c.quota.Targets(primary)
 	if len(targets) == 0 {
-		return workerquota.Target{}, time.Time{}, "", false
+		return routeDecision{}
 	}
 	defaults := c.quota.DefaultModels(ctx, project, targets)
 	var failures []workerquota.Failure
@@ -358,44 +493,76 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.Pr
 	if err != nil {
 		c.logger.Debug("auto-review: quota source unavailable", "error", err)
 	}
+	decision := routeDecision{totalRoutes: len(targets)}
+	logRoute := func(route workerquota.Target, summary routeWindowSummary, freshPositive bool, outcome string) {
+		c.logger.Debug("auto-review: reviewer quota route evaluated",
+			"role", workerquota.RoleReviewer,
+			"session_id", sessionID,
+			"harness", route.Harness,
+			"model", route.Model,
+			"effort", route.Effort,
+			"mode", route.Mode,
+			"account", route.Account,
+			"matched_windows", summary.matchedWindows,
+			"evidence", summary.evidence,
+			"fresh_positive", freshPositive,
+			"observed_at", summary.observedAt,
+			"valid_until", summary.validUntil,
+			"reset_at", summary.resetAt,
+			"active_deferral", requireFreshPositive,
+			"decision", outcome)
+	}
 	blocked := false
 	for _, route := range targets {
+		routeWindows := windows[route]
+		summary := summarizeRouteWindows(routeWindows, now)
+		freshPositive := hasFreshPositiveWindow(routeWindows, now)
 		if _, ok := workerquota.Select([]workerquota.Target{route}, windows, now); !ok {
 			blocked = true
+			decision.exhaustedRoutes++
+			logRoute(route, summary, freshPositive, "quota_exhausted")
 			continue
 		}
 		if c.routeReady != nil && !c.routeReady(ctx, route) {
+			decision.unreadyRoutes++
+			logRoute(route, summary, freshPositive, "route_not_ready")
 			continue
 		}
 		// If this route's harness has already hit the per-SHA auto-retry cap on
 		// every pending PR, yield to the next eligible fallback route instead of
 		// stranding the pending HEAD.
 		if allPendingPRsRetryCapped(prs, runs, domain.ReviewerHarness(route.Harness)) {
+			decision.retryCappedRoutes++
+			logRoute(route, summary, freshPositive, "retry_capped")
 			continue
 		}
-		freshPositive := hasFreshPositiveWindow(windows[route], now)
 		// During an active durable deferral, do not stop on an earlier route
 		// whose quota is merely unknown; keep scanning for a later route with
 		// fresh positive capacity.
 		if requireFreshPositive && !freshPositive {
+			decision.unknownDuringDeferralRoutes++
+			logRoute(route, summary, freshPositive, "deferral_requires_fresh_positive")
 			continue
 		}
+		logRoute(route, summary, freshPositive, "selected")
 		if route != primary || route.Mode != "" || route.Account != "" {
 			c.logger.Info("auto-review: reviewer quota selected configured route",
-				"role", workerquota.RoleReviewer, "project", project.ID,
+				"role", workerquota.RoleReviewer, "session_id", sessionID, "project", project.ID,
 				"harness", route.Harness, "model", route.Model, "effort", route.Effort,
-				"mode", route.Mode, "account", route.Account)
+				"mode", route.Mode, "account", route.Account,
+				"evidence", summary.evidence, "fresh_positive", freshPositive)
 		}
-		return route, time.Time{}, "", freshPositive
+		decision.route = route
+		decision.freshPositive = freshPositive
+		return decision
 	}
 	if blocked {
-		retryAt, ok := workerquota.NextResetAt(targets, windows, now)
-		if !ok {
-			retryAt = now.Add(c.sweepInterval)
-		}
-		return workerquota.Target{}, retryAt, "reviewer_quota_deferred", false
+		decision.retryAt, decision.retryAtSource = computeRetryDeadline(targets, windows, now, c.sweepInterval)
+		decision.reason = "reviewer_quota_deferred"
+		return decision
 	}
-	return workerquota.Target{}, time.Time{}, "reviewer_quota_no_ready_route", false
+	decision.reason = "reviewer_quota_no_ready_route"
+	return decision
 }
 
 func allPendingPRsRetryCapped(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness) bool {
