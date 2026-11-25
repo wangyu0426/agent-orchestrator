@@ -14,6 +14,7 @@ import (
 func TestRegistryMatchesDomainVocabulary(t *testing.T) {
 	registered := map[domain.ReviewerHarness]bool{}
 	oneShotReviewers := map[domain.ReviewerHarness]bool{
+		domain.ReviewerAgy:    true,
 		domain.ReviewerAider:  true,
 		domain.ReviewerAuggie: true,
 		domain.ReviewerDroid:  true,
