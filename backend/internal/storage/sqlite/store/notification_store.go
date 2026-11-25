@@ -12,6 +12,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 // CreateNotification inserts one unread notification. It returns created=false
@@ -233,7 +234,25 @@ func (s *Store) ReconcileResolvedNotifications(ctx context.Context, at time.Time
 				break
 			}
 		}
-		if !domain.MergeReadinessOf(pr, unresolved).ReadyToMerge() {
+		ready := domain.MergeReadinessOf(pr, unresolved).ReadyToMerge()
+		if ready && s.structuredReview.Enabled {
+			reviews, err := s.ListPRReviews(ctx, row.PRURL)
+			if err != nil {
+				return nil, fmt.Errorf("reconcile read pr reviews %s: %w", row.PRURL, err)
+			}
+			eval := structuredreview.Evaluate(structuredreview.EvalInput{
+				Policy:               s.structuredReview,
+				PRAuthor:             pr.Author,
+				CurrentHeadSHA:       pr.HeadSHA,
+				GitHubDecision:       pr.Review,
+				Reviews:              reviews,
+				HasUnresolvedThreads: unresolved,
+			})
+			if eval.EffectiveDecision == domain.ReviewChangesRequest {
+				ready = false
+			}
+		}
+		if !ready {
 			stalePRs = append(stalePRs, row.PRURL)
 		}
 	}

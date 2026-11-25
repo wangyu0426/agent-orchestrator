@@ -8463,8 +8463,28 @@ export interface components {
             hasUnresolvedHumanComments: boolean;
             resolvedBy?: components["schemas"]["SessionPRUnresolvedReviewer"][];
             reviews?: components["schemas"]["SessionPRReviewEntry"][];
+            structured?: components["schemas"]["SessionPRStructuredReviewDiagnostics"];
             unresolvedBy: components["schemas"]["SessionPRUnresolvedReviewer"][];
             unresolvedThreadCount?: null | number;
+        };
+        SessionPRStructuredReviewDiagnostics: {
+            /** @enum {string} */
+            effectiveDecision: "none" | "approved" | "changes_requested" | "review_required";
+            /** @enum {string} */
+            githubDecision: "none" | "approved" | "changes_requested" | "review_required";
+            pendingFeedback?: components["schemas"]["SessionPRStructuredReviewPendingFeedback"][];
+            reviewedSha?: string;
+            /** @enum {string} */
+            source?: "native" | "structured";
+        };
+        SessionPRStructuredReviewPendingFeedback: {
+            /** @enum {string} */
+            deliveryStatus: "pending" | "delivered";
+            feedback: string;
+            reviewId: string;
+            reviewUrl?: string;
+            reviewedSha: string;
+            reviewer: string;
         };
         SessionPRSummary: {
             additions: number;

@@ -25,6 +25,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/systeminstall"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 type wiringReadinessProvider struct {
@@ -786,7 +787,7 @@ func TestWiring_StartLifecycleThreadsMessengerIntoLCM(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	messenger := &captureMessenger{}
-	stack := startLifecycle(ctx, t.TempDir(), store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, log)
+	stack := startLifecycle(ctx, t.TempDir(), structuredreview.Policy{}, store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, log)
 	t.Cleanup(stack.Stop)
 	t.Cleanup(cancel)
 
@@ -861,7 +862,7 @@ func TestWiring_MergeConflictNudgeReArmsAfterConflictClears(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	messenger := &captureMessenger{}
-	stack := startLifecycle(ctx, t.TempDir(), store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, log)
+	stack := startLifecycle(ctx, t.TempDir(), structuredreview.Policy{}, store, tmux.New(tmux.Options{}), messenger, nil, nil, nil, log)
 	t.Cleanup(stack.Stop)
 	t.Cleanup(cancel)
 

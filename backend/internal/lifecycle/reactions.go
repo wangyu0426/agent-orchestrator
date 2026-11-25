@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 const reviewMaxNudge = 3
@@ -181,9 +182,10 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		// The worker posts with the PR author's account, so its own replies
 		// ("Fixed in abc123") come back as review comments; never inject them.
 		// Unknown author (no PR row yet): nothing is filtered.
-		var prAuthor string
+		var prAuthor, prHeadSHA string
 		if pr, ok, err := m.store.GetPR(ctx, o.URL); err == nil && ok {
 			prAuthor = pr.Author
+			prHeadSHA = pr.HeadSHA
 		}
 		o.Comments = prCommentObservations(withoutPRAuthorReplies(comments, prAuthor))
 
@@ -246,6 +248,29 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 					msg += "\nPR: " + domain.SanitizeControlChars(o.URL)
 				}
 				nudges = append(nudges, pendingNudge{key: "review:" + o.URL + ":" + review.ID, sig: string(review.State), msg: msg, maxAttempts: reviewMaxNudge})
+			}
+		}
+
+		if m.structuredReview.Enabled {
+			eval := structuredreview.Evaluate(structuredreview.EvalInput{
+				Policy:               m.structuredReview,
+				PRAuthor:             prAuthor,
+				CurrentHeadSHA:       prHeadSHA,
+				GitHubDecision:       o.Review,
+				Reviews:              reviews,
+				HasUnresolvedThreads: hasUnresolvedComments(o.Comments),
+			})
+			for _, req := range eval.ActiveChangeRequests {
+				if !req.Review.AutoInjectReview {
+					continue
+				}
+				msg := formatStructuredReviewChangesRequestedMessage(req, o.URL, ident)
+				nudges = append(nudges, pendingNudge{
+					key:         structuredreview.NudgeKey(o.URL, req.Review.ID),
+					sig:         req.Signature,
+					msg:         msg,
+					maxAttempts: reviewMaxNudge,
+				})
 			}
 		}
 	}
@@ -594,6 +619,23 @@ func (m *Manager) scmObservationReadyToMerge(ctx context.Context, o ports.SCMObs
 			return false, nil
 		}
 	}
+	if m.structuredReview.Enabled {
+		reviews, err := m.store.ListPRReviews(ctx, prURL)
+		if err != nil {
+			return false, fmt.Errorf("list persisted reviews for %s: %w", prURL, err)
+		}
+		eval := structuredreview.Evaluate(structuredreview.EvalInput{
+			Policy:               m.structuredReview,
+			PRAuthor:             o.PR.Author,
+			CurrentHeadSHA:       o.PR.HeadSHA,
+			GitHubDecision:       domain.ReviewDecision(o.Review.Decision),
+			Reviews:              reviews,
+			HasUnresolvedThreads: false,
+		})
+		if eval.EffectiveDecision == domain.ReviewChangesRequest {
+			return false, nil
+		}
+	}
 	return true, nil
 }
 
@@ -938,6 +980,74 @@ func formatReviewChangesRequestedMessage(review domain.PullRequestReview) string
 	}
 	msg.WriteString("\n\nAddress the requested changes and push. You should not need to re-fetch the review unless you need additional context beyond what Orchestrator has provided here.")
 	return msg.String()
+}
+
+func formatStructuredReviewChangesRequestedMessage(req structuredreview.ActiveChangeRequest, prURL, ident string) string {
+	var msg strings.Builder
+	author := domain.SanitizeControlChars(req.Review.Author)
+	if strings.TrimSpace(author) == "" {
+		author = "unknown reviewer"
+	}
+	target := "your PR"
+	if ident != "" && ident != "your PR" {
+		target = ident
+	}
+	fmt.Fprintf(&msg, "A structured changes-requested review from @%s is on %s.", author, target)
+	if req.ReviewedSHA != "" {
+		fmt.Fprintf(&msg, "\nReviewed HEAD: %s", domain.SanitizeControlChars(req.ReviewedSHA))
+	}
+	if feedback := domain.SanitizeControlChars(req.Feedback); strings.TrimSpace(feedback) != "" {
+		fmt.Fprintf(&msg, "\n\nFeedback:\n%s", feedback)
+	}
+	if req.Review.URL != "" {
+		fmt.Fprintf(&msg, "\n\nReview URL: %s", domain.SanitizeControlChars(req.Review.URL))
+	}
+	if req.Review.ID != "" {
+		fmt.Fprintf(&msg, "\nReview ID: %s", domain.SanitizeControlChars(req.Review.ID))
+	}
+	if prURL != "" {
+		fmt.Fprintf(&msg, "\nPR: %s", domain.SanitizeControlChars(prURL))
+	}
+	msg.WriteString("\n\nAddress the requested changes and push. You should not need to re-fetch the review unless you need additional context beyond what Orchestrator has provided here.")
+	return msg.String()
+}
+
+// PRReviewDiagnostics computes AO's structured review diagnostics for prURL,
+// keeping GitHub's native decision separate from AO's local effective decision
+// and exposing delivery status (pending vs delivered) for active feedback.
+func (m *Manager) PRReviewDiagnostics(ctx context.Context, prURL string) (structuredreview.Diagnostics, bool, error) {
+	pr, ok, err := m.store.GetPR(ctx, prURL)
+	if err != nil || !ok {
+		return structuredreview.Diagnostics{}, ok, err
+	}
+	reviews, err := m.store.ListPRReviews(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("list persisted reviews for %s: %w", prURL, err)
+	}
+	comments, err := m.store.ListPRComments(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("list persisted comments for %s: %w", prURL, err)
+	}
+	sigRaw, err := m.store.GetPRLastNudgeSignature(ctx, prURL)
+	if err != nil {
+		return structuredreview.Diagnostics{}, false, fmt.Errorf("read nudge signature for %s: %w", prURL, err)
+	}
+	unresolved := false
+	for _, c := range withoutPRAuthorReplies(comments, pr.Author) {
+		if domain.IsActionableReviewComment(c.Resolved, c.IsBot, c.File, c.Line) {
+			unresolved = true
+			break
+		}
+	}
+	eval := structuredreview.Evaluate(structuredreview.EvalInput{
+		Policy:               m.structuredReview,
+		PRAuthor:             pr.Author,
+		CurrentHeadSHA:       pr.HeadSHA,
+		GitHubDecision:       pr.Review,
+		Reviews:              reviews,
+		HasUnresolvedThreads: unresolved,
+	})
+	return structuredreview.BuildDiagnostics(eval, prURL, sigRaw), true, nil
 }
 
 func formatReviewCommentsMessage(comments []ports.PRCommentObservation) string {

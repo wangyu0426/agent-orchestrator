@@ -37,6 +37,7 @@ import (
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 const startupReconcileWorkers = 4
@@ -80,7 +81,7 @@ type lifecycleStack struct {
 // reaper. The goroutine stops when ctx is cancelled; Stop waits for it to drain.
 // The messenger is the per-daemon agent messenger the LCM uses to nudge agents
 // in response to SCM observations (CI failure, review feedback, merge conflict).
-func startLifecycle(ctx context.Context, dataDir string, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
+func startLifecycle(ctx context.Context, dataDir string, structuredReview structuredreview.Policy, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
 	lcm := lifecycle.New(store, messenger,
 		lifecycle.WithNotificationSink(notifier),
 		lifecycle.WithTelemetry(telemetry),
@@ -92,6 +93,7 @@ func startLifecycle(ctx context.Context, dataDir string, store *sqlite.Store, ru
 		lifecycle.WithStartupSignalGate(startupSignalGatesInput(agents)),
 		lifecycle.WithUrgentNudgeGate(urgentNudgeWaitingInputSafe(agents)),
 		lifecycle.WithDataDir(dataDir),
+		lifecycle.WithStructuredReviewPolicy(structuredReview),
 	)
 	reaperStart := make(chan struct{})
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger, StartAfter: reaperStart})
@@ -415,6 +417,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable:        activitydispatch.FullySupportsHarness,
 		OutputTypeReconciler: lcm,
+		PRReviewDiagnostics:  lcm,
 		ArtifactDeleter:      artifactVersions,
 		ShareLinks:           sessionartifacts.NewShareLinks(cfg.DataDir, cfg.CloudControlPlaneURL),
 	}

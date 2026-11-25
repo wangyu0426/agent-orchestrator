@@ -26,6 +26,7 @@ import (
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
@@ -210,6 +211,10 @@ type outputTypeReconciler interface {
 	ReconcileSessionOutputType(ctx context.Context, id domain.SessionID) error
 }
 
+type prReviewDiagnosticsReader interface {
+	PRReviewDiagnostics(ctx context.Context, prURL string) (structuredreview.Diagnostics, bool, error)
+}
+
 // terminalTitleSource reads the titles terminal programs last set.
 type terminalTitleSource interface {
 	ListSessionTerminalTitles(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]string, error)
@@ -280,6 +285,7 @@ type Service struct {
 	// service tests that construct Service directly; ClaimPR degrades to
 	// relying on the poller in that case.
 	outputTypeReconciler outputTypeReconciler
+	prReviewDiagnostics  prReviewDiagnosticsReader
 	// artifactDeleter deletes a session's artifact files and version rows. Nil
 	// makes DeleteArtifacts fail rather than delete outside the capture lock.
 	artifactDeleter artifactDeleter
@@ -362,6 +368,9 @@ type Deps struct {
 	// succeeds but the pr OutputType only lands on the next artifact-output
 	// poll tick.
 	OutputTypeReconciler outputTypeReconciler
+	// PRReviewDiagnostics projects AO's local structured review evaluation and
+	// durable delivery status into PR summaries; daemon wiring passes *lifecycle.Manager.
+	PRReviewDiagnostics prReviewDiagnosticsReader
 	// ArtifactDeleter deletes a session's artifacts; daemon wiring passes the
 	// shared *artifactversions.Capturer so a delete cannot race a capture.
 	ArtifactDeleter artifactDeleter
@@ -377,7 +386,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, prReviewDiagnostics: d.PRReviewDiagnostics, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {

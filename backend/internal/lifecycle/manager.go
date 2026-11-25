@@ -18,6 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
+	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
 type sessionStore interface {
@@ -198,6 +199,12 @@ func WithDataDir(dir string) Option {
 	return func(m *Manager) { m.dataDir = dir }
 }
 
+// WithStructuredReviewPolicy configures opt-in parsing and authorization of
+// structured AO-REVIEW review-body decisions on submitted COMMENTED reviews.
+func WithStructuredReviewPolicy(policy structuredreview.Policy) Option {
+	return func(m *Manager) { m.structuredReview = policy }
+}
+
 // WithContainerReaper wires the container leg of #2652: MarkTerminated will
 // force-remove the terminated session's ao.session-labeled Docker containers,
 // unless the project opts out via ProjectConfig.ContainerReap.Disabled.
@@ -270,7 +277,8 @@ type Manager struct {
 	operationGate    sessionOperationGate
 	// dataDir backs ReconcileSessionOutputType's artifact-dir fallback for
 	// sessions rows created before session_output_type/artifact_dir existed.
-	dataDir string
+	dataDir          string
+	structuredReview structuredreview.Policy
 
 	mu        sync.Mutex
 	window    time.Duration
