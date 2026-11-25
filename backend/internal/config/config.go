@@ -210,7 +210,9 @@ type Config struct {
 	// TrackerIntake gates the issue-intake observer daemon-wide
 	// (AO_TRACKER_INTAKE).
 	TrackerIntake bool
-	WorkerQuota   *workerquota.Policy
+	WorkerQuota       *workerquota.Policy
+	ReviewerQuota     *workerquota.Policy
+	OrchestratorQuota *workerquota.Policy
 	// StructuredReview controls opt-in parsing and authorization of structured
 	// AO-REVIEW review-body decisions on submitted COMMENTED reviews.
 	StructuredReview structuredreview.Policy
@@ -512,11 +514,13 @@ func Load() (Config, error) {
 		cfg.TrackerIntake = v
 	}
 
-	policy, err := loadWorkerQuota()
+	quotas, err := loadRoleQuotas()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.WorkerQuota = policy
+	cfg.WorkerQuota = quotas.Worker
+	cfg.ReviewerQuota = quotas.Reviewer
+	cfg.OrchestratorQuota = quotas.Orchestrator
 
 	srPolicy, err := loadStructuredReview()
 	if err != nil {

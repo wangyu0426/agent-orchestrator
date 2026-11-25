@@ -20,8 +20,64 @@ quota window is exhausted.
    session interface from the daemon default (falling back to TUI if default
    Chat is unavailable for that harness, or Chat if the harness is Chat-only).
 
-Interactive task creation, orchestrator sessions, and reviewer routing continue
-to use their own settings.
+Interactive task creation and explicit manual overrides continue to use their
+own settings.
+
+## Role-specific policies (Worker, Reviewer, Orchestrator)
+
+Quota failover can be opted into independently per role. All enabled roles share
+the same Quotum hub cache (`AO_QUOTUM_*`) and durable native refusal evidence,
+so a shared provider or account limit (such as Codex weekly quota exhaustion) is
+respected consistently across Worker, Reviewer, and Orchestrator.
+
+| Role | Toggle | Optional primary | Ordered fallbacks |
+| --- | --- | --- | --- |
+| Worker | `AO_WORKER_QUOTA_FAILOVER=on` | `AO_WORKER_QUOTA_PRIMARY` | `AO_WORKER_QUOTA_FALLBACKS` |
+| Reviewer | `AO_REVIEWER_QUOTA_FAILOVER=on` | `AO_REVIEWER_QUOTA_PRIMARY` | `AO_REVIEWER_QUOTA_FALLBACKS` |
+| Orchestrator | `AO_ORCHESTRATOR_QUOTA_FAILOVER=on` | `AO_ORCHESTRATOR_QUOTA_PRIMARY` | `AO_ORCHESTRATOR_QUOTA_FALLBACKS` |
+
+Each target object supports:
+- `"harness"` (required): known agent harness (or reviewer harness for Reviewer).
+- `"model"` (optional): provider model ID; omitted uses the provider default.
+- `"effort"` (optional): reasoning effort.
+- `"mode"` (optional): `"chat"` or `"tui"`.
+- `"account"` (optional): saved AO agent account ID. Repeated harnesses with
+  different models or distinct saved accounts are allowed and evaluated in order;
+  computer-login Quotum bindings do not falsely block a distinct saved account.
+
+### Multi-role example
+
+```sh
+# Worker: prefer a fast model with ordered fallbacks
+export AO_WORKER_QUOTA_FAILOVER=on
+export AO_WORKER_QUOTA_FALLBACKS='[{"harness":"agy","model":"your-worker-agy-model","mode":"tui"}]'
+
+# Reviewer: independently prefer stronger models
+export AO_REVIEWER_QUOTA_FAILOVER=on
+export AO_REVIEWER_QUOTA_PRIMARY='{"harness":"codex","model":"your-codex-review-model","effort":"high"}'
+export AO_REVIEWER_QUOTA_FALLBACKS='[{"harness":"agy","model":"your-agy-review-model","mode":"tui"}]'
+
+# Orchestrator: independent route order
+export AO_ORCHESTRATOR_QUOTA_FAILOVER=on
+export AO_ORCHESTRATOR_QUOTA_PRIMARY='{"harness":"codex","model":"your-codex-orch-model","effort":"high"}'
+export AO_ORCHESTRATOR_QUOTA_FALLBACKS='[{"harness":"agy","model":"your-agy-orch-model","mode":"tui"}]'
+```
+
+### Reviewer and Orchestrator recovery semantics
+
+- **Reviewer.** Automatic reviews bypass quota routing when a session sets an
+  explicit `ReviewerHarness`. When quota failover selects a fallback reviewer,
+  AO deduplicates across harnesses on the same PR HEAD (never starting a
+  duplicate pass when a review is already running, approved, or requesting
+  changes on that SHA). If all reviewer routes are exhausted, AO defers the
+  review with a reset-aware retry deadline (`reviewer_quota_deferred`) and never
+  fabricates approval or authorizes merge.
+- **Orchestrator.** Automatic orchestrator launches select the first eligible
+  route; if all routes are exhausted, AO defers before creating a session or
+  worktree (`WORKER_QUOTA_DEFERRED` with reset-aware retry deadline). If an
+  in-flight orchestrator hits a confirmed quota failure, AO records the native
+  refusal and **parks** the session safely rather than forcing an automatic
+  in-flight switch, preventing duplicate worker dispatches or replayed actions.
 
 ## Configuration
 

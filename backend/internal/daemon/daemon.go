@@ -58,6 +58,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -711,11 +712,14 @@ func Run(buildVersion string) (retErr error) {
 	go agentAccountSvc.KeepReadingLimits(ctx, time.Minute)
 	// The mode-aware messenger, so a Chat original is told as a chat message.
 	sessionForkSvc := wireSessionFork(store, sessionSvc, wiredSessMgr, chatSvc, chatDrivers, agentAccountSvc, lcStack.ArtifactVersions, lifecycleMessenger, log)
-	if cfg.WorkerQuota != nil {
-		cfg.WorkerQuota.ComputerLogin = func(ctx context.Context, harness domain.AgentHarness) bool {
+	for _, qp := range []*workerquota.Policy{cfg.WorkerQuota, cfg.ReviewerQuota, cfg.OrchestratorQuota} {
+		if qp == nil {
+			continue
+		}
+		qp.ComputerLogin = func(ctx context.Context, harness domain.AgentHarness) bool {
 			return agentAccountSvc.RunsOnComputerLogin(ctx, harness, "")
 		}
-		cfg.WorkerQuota.DiscoverDefaultModel = func(ctx context.Context, project domain.ProjectRecord, harness domain.AgentHarness) string {
+		qp.DiscoverDefaultModel = func(ctx context.Context, project domain.ProjectRecord, harness domain.AgentHarness) string {
 			if harness != domain.HarnessCodex || project.Path == "" {
 				return ""
 			}
@@ -1138,7 +1142,11 @@ func Run(buildVersion string) (retErr error) {
 	agentSvc.WarmCodexAccounts()
 	automationSvc, automationDone := startAutomations(ctx, store, sessionSvc, telemetrySink, log)
 	lcStack.automationDone = automationDone
-	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
+	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{
+		Logger:        log,
+		Quota:         cfg.ReviewerQuota,
+		QuotaFailures: store.WorkerQuotaFailures,
+	})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
@@ -1570,9 +1578,13 @@ func Run(buildVersion string) (retErr error) {
 				}
 			}
 		}()
-		if cfg.WorkerQuota != nil {
+		if cfg.WorkerQuota != nil || cfg.OrchestratorQuota != nil {
+			sweepPolicy := cfg.WorkerQuota
+			if sweepPolicy == nil {
+				sweepPolicy = cfg.OrchestratorQuota
+			}
 			parker, _ := sessMgr.(quotaTerminalParker)
-			quota := workerQuotaSweep{policy: cfg.WorkerQuota, store: store, chat: chatSvc, terminal: parker, agents: agents, accounts: agentAccountSvc, log: log}
+			quota := workerQuotaSweep{policy: sweepPolicy, store: store, chat: chatSvc, terminal: parker, agents: agents, accounts: agentAccountSvc, log: log}
 			workerQuotaDone = observe.StartPollLoop(ctx, 10*time.Second, func(ctx context.Context) error {
 				select {
 				case <-done:

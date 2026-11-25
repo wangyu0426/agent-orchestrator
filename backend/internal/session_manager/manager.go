@@ -428,7 +428,8 @@ type conversationSettingsStore interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	workerQuota *workerquota.Policy
+	workerQuota       *workerquota.Policy
+	orchestratorQuota *workerquota.Policy
 	runtime     runtimeController
 	agents      ports.AgentResolver
 	workspace   ports.Workspace
@@ -915,7 +916,8 @@ const (
 
 // Deps are the collaborators a Session Manager needs; New wires them together.
 type Deps struct {
-	WorkerQuota *workerquota.Policy
+	WorkerQuota       *workerquota.Policy
+	OrchestratorQuota *workerquota.Policy
 	Runtime     runtimeController
 	Agents      ports.AgentResolver
 	Workspace   ports.Workspace
@@ -996,6 +998,7 @@ func New(d Deps) *Manager {
 	mergePolicyDefaults, _ := d.Defaults.(SessionMergePolicyDefaults)
 	m := &Manager{
 		workerQuota:                    d.WorkerQuota,
+		orchestratorQuota:              d.OrchestratorQuota,
 		runtime:                        d.Runtime,
 		agents:                         d.Agents,
 		workspace:                      d.Workspace,

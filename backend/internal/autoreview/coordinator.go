@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 const (
@@ -38,11 +40,18 @@ type Trigger interface {
 	TriggerAuto(context.Context, domain.SessionID, domain.ReviewerHarness) (reviewcore.TriggerResult, error)
 }
 
+// OptionsTrigger is an optional Trigger extension that accepts full
+// TriggerOptions (model, effort, interface mode) for quota-selected routes.
+type OptionsTrigger interface {
+	TriggerAutoWithOptions(context.Context, domain.SessionID, reviewcore.TriggerOptions) (reviewcore.TriggerResult, error)
+}
+
 // Result describes whether an evaluation started a review and why it skipped
 // or triggered.
 type Result struct {
 	Triggered bool
 	Reason    string
+	RetryAt   time.Time
 }
 
 // Coordinator evaluates auto-review policy and owns the periodic sweep.
@@ -53,19 +62,39 @@ type Coordinator struct {
 	idleThreshold time.Duration
 	sweepInterval time.Duration
 	logger        *slog.Logger
+	quota         *workerquota.Policy
+	quotaFailures func(context.Context, time.Time) ([]workerquota.Failure, error)
+	routeReady    func(context.Context, workerquota.Target) bool
+
+	deferMu       sync.Mutex
+	deferredUntil map[domain.SessionID]time.Time
 }
 
-// Config customizes coordinator timing and logging.
+// Config customizes coordinator timing, logging, and optional reviewer quota failover.
 type Config struct {
 	Clock         func() time.Time
 	IdleThreshold time.Duration
 	SweepInterval time.Duration
 	Logger        *slog.Logger
+	Quota         *workerquota.Policy
+	QuotaFailures func(context.Context, time.Time) ([]workerquota.Failure, error)
+	RouteReady    func(context.Context, workerquota.Target) bool
 }
 
 // New constructs an auto-review coordinator.
 func New(store Store, reviews Trigger, cfg Config) *Coordinator {
-	c := &Coordinator{store: store, reviews: reviews, clock: cfg.Clock, idleThreshold: cfg.IdleThreshold, sweepInterval: cfg.SweepInterval, logger: cfg.Logger}
+	c := &Coordinator{
+		store:         store,
+		reviews:       reviews,
+		clock:         cfg.Clock,
+		idleThreshold: cfg.IdleThreshold,
+		sweepInterval: cfg.SweepInterval,
+		logger:        cfg.Logger,
+		quota:         cfg.Quota,
+		quotaFailures: cfg.QuotaFailures,
+		routeReady:    cfg.RouteReady,
+		deferredUntil: make(map[domain.SessionID]time.Time),
+	}
 	if c.clock == nil {
 		c.clock = time.Now
 	}
@@ -101,7 +130,28 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		}
 		return Result{}, err
 	}
+	now := c.clock()
+	if retryAt, deferred := c.isDeferred(id, now); deferred {
+		return Result{Reason: "reviewer_quota_deferred", RetryAt: retryAt}, nil
+	}
 	harness := effectiveReviewerHarness(session, project.Config)
+	var selectedRoute *workerquota.Target
+	if c.quota != nil && session.ReviewerHarness == "" {
+		route, retryAt, quotaReason := c.selectReviewerRoute(ctx, project, harness, now)
+		if quotaReason != "" {
+			if quotaReason == "reviewer_quota_deferred" {
+				c.setDeferred(id, retryAt)
+				c.logger.Info("auto-review: all reviewer quota routes exhausted; deferring",
+					"role", workerquota.RoleReviewer, "session_id", id, "retry_at", retryAt)
+				return Result{Reason: quotaReason, RetryAt: retryAt}, nil
+			}
+			return Result{Reason: quotaReason}, nil
+		}
+		if route.Harness != "" {
+			selectedRoute = &route
+			harness = domain.ReviewerHarness(route.Harness)
+		}
+	}
 	if harness == "" {
 		return Result{Reason: "missing_reviewer_harness"}, nil
 	}
@@ -142,13 +192,35 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 				reason = blocked
 				continue
 			}
+			// When quota failover selects a different reviewer harness, never
+			// duplicate a review that is already running or decided on this HEAD.
+			if selectedRoute != nil {
+				if crossBlocked := crossHarnessHeadReason(runs, state.PRURL, state.TargetSHA); crossBlocked != "" {
+					reason = crossBlocked
+					continue
+				}
+			}
 			eligible = true
 		}
 	}
 	if !eligible && !hasRunning {
 		return Result{Reason: reason}, nil
 	}
-	result, err := c.reviews.TriggerAuto(ctx, id, harness)
+	var result reviewcore.TriggerResult
+	if selectedRoute != nil {
+		if optTrigger, ok := c.reviews.(OptionsTrigger); ok {
+			result, err = optTrigger.TriggerAutoWithOptions(ctx, id, reviewcore.TriggerOptions{
+				Harness:       harness,
+				Config:        domain.AgentConfig{Model: selectedRoute.Model, Effort: selectedRoute.Effort},
+				InterfaceMode: domain.ReviewerInterfaceMode(selectedRoute.Mode),
+				Source:        domain.ReviewTriggerAuto,
+			})
+		} else {
+			result, err = c.reviews.TriggerAuto(ctx, id, harness)
+		}
+	} else {
+		result, err = c.reviews.TriggerAuto(ctx, id, harness)
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("trigger auto review for %s: %w", id, err)
 	}
@@ -159,6 +231,102 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: triggerResultReason(prs, result, harness)}, nil
 	}
 	return Result{Triggered: true, Reason: "triggered"}, nil
+}
+
+func (c *Coordinator) isDeferred(id domain.SessionID, now time.Time) (time.Time, bool) {
+	c.deferMu.Lock()
+	defer c.deferMu.Unlock()
+	until, ok := c.deferredUntil[id]
+	if !ok {
+		return time.Time{}, false
+	}
+	if !now.Before(until) {
+		delete(c.deferredUntil, id)
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+func (c *Coordinator) setDeferred(id domain.SessionID, until time.Time) {
+	c.deferMu.Lock()
+	defer c.deferMu.Unlock()
+	c.deferredUntil[id] = until
+}
+
+func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, now time.Time) (workerquota.Target, time.Time, string) {
+	var primaryModel, primaryEffort string
+	if len(project.Config.Reviewers) > 0 && project.Config.Reviewers[0].Harness == projectHarness {
+		primaryModel = project.Config.Reviewers[0].AgentConfig.Model
+		primaryEffort = project.Config.Reviewers[0].AgentConfig.Effort
+	} else if h, cfg := project.Config.DefaultWorkerReviewer(); h == projectHarness {
+		primaryModel = cfg.Model
+		primaryEffort = cfg.Effort
+	}
+	primary := workerquota.Target{
+		Harness: domain.AgentHarness(projectHarness),
+		Model:   primaryModel,
+		Effort:  primaryEffort,
+	}
+	targets := c.quota.Targets(primary)
+	if len(targets) == 0 {
+		return workerquota.Target{}, time.Time{}, ""
+	}
+	defaults := c.quota.DefaultModels(ctx, project, targets)
+	var failures []workerquota.Failure
+	if c.quotaFailures != nil {
+		var err error
+		failures, err = c.quotaFailures(ctx, now)
+		if err != nil {
+			c.logger.Warn("auto-review: quota failure records unavailable", "error", err)
+		}
+	}
+	windows, err := c.quota.Windows(ctx, targets, failures, now, defaults)
+	if err != nil {
+		c.logger.Debug("auto-review: quota source unavailable", "error", err)
+	}
+	blocked := false
+	for _, route := range targets {
+		if _, ok := workerquota.Select([]workerquota.Target{route}, windows, now); !ok {
+			blocked = true
+			continue
+		}
+		if c.routeReady != nil && !c.routeReady(ctx, route) {
+			continue
+		}
+		if route != primary || route.Mode != "" || route.Account != "" {
+			c.logger.Info("auto-review: reviewer quota selected configured route",
+				"role", workerquota.RoleReviewer, "project", project.ID,
+				"harness", route.Harness, "model", route.Model, "effort", route.Effort,
+				"mode", route.Mode, "account", route.Account)
+		}
+		return route, time.Time{}, ""
+	}
+	if blocked {
+		retryAt, ok := workerquota.NextResetAt(targets, windows, now)
+		if !ok {
+			retryAt = now.Add(c.sweepInterval)
+		}
+		return workerquota.Target{}, retryAt, "reviewer_quota_deferred"
+	}
+	return workerquota.Target{}, time.Time{}, "reviewer_quota_no_ready_route"
+}
+
+func crossHarnessHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string {
+	for _, run := range runs {
+		if run.PRURL != prURL || run.TargetSHA != targetSHA {
+			continue
+		}
+		if run.Status == domain.ReviewRunRunning {
+			return "review_running"
+		}
+		if run.Verdict == domain.VerdictApproved {
+			return "already_approved"
+		}
+		if run.Verdict == domain.VerdictChangesRequested {
+			return "changes_requested_same_sha"
+		}
+	}
+	return ""
 }
 
 func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResult, harness domain.ReviewerHarness) string {

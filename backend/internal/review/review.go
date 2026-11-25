@@ -301,9 +301,6 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 	if mode != "" && mode != domain.ReviewerInterfaceChat && mode != domain.ReviewerInterfaceTUI {
 		return TriggerResult{}, fmt.Errorf("%w: unknown reviewer interface mode %q", ErrInvalid, mode)
 	}
-	if source == domain.ReviewTriggerAuto && mode != "" {
-		return TriggerResult{}, fmt.Errorf("%w: automatic review cannot override interface mode", ErrInvalid)
-	}
 
 	// Serialise concurrent triggers for this worker so the idempotency check
 	// below (and the reviewer spawn that follows it) can't be raced into a
