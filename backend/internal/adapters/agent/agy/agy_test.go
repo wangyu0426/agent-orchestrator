@@ -571,26 +571,92 @@ func TestNativeConversationExistsModeScoped(t *testing.T) {
 	}
 }
 
-func TestPrepareInterfaceHandoffStorageChatToTUIAllowsNativeCLIStorage(t *testing.T) {
+func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(t *testing.T) {
 	home := t.TempDir()
-	cliDB := filepath.Join(home, CLIStorageDir, "conversations", "conv-cli-acp.db")
+	id := "conv-roundtrip"
+	cliDB := filepath.Join(home, CLIStorageDir, "conversations", id+".db")
+	acpDB := filepath.Join(home, ACPStorageDir, "conversations", id+".db")
 	if err := os.MkdirAll(filepath.Dir(cliDB), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cliDB, []byte("cli-acp-db"), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(acpDB), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cliDB, []byte("newer-native-acp-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(acpDB, []byte("stale-acp-snapshot"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	plugin := New()
-	err := plugin.PrepareInterfaceHandoffStorage(
+	plugin := &Plugin{
+		resolvedBinary: "/usr/local/bin/agy",
+		cliVersionFn:   func(context.Context, string) (string, error) { return "1.5.17", nil },
+	}
+	env := map[string]string{"GEMINI_HOME": home}
+
+	// Chat -> TUI under native `agy acp` must NOT overwrite the active CLI DB
+	// with a stale antigravity-acp copy.
+	if err := plugin.PrepareInterfaceHandoffStorage(
 		context.Background(),
 		ports.SessionRef{},
 		domain.SessionModeChat,
 		domain.SessionModeTUI,
-		"conv-cli-acp",
-		map[string]string{"GEMINI_HOME": home},
-	)
+		id,
+		env,
+	); err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI): %v", err)
+	}
+	got, err := os.ReadFile(cliDB)
 	if err != nil {
-		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI) for antigravity-cli db: %v", err)
+		t.Fatal(err)
+	}
+	if string(got) != "newer-native-acp-db" {
+		t.Fatalf("cliDB = %q, want %q (must not overwrite with stale ACP snapshot)", string(got), "newer-native-acp-db")
+	}
+
+	// TUI -> Chat under native `agy acp` must NOT create a stale copy in antigravity-acp.
+	id2 := "conv-tui-to-native-acp"
+	cliDB2 := filepath.Join(home, CLIStorageDir, "conversations", id2+".db")
+	acpDB2 := filepath.Join(home, ACPStorageDir, "conversations", id2+".db")
+	if err := os.WriteFile(cliDB2, []byte("tui-db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeTUI,
+		domain.SessionModeChat,
+		id2,
+		env,
+	); err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(TUI->Chat): %v", err)
+	}
+	if _, err := os.Stat(acpDB2); !os.IsNotExist(err) {
+		t.Fatalf("TUI->Chat under native agy acp unexpectedly wrote %s (stat err=%v)", acpDB2, err)
+	}
+
+	// With AO_AGY_ACP_SERVER_PATH set (legacy separate server), Chat -> TUI
+	// still bridges antigravity-acp -> antigravity-cli.
+	legacyEnv := map[string]string{
+		"GEMINI_HOME":          home,
+		"AO_AGY_ACP_SERVER_PATH": "/opt/agy_acp_server",
+	}
+	if err := plugin.PrepareInterfaceHandoffStorage(
+		context.Background(),
+		ports.SessionRef{},
+		domain.SessionModeChat,
+		domain.SessionModeTUI,
+		id,
+		legacyEnv,
+	); err != nil {
+		t.Fatalf("PrepareInterfaceHandoffStorage(Chat->TUI, legacy server): %v", err)
+	}
+	got, err = os.ReadFile(cliDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "stale-acp-snapshot" {
+		t.Fatalf("legacy server cliDB = %q, want %q", string(got), "stale-acp-snapshot")
 	}
 }

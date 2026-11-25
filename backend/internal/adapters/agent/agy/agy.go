@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 
 	// Registers the "sqlite" driver used to read Antigravity conversation databases.
 	_ "modernc.org/sqlite"
@@ -46,6 +49,7 @@ type Plugin struct {
 	agentbase.Base
 	binaryMu       sync.RWMutex
 	resolvedBinary string
+	cliVersionFn   func(context.Context, string) (string, error)
 }
 
 // New returns a ready-to-register Agy adapter.
@@ -251,25 +255,94 @@ func (p *Plugin) PrepareInterfaceHandoffStorage(
 	if err != nil {
 		return err
 	}
+	nativeCLIACP := p.chatUsesCLIStorage(ctx, env)
 	switch {
 	case from == domain.SessionModeChat && to == domain.SessionModeTUI:
-		id := strings.TrimSpace(nativeConversationID)
-		if id != "" && validConversationID(id) {
-			acpDB := filepath.Join(home, ACPStorageDir, "conversations", id+".db")
-			cliDB := filepath.Join(home, CLIStorageDir, "conversations", id+".db")
-			if _, err := os.Stat(acpDB); errors.Is(err, os.ErrNotExist) {
-				if _, cliErr := os.Stat(cliDB); cliErr == nil {
-					// Built-in `agy acp` already stores conversations in antigravity-cli.
+		if nativeCLIACP {
+			// Native `agy acp` writes directly to antigravity-cli. Never
+			// overwrite the active CLI database with a stale antigravity-acp
+			// snapshot; only bridge if the conversation exists solely in
+			// antigravity-acp (e.g., created by an older agy_acp_server).
+			id := strings.TrimSpace(nativeConversationID)
+			if id != "" && validConversationID(id) {
+				cliDB := filepath.Join(home, CLIStorageDir, "conversations", id+".db")
+				if _, err := os.Stat(cliDB); err == nil {
 					return nil
 				}
 			}
 		}
 		return BridgeConversationToCLI(home, nativeConversationID)
 	case from == domain.SessionModeTUI && to == domain.SessionModeChat:
+		if nativeCLIACP {
+			// Native `agy acp` reads directly from antigravity-cli, so no
+			// copy into antigravity-acp is needed.
+			return nil
+		}
 		return BridgeConversationToACP(home, nativeConversationID)
 	default:
 		return nil
 	}
+}
+
+const (
+	acpServerPathEnvVar  = "AO_AGY_ACP_SERVER_PATH"
+	minNativeCLIACPMajor = 1
+	minNativeCLIACPMinor = 5
+	minNativeCLIACPPatch = 4
+)
+
+var agyVersionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
+
+// chatUsesCLIStorage reports whether AO's Chat backend for agy launches the
+// built-in `agy acp` subcommand (which shares antigravity-cli storage with
+// TUI) rather than the separate agy_acp_server (which uses antigravity-acp).
+func (p *Plugin) chatUsesCLIStorage(ctx context.Context, env map[string]string) bool {
+	if strings.TrimSpace(env[acpServerPathEnvVar]) != "" || strings.TrimSpace(os.Getenv(acpServerPathEnvVar)) != "" {
+		return false
+	}
+	binary, err := p.agyBinary(ctx)
+	if err != nil || binary == "" {
+		return false
+	}
+	versionFn := p.cliVersionFn
+	if versionFn == nil {
+		versionFn = probeCLIVersion
+	}
+	raw, err := versionFn(ctx, binary)
+	if err != nil {
+		return false
+	}
+	return isNativeCLIACPVersion(raw)
+}
+
+func probeCLIVersion(ctx context.Context, binary string) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := aoprocess.CommandContext(probeCtx, binary, "--version").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func isNativeCLIACPVersion(raw string) bool {
+	match := agyVersionPattern.FindStringSubmatch(strings.TrimSpace(raw))
+	if len(match) != 4 {
+		return false
+	}
+	major, err1 := strconv.Atoi(match[1])
+	minor, err2 := strconv.Atoi(match[2])
+	patch, err3 := strconv.Atoi(match[3])
+	if err1 != nil || err2 != nil || err3 != nil {
+		return false
+	}
+	if major != minNativeCLIACPMajor {
+		return major > minNativeCLIACPMajor
+	}
+	if minor != minNativeCLIACPMinor {
+		return minor > minNativeCLIACPMinor
+	}
+	return patch >= minNativeCLIACPPatch
 }
 
 // NativeConversationID returns Antigravity's shared native ID from the
