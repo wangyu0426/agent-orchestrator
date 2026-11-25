@@ -735,7 +735,7 @@ func (l *agentLauncher) observeStartupAuth(ctx context.Context, observer ports.R
 			return ctx.Err()
 		case <-deadline.C:
 			if lastErr != nil {
-				return fmt.Errorf("reviewer startup: %w: output probe failed (%v); check reviewer terminal and retry", ports.ErrReviewerStartupUnconfirmed, lastErr)
+				return fmt.Errorf("reviewer startup: %w: output probe failed (%w); check reviewer terminal and retry", ports.ErrReviewerStartupUnconfirmed, lastErr)
 			}
 			return fmt.Errorf("reviewer startup: %w: timed out waiting for authenticated readiness; check reviewer terminal and retry", ports.ErrReviewerStartupUnconfirmed)
 		case <-ticker.C:
