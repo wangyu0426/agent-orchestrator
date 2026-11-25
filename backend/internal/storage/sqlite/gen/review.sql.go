@@ -128,7 +128,15 @@ func (q *Queries) ClearReviewerHandleByHarness(ctx context.Context, arg ClearRev
 }
 
 const failUnsubmittedReviewBatchForChatTurn = `-- name: FailUnsubmittedReviewBatchForChatTurn :exec
-UPDATE review_run SET status = 'failed', body = 'reviewer Chat turn ended without submitting a result'
+UPDATE review_run SET
+  status = 'failed',
+  body = CASE
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = ?1 AND t.failure_code = 'quota_exhausted'
+    ) THEN 'reviewer Chat turn failed: quota_exhausted'
+    ELSE 'reviewer Chat turn ended without submitting a result'
+  END
 WHERE status = 'running' AND verdict = '' AND batch_id != ''
   AND EXISTS (
     SELECT 1 FROM conversation_turns AS turn

@@ -286,3 +286,102 @@ func TestReviewerQuotaFreshPositiveEvidenceWakesPersistedDeferralOnSameHead(t *t
 		t.Fatalf("fresh positive evidence should wake same HEAD: res=%+v err=%v calls=%+v", res, err, trig.calls)
 	}
 }
+
+func TestReviewerQuotaAllProvidersQuotaFailedRecoverAfterResetOnSameHead(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	st := &fakeStore{
+		session: domain.SessionRecord{
+			ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+			AutoReviewEnabled: true,
+			Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+		},
+		project: domain.ProjectRecord{
+			ID: "p", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}},
+		},
+		prs: []domain.PullRequest{{URL: "https://github.com/o/r/pull/1", Number: 1, HeadSHA: "sha-1"}},
+		// Both Codex and AGY previously failed 3 times on sha-1 due to quota_exhausted.
+		runs: []domain.ReviewRun{
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerAgy, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerAgy, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerAgy, Status: domain.ReviewRunFailed, Body: "reviewer Chat turn failed: quota_exhausted", TriggerSource: domain.ReviewTriggerAuto},
+		},
+	}
+	trig := &recordingOptionsTrigger{}
+	coord := New(st, trig, Config{
+		Clock: func() time.Time { return now },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			Source: quotaTestSource{
+				{Harness: domain.HarnessCodex}: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: false}},
+			},
+		},
+	})
+	res, err := coord.EvaluateSession(context.Background(), "p-1")
+	if err != nil || !res.Triggered || len(trig.calls) != 1 || trig.calls[0].Harness != domain.ReviewerCodex {
+		t.Fatalf("quota-failed runs must not permanently strand same HEAD after reset: res=%+v err=%v calls=%+v", res, err, trig.calls)
+	}
+}
+
+func TestReviewerQuotaActiveDeferralScansPastUnknownPrimaryToPositiveFallback(t *testing.T) {
+	ctx := t.Context()
+	store := sqlitetest.MustOpen(t)
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	resetAt := now.Add(30 * time.Minute)
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID:     "p",
+		Path:   t.TempDir(),
+		Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.CreateSession(ctx, domain.SessionRecord{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AutoReviewEnabled: true,
+		Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+		CreatedAt:         now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteSCMObservation(ctx, domain.PullRequest{
+		URL: "https://github.com/o/r/pull/1", Number: 1, SessionID: sess.ID, HeadSHA: "sha-1", UpdatedAt: now,
+	}, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+
+	trig := &recordingOptionsTrigger{}
+	coord1 := New(store, trig, Config{
+		Clock: func() time.Time { return now },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			Source: quotaTestSource{
+				{Harness: domain.HarnessCodex}:                            {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(2 * time.Hour), ResetAt: resetAt, Exhausted: true}},
+				{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(2 * time.Hour), ResetAt: now.Add(time.Hour), Exhausted: true}},
+			},
+		},
+	})
+	if res, err := coord1.EvaluateSession(ctx, sess.ID); err != nil || res.Triggered || res.Reason != "reviewer_quota_deferred" {
+		t.Fatalf("coord1 = %+v, err=%v", res, err)
+	}
+
+	// Primary Codex's window disappears (unknown quota), while fallback AGY reports fresh positive capacity.
+	coord2 := New(store, trig, Config{
+		Clock: func() time.Time { return now.Add(5 * time.Minute) },
+		Quota: &workerquota.Policy{
+			Role:      workerquota.RoleReviewer,
+			Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			Source: quotaTestSource{
+				{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}: {{ObservedAt: now.Add(4 * time.Minute), ValidUntil: now.Add(2 * time.Hour), Exhausted: false}},
+			},
+		},
+	})
+	res, err := coord2.EvaluateSession(ctx, sess.ID)
+	if err != nil || !res.Triggered || len(trig.calls) != 1 || trig.calls[0].Harness != domain.ReviewerAgy {
+		t.Fatalf("active deferral should scan past unknown primary to positive fallback: res=%+v err=%v calls=%+v", res, err, trig.calls)
+	}
+}
