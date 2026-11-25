@@ -639,7 +639,7 @@ func TestPrepareInterfaceHandoffStorageNativeCLIACPDoesNotOverwriteWithStaleACP(
 	// With AO_AGY_ACP_SERVER_PATH set (legacy separate server), Chat -> TUI
 	// still bridges antigravity-acp -> antigravity-cli.
 	legacyEnv := map[string]string{
-		"GEMINI_HOME":          home,
+		"GEMINI_HOME":            home,
 		"AO_AGY_ACP_SERVER_PATH": "/opt/agy_acp_server",
 	}
 	if err := plugin.PrepareInterfaceHandoffStorage(
