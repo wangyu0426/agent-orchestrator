@@ -51,15 +51,19 @@ func (m *Manager) recordTerminalTurn(ctx context.Context, rec domain.SessionReco
 		if s.SubagentID == "" && !staleTerminalStop(rec, s) {
 			resp := strings.TrimSpace(s.FinalAssistantMessage)
 			if rec.Harness == domain.HarnessAgy && resp != "" && strings.TrimSpace(s.ProviderTurnID) != "" {
-				if completeRecorder, ok := m.store.(completedTerminalTurnRecorder); ok {
-					err = completeRecorder.RecordCompletedTerminalTurn(ctx, domain.TerminalTurn{
-						SessionID:       rec.ID,
-						Harness:         rec.Harness,
-						UserRequest:     strings.TrimSpace(s.TurnUserRequest),
-						RequestedAt:     at,
-						NativeSessionID: cmp.Or(s.AgentSessionID, rec.Metadata.AgentSessionID),
-						ProviderTurnID:  strings.TrimSpace(s.ProviderTurnID),
-					}, resp, at)
+				if agyTranscriptMatchesSession(rec, s) {
+					if completeRecorder, ok := m.store.(completedTerminalTurnRecorder); ok {
+						err = completeRecorder.RecordCompletedTerminalTurn(ctx, domain.TerminalTurn{
+							SessionID:       rec.ID,
+							Harness:         rec.Harness,
+							UserRequest:     strings.TrimSpace(s.TurnUserRequest),
+							RequestedAt:     at,
+							NativeSessionID: cmp.Or(s.AgentSessionID, rec.Metadata.AgentSessionID),
+							ProviderTurnID:  strings.TrimSpace(s.ProviderTurnID),
+						}, resp, at)
+						break
+					}
+				} else {
 					break
 				}
 			}
@@ -83,4 +87,30 @@ func staleTerminalStop(rec domain.SessionRecord, s ports.ActivitySignal) bool {
 	}
 	return s.ProviderTurnID != "" && md.ConversationCheckpointState == domain.ConversationCheckpointPrompt &&
 		md.ConversationCheckpointTurnID != "" && md.ConversationCheckpointTurnID != s.ProviderTurnID
+}
+
+// agyTranscriptMatchesSession verifies that an AGY Stop signal's transcript
+// path (when present) belongs to the AO session's bound native conversation ID.
+func agyTranscriptMatchesSession(rec domain.SessionRecord, s ports.ActivitySignal) bool {
+	boundID := cmp.Or(
+		strings.TrimSpace(rec.Metadata.AgentSessionID),
+		strings.TrimSpace(rec.Metadata.ProviderConversationID),
+		strings.TrimSpace(s.AgentSessionID),
+	)
+	if boundID == "" {
+		return false
+	}
+	if s.AgentSessionID != "" && s.AgentSessionID != boundID {
+		return false
+	}
+	if s.TranscriptPath == "" {
+		return true
+	}
+	parts := strings.Split(strings.ReplaceAll(s.TranscriptPath, "\\", "/"), "/")
+	for i := 0; i < len(parts)-2; i++ {
+		if parts[i] == "brain" && parts[i+1] != "" {
+			return parts[i+1] == boundID
+		}
+	}
+	return false
 }

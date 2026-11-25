@@ -68,3 +68,43 @@ func TestHooks_AgyStopIngestsTranscriptPath(t *testing.T) {
 		t.Fatalf("ProviderTurnID = %q, want %q", req.ProviderTurnID, "step:2")
 	}
 }
+
+func TestHooks_AgyStopRejectsConflictingSessionAndConversationIDs(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("GEMINI_HOME", geminiHome)
+	t.Setenv("AO_SESSION_ID", "ao-agy-10")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	dir := filepath.Join(geminiHome, "antigravity-cli", "brain", "conv-B", ".system_generated", "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	fixture := `{"step_index":1,"type":"USER_INPUT","status":"DONE","content":"secret B"}` + "\n" +
+		`{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"secret B answer"}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"session_id":      "conv-A",
+		"conversation_id": "conv-B",
+		"transcriptPath":  transcriptPath,
+	})
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(string(payload)),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "agy", "stop")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if req.TranscriptPath != "" || req.FinalAssistantMessage != "" {
+		t.Fatalf("conflicting aliases must not ingest transcript: got path=%q msg=%q", req.TranscriptPath, req.FinalAssistantMessage)
+	}
+}

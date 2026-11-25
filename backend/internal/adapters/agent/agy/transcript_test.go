@@ -249,6 +249,14 @@ func TestResolveStopTranscript_RejectsUnsafePathsAndCrossSession(t *testing.T) {
 	unrecognizedLayout := filepath.Join(geminiHome, CLIStorageDir, "other.jsonl")
 	_ = os.WriteFile(unrecognizedLayout, []byte(`{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"other"}`+"\n"), 0o600)
 
+	// brain/conv-alias itself is a symlink to brain/conv-owner.
+	aliasBrainDir := filepath.Join(geminiHome, CLIStorageDir, "brain", "conv-alias")
+	ownerBrainDir := filepath.Join(geminiHome, CLIStorageDir, "brain", "conv-owner")
+	if err := os.Symlink(ownerBrainDir, aliasBrainDir); err != nil {
+		t.Fatalf("symlink brain dir: %v", err)
+	}
+	aliasTranscript := filepath.Join(aliasBrainDir, ".system_generated", "logs", "transcript.jsonl")
+
 	cases := []struct {
 		name           string
 		conversationID string
@@ -261,6 +269,7 @@ func TestResolveStopTranscript_RejectsUnsafePathsAndCrossSession(t *testing.T) {
 		{"cross-session mismatch", "conv-other", validPath},
 		{"missing conversation id", "", validPath},
 		{"unrecognized layout without brain dir", "conv-owner", unrecognizedLayout},
+		{"symlinked brain conversation dir", "conv-alias", aliasTranscript},
 	}
 
 	for _, tc := range cases {
@@ -279,4 +288,16 @@ func TestResolveStopTranscript_RejectsUnsafePathsAndCrossSession(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("conflicting session_id and conversation_id aliases rejected", func(t *testing.T) {
+		payload, _ := json.Marshal(map[string]any{
+			"session_id":      "conv-other",
+			"conversation_id": "conv-owner",
+			"transcriptPath":  validPath,
+		})
+		got := ResolveStopTranscript(payload)
+		if got.TranscriptPath != "" || got.FinalAssistantMessage != "" {
+			t.Fatalf("expected rejection for conflicting aliases, got %+v", got)
+		}
+	})
 }

@@ -106,6 +106,23 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 		t.Fatalf("len(turns) = %d, want 2 (distinct identical turn B kept, replay A ignored)", len(turns))
 	}
 
+	// Cross-session transcript path mismatch (session bound to conv-1, but
+	// transcriptPath points to brain/conv-2) must not persist a turn.
+	crossSession := stopSignal
+	crossSession.ProviderTurnID = "step:99"
+	crossSession.TranscriptPath = "/home/test/.gemini/antigravity-cli/brain/conv-2/.system_generated/logs/transcript.jsonl"
+	crossSession.FinalAssistantMessage = "leaked from conv-2"
+	if err := mgr.ApplyActivitySignal(ctx, rec.ID, crossSession); err != nil {
+		t.Fatalf("cross-session stop signal: %v", err)
+	}
+	turns, err = st.ListTerminalTurns(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("list turns after cross-session: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("cross-session transcript persisted a turn: len=%d, want 2", len(turns))
+	}
+
 	// Simulate recovery/relaunch: RuntimeLaunchID advances and FirstSignalAt resets.
 	gotRec.Metadata.RuntimeLaunchID = "launch-2"
 	gotRec.FirstSignalAt = time.Time{}

@@ -89,25 +89,77 @@ func validateTranscriptPathInfo(rawPath, conversationID string) (string, os.File
 }
 
 func isWithinOwnedBrainDir(resolvedPath, geminiHome, convID string) bool {
-	trustedDirs := []string{
-		filepath.Join(geminiHome, CLIStorageDir, "brain", convID),
-		filepath.Join(geminiHome, ACPStorageDir, "brain", convID),
-		filepath.Join(geminiHome, "antigravity", "brain", convID),
+	trustedStorageDirs := []string{
+		filepath.Join(geminiHome, CLIStorageDir),
+		filepath.Join(geminiHome, ACPStorageDir),
+		filepath.Join(geminiHome, "antigravity"),
 	}
-	for _, root := range trustedDirs {
-		resolvedRoot, err := filepath.EvalSymlinks(root)
+	for _, storageDir := range trustedStorageDirs {
+		resolvedStorage, err := filepath.EvalSymlinks(storageDir)
 		if err != nil {
 			continue
 		}
-		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-		if err != nil {
+		brainDir := filepath.Join(resolvedStorage, "brain")
+		resolvedBrain, err := filepath.EvalSymlinks(brainDir)
+		if err != nil || !isStrictSubpath(resolvedStorage, resolvedBrain) {
 			continue
 		}
-		if rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+		ownedDir := filepath.Join(resolvedBrain, convID)
+		ownedLstat, err := os.Lstat(ownedDir)
+		if err != nil || !ownedLstat.IsDir() || ownedLstat.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		resolvedOwned, err := filepath.EvalSymlinks(ownedDir)
+		if err != nil || resolvedOwned != ownedDir {
+			continue
+		}
+		if isStrictSubpath(resolvedOwned, resolvedPath) {
 			return true
 		}
 	}
 	return false
+}
+
+func isStrictSubpath(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// canonicalPayloadConversationID returns the single canonical conversation ID
+// from an AGY hook payload. If multiple ID aliases are present and disagree,
+// it fails closed.
+func canonicalPayloadConversationID(in agyStopPayload) (string, bool) {
+	var canonical string
+	for _, candidate := range []string{in.SessionID, in.SessionIDCamel, in.ConversationID, in.ConversationIDCamel} {
+		v := strings.TrimSpace(candidate)
+		if v == "" {
+			continue
+		}
+		if canonical == "" {
+			canonical = v
+		} else if canonical != v {
+			return "", false
+		}
+	}
+	if !validConversationID(canonical) {
+		return "", false
+	}
+	return canonical, true
+}
+
+// BrainConversationIDFromPath extracts <id> from .../brain/<id>/... when
+// present and valid.
+func BrainConversationIDFromPath(path string) (string, bool) {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	for i := 0; i < len(parts)-2; i++ {
+		if parts[i] == "brain" && validConversationID(parts[i+1]) {
+			return parts[i+1], true
+		}
+	}
+	return "", false
 }
 
 // ResolveStopTranscript validates the transcriptPath in an AGY Stop hook
@@ -121,8 +173,8 @@ func ResolveStopTranscript(payload []byte) CompletedTurn {
 		return CompletedTurn{}
 	}
 	rawPath := firstNonEmpty(in.TranscriptPath, in.TranscriptPathCamel)
-	convID := firstNonEmpty(in.ConversationID, in.ConversationIDCamel, in.SessionID, in.SessionIDCamel)
-	if rawPath == "" || !validConversationID(convID) {
+	convID, ok := canonicalPayloadConversationID(in)
+	if rawPath == "" || !ok {
 		return CompletedTurn{}
 	}
 
