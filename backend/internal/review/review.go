@@ -1349,7 +1349,7 @@ func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, har
 		if run.Status == domain.ReviewRunRunning || run.Status == domain.ReviewRunCancelled || run.Verdict == domain.VerdictApproved || run.Verdict == domain.VerdictChangesRequested {
 			return true
 		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !isQuotaFailedReviewRun(run) {
+		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !domain.IsQuotaFailedReviewRun(run) {
 			failedAutoRuns++
 			if failedAutoRuns >= autoReviewFailedRetryLimit {
 				return true
@@ -1357,10 +1357,6 @@ func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, har
 		}
 	}
 	return false
-}
-
-func isQuotaFailedReviewRun(run domain.ReviewRun) bool {
-	return run.Status == domain.ReviewRunFailed && strings.Contains(run.Body, "quota_exhausted")
 }
 
 func crossHarnessHeadCovered(runs []domain.ReviewRun, prURL, targetSHA string) bool {

@@ -156,6 +156,16 @@ type CurrentHeadReviewRun struct {
 // gets before auto review stops retrying it.
 const AutoReviewFailedRetryLimit = 3
 
+// ReviewRunQuotaExhaustedBody is the durable review_run body recorded when a
+// reviewer Chat turn fails with typed failure_code = 'quota_exhausted'.
+const ReviewRunQuotaExhaustedBody = "reviewer Chat turn failed: quota_exhausted"
+
+// IsQuotaFailedReviewRun reports whether a failed review run was caused by
+// provider quota exhaustion rather than an ordinary review failure.
+func IsQuotaFailedReviewRun(run ReviewRun) bool {
+	return run.Status == ReviewRunFailed && run.Body == ReviewRunQuotaExhaustedBody
+}
+
 // ReviewerHandle names one live reviewer pane's runtime handle, independent
 // of whether the worker session that spawned it still exists. A reviewer has
 // no session row of its own — its identity is this review's id and

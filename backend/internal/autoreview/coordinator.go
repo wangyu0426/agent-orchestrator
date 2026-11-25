@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -487,7 +486,7 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string
 		if run.Verdict == domain.VerdictChangesRequested {
 			return "changes_requested_same_sha"
 		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !isQuotaFailedReviewRun(run) {
+		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !domain.IsQuotaFailedReviewRun(run) {
 			failedAutoRuns++
 		}
 	}
@@ -495,10 +494,6 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string
 		return "failed_same_sha_retry_limit"
 	}
 	return ""
-}
-
-func isQuotaFailedReviewRun(run domain.ReviewRun) bool {
-	return run.Status == domain.ReviewRunFailed && strings.Contains(run.Body, "quota_exhausted")
 }
 
 func effectiveReviewerHarness(session domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {

@@ -460,6 +460,7 @@ SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, 
              AND failed.target_sha = review_run.target_sha
              AND failed.status = 'failed'
              AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
        ) AS failed_auto_runs,
        CAST(EXISTS (
            SELECT 1
@@ -554,6 +555,7 @@ SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_u
              AND failed.target_sha = review_run.target_sha
              AND failed.status = 'failed'
              AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
        ) AS failed_auto_runs,
        CAST(EXISTS (
            SELECT 1
