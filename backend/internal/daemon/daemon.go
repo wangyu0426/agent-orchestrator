@@ -1168,6 +1168,17 @@ func Run(buildVersion string) (retErr error) {
 					}
 				}
 			}
+			if !needsChat && reviewers != nil {
+				if reviewer, ok := reviewers.Reviewer(domain.ReviewerHarness(target.Harness)); ok {
+					if pf, ok := reviewer.(interface {
+						ReviewPreflight(context.Context, string) error
+					}); ok {
+						if err := pf.ReviewPreflight(ctx, ""); err != nil {
+							return false
+						}
+					}
+				}
+			}
 			return true
 		},
 	})

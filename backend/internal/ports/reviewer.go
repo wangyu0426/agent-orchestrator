@@ -2,10 +2,17 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
+
+// ErrReviewerStartupUnconfirmed is returned when bounded post-launch
+// observation times out before the reviewer emits an authenticated ready
+// signal (for example, blank output, repeated probe errors, or an unrecognized
+// stall). It is distinct from ErrChatAuthRequired and quota exhaustion.
+var ErrReviewerStartupUnconfirmed = errors.New("reviewer startup readiness unconfirmed")
 
 // Reviewer is the contract a code-review adapter satisfies. It is deliberately
 // separate from Agent: a reviewer is invoked once over a checkout to review a
@@ -79,6 +86,25 @@ type ReviewerReusePolicy interface {
 // this capability receive a conservative startup delay from the launcher.
 type ReviewerPromptReadinessProvider interface {
 	ReviewPromptReadinessHints(ctx context.Context) (PromptReadinessHints, error)
+}
+
+// StartupAuthHints configures bounded post-launch terminal observation for
+// interactive reviewers that may stall on an interactive authentication prompt
+// (for example, when a stale/revoked token triggers OAuth).
+type StartupAuthHints struct {
+	InitialDelay         time.Duration
+	Timeout              time.Duration
+	PollInterval         time.Duration
+	Lines                int
+	AuthRequiredPatterns []string
+	ReadyPatterns        []string
+}
+
+// ReviewerStartupAuthObserver lets an interactive reviewer declare startup
+// terminal patterns that distinguish an authentication-required stall from a
+// healthy launch.
+type ReviewerStartupAuthObserver interface {
+	ReviewStartupAuthHints(ctx context.Context) (StartupAuthHints, error)
 }
 
 // ReviewInvocation describes one review pass for a reviewer to act on. All ids

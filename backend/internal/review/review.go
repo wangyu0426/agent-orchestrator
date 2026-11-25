@@ -627,7 +627,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		launchAgentSessionID = ""
 	}
 	persistedAgentSessionID := launchAgentSessionID
-	if !hasConfigOverride && reviewRow.ReviewerHandleID != "" && reviewerPaneReusable(reviewRow, hadRunningReviewer) {
+	if !hasConfigOverride && reviewRow.ReviewerHandleID != "" && e.launcher.Reusable(harness) && reviewerPaneReusable(reviewRow, hadRunningReviewer) {
 		alive, err := e.launcher.Alive(ctx, reviewRow.ReviewerHandleID, reviewRow.ReviewerLaunchID)
 		if err != nil {
 			return TriggerResult{}, failRuns(0, err)
