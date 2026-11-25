@@ -1146,6 +1146,23 @@ func Run(buildVersion string) (retErr error) {
 		Logger:        log,
 		Quota:         cfg.ReviewerQuota,
 		QuotaFailures: store.WorkerQuotaFailures,
+		RouteReady: func(ctx context.Context, target workerquota.Target) bool {
+			if target.Mode == domain.SessionModeChat && (chatSvc == nil || !chatSvc.SupportsChat(target.Harness)) {
+				return false
+			}
+			if agentSvc != nil {
+				readiness, err := agentSvc.EnsureAgentReadiness(ctx, string(target.Harness), domain.AgentReadinessPurposeLaunch)
+				if err != nil || readiness.Installation.State == domain.AgentInstallationNotInstalled {
+					return false
+				}
+				if readiness.Authentication.State == domain.AgentAuthenticationUnauthorized && readiness.Authentication.Freshness == domain.AgentReadinessFresh {
+					if target.Harness != domain.HarnessAgy || target.Mode != domain.SessionModeTUI {
+						return false
+					}
+				}
+			}
+			return true
+		},
 	})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.

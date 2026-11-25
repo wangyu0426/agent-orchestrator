@@ -32,3 +32,35 @@ WHERE reset_at > sqlc.arg(now_ms);
 INSERT INTO worker_quota_automation_deferral (run_id, retry_at)
 VALUES (sqlc.arg(run_id), sqlc.arg(retry_at))
 ON CONFLICT(run_id) DO UPDATE SET retry_at = excluded.retry_at;
+
+-- name: ListReviewerQuotaFailures :many
+SELECT
+    review.harness AS failure_harness,
+    turn.completed_at AS failure_at,
+    turn.usage_limit_resets_at AS reset_at
+FROM conversation_turns AS turn
+JOIN review ON review.id = turn.handled_by_review_id
+WHERE turn.handled_by_review_id IS NOT NULL
+  AND turn.completed_at IS NOT NULL
+  AND (turn.failure_code = 'quota_exhausted' OR turn.usage_limit_resets_at IS NOT NULL);
+
+-- name: UpsertReviewerQuotaDeferral :exec
+INSERT INTO reviewer_quota_deferral (session_id, pr_url, target_sha, retry_at, reason, updated_at)
+VALUES (sqlc.arg(session_id), sqlc.arg(pr_url), sqlc.arg(target_sha), sqlc.arg(retry_at), sqlc.arg(reason), sqlc.arg(updated_at))
+ON CONFLICT(session_id, pr_url, target_sha) DO UPDATE SET
+    retry_at = excluded.retry_at,
+    reason = excluded.reason,
+    updated_at = excluded.updated_at;
+
+-- name: GetReviewerQuotaDeferral :one
+SELECT retry_at, reason
+FROM reviewer_quota_deferral
+WHERE session_id = sqlc.arg(session_id)
+  AND pr_url = sqlc.arg(pr_url)
+  AND target_sha = sqlc.arg(target_sha);
+
+-- name: DeleteReviewerQuotaDeferral :exec
+DELETE FROM reviewer_quota_deferral
+WHERE session_id = sqlc.arg(session_id)
+  AND pr_url = sqlc.arg(pr_url)
+  AND target_sha = sqlc.arg(target_sha);

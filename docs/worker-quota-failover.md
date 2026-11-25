@@ -41,9 +41,11 @@ Each target object supports:
 - `"model"` (optional): provider model ID; omitted uses the provider default.
 - `"effort"` (optional): reasoning effort.
 - `"mode"` (optional): `"chat"` or `"tui"`.
-- `"account"` (optional): saved AO agent account ID. Repeated harnesses with
-  different models or distinct saved accounts are allowed and evaluated in order;
-  computer-login Quotum bindings do not falsely block a distinct saved account.
+- `"account"` (optional, Worker and Orchestrator): saved AO agent account ID.
+  Repeated harnesses with different models or distinct saved accounts are
+  allowed and evaluated in order; computer-login Quotum bindings do not falsely
+  block a distinct saved account. Reviewer routes do not support `"account"`
+  overrides and reject them at configuration load.
 
 ### Multi-role example
 

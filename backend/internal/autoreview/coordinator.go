@@ -40,6 +40,14 @@ type Trigger interface {
 	TriggerAuto(context.Context, domain.SessionID, domain.ReviewerHarness) (reviewcore.TriggerResult, error)
 }
 
+// DeferralStore is an optional Store extension that persists reset-aware
+// reviewer quota deferrals keyed by (session, PR, HEAD) across daemon restarts.
+type DeferralStore interface {
+	UpsertReviewerQuotaDeferral(ctx context.Context, sessionID domain.SessionID, prURL, targetSHA string, retryAt time.Time, reason string, updatedAt time.Time) error
+	GetReviewerQuotaDeferral(ctx context.Context, sessionID domain.SessionID, prURL, targetSHA string) (retryAt time.Time, reason string, found bool, err error)
+	DeleteReviewerQuotaDeferral(ctx context.Context, sessionID domain.SessionID, prURL, targetSHA string) error
+}
+
 // OptionsTrigger is an optional Trigger extension that accepts full
 // TriggerOptions (model, effort, interface mode) for quota-selected routes.
 type OptionsTrigger interface {
@@ -131,16 +139,29 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{}, err
 	}
 	now := c.clock()
-	if retryAt, deferred := c.isDeferred(id, now); deferred {
-		return Result{Reason: "reviewer_quota_deferred", RetryAt: retryAt}, nil
+	prs, err := c.store.ListPRsBySession(ctx, id)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(prs) == 0 {
+		return Result{Reason: "no_pr"}, nil
+	}
+	runs, err := c.store.ListReviewRunsBySession(ctx, id)
+	if err != nil {
+		return Result{}, err
 	}
 	harness := effectiveReviewerHarness(session, project.Config)
 	var selectedRoute *workerquota.Target
 	if c.quota != nil && session.ReviewerHarness == "" {
+		// Reconcile persisted per-(session, PR, HEAD) deferrals: a new HEAD
+		// bypasses an older deferral automatically.
+		if retryAt, deferred := c.activeDeferral(ctx, id, prs, now); deferred {
+			return Result{Reason: "reviewer_quota_deferred", RetryAt: retryAt}, nil
+		}
 		route, retryAt, quotaReason := c.selectReviewerRoute(ctx, project, harness, now)
 		if quotaReason != "" {
 			if quotaReason == "reviewer_quota_deferred" {
-				c.setDeferred(id, retryAt)
+				c.persistDeferrals(ctx, id, prs, retryAt, quotaReason, now)
 				c.logger.Info("auto-review: all reviewer quota routes exhausted; deferring",
 					"role", workerquota.RoleReviewer, "session_id", id, "retry_at", retryAt)
 				return Result{Reason: quotaReason, RetryAt: retryAt}, nil
@@ -154,14 +175,6 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	}
 	if harness == "" {
 		return Result{Reason: "missing_reviewer_harness"}, nil
-	}
-	prs, err := c.store.ListPRsBySession(ctx, id)
-	if err != nil {
-		return Result{}, err
-	}
-	runs, err := c.store.ListReviewRunsBySession(ctx, id)
-	if err != nil {
-		return Result{}, err
 	}
 	harnessRuns := make([]domain.ReviewRun, 0, len(runs))
 	for _, run := range runs {
@@ -210,10 +223,11 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	if selectedRoute != nil {
 		if optTrigger, ok := c.reviews.(OptionsTrigger); ok {
 			result, err = optTrigger.TriggerAutoWithOptions(ctx, id, reviewcore.TriggerOptions{
-				Harness:       harness,
-				Config:        domain.AgentConfig{Model: selectedRoute.Model, Effort: selectedRoute.Effort},
-				InterfaceMode: domain.ReviewerInterfaceMode(selectedRoute.Mode),
-				Source:        domain.ReviewTriggerAuto,
+				Harness:                    harness,
+				Config:                     domain.AgentConfig{Model: selectedRoute.Model, Effort: selectedRoute.Effort},
+				InterfaceMode:              domain.ReviewerInterfaceMode(selectedRoute.Mode),
+				Source:                     domain.ReviewTriggerAuto,
+				DeduplicateAcrossHarnesses: true,
 			})
 		} else {
 			result, err = c.reviews.TriggerAuto(ctx, id, harness)
@@ -230,10 +244,35 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	if !result.Created {
 		return Result{Reason: triggerResultReason(prs, result, harness)}, nil
 	}
+	c.clearDeferrals(ctx, id, prs)
 	return Result{Triggered: true, Reason: "triggered"}, nil
 }
 
-func (c *Coordinator) isDeferred(id domain.SessionID, now time.Time) (time.Time, bool) {
+func (c *Coordinator) activeDeferral(ctx context.Context, id domain.SessionID, prs []domain.PullRequest, now time.Time) (time.Time, bool) {
+	if ds, ok := c.store.(DeferralStore); ok {
+		var earliest time.Time
+		allDeferred := len(prs) > 0
+		for _, pr := range prs {
+			if pr.URL == "" || pr.HeadSHA == "" || pr.Draft || pr.Merged || pr.Closed {
+				continue
+			}
+			retryAt, _, found, err := ds.GetReviewerQuotaDeferral(ctx, id, pr.URL, pr.HeadSHA)
+			if err != nil || !found || !now.Before(retryAt) {
+				if found && !now.Before(retryAt) {
+					_ = ds.DeleteReviewerQuotaDeferral(ctx, id, pr.URL, pr.HeadSHA)
+				}
+				allDeferred = false
+				continue
+			}
+			if earliest.IsZero() || retryAt.Before(earliest) {
+				earliest = retryAt
+			}
+		}
+		if allDeferred && !earliest.IsZero() {
+			return earliest, true
+		}
+		return time.Time{}, false
+	}
 	c.deferMu.Lock()
 	defer c.deferMu.Unlock()
 	until, ok := c.deferredUntil[id]
@@ -247,10 +286,35 @@ func (c *Coordinator) isDeferred(id domain.SessionID, now time.Time) (time.Time,
 	return until, true
 }
 
-func (c *Coordinator) setDeferred(id domain.SessionID, until time.Time) {
+func (c *Coordinator) persistDeferrals(ctx context.Context, id domain.SessionID, prs []domain.PullRequest, retryAt time.Time, reason string, now time.Time) {
+	if ds, ok := c.store.(DeferralStore); ok {
+		for _, pr := range prs {
+			if pr.URL == "" || pr.HeadSHA == "" || pr.Draft || pr.Merged || pr.Closed {
+				continue
+			}
+			if err := ds.UpsertReviewerQuotaDeferral(ctx, id, pr.URL, pr.HeadSHA, retryAt, reason, now); err != nil {
+				c.logger.Warn("auto-review: persist reviewer quota deferral failed", "session_id", id, "pr_url", pr.URL, "err", err)
+			}
+		}
+		return
+	}
 	c.deferMu.Lock()
 	defer c.deferMu.Unlock()
-	c.deferredUntil[id] = until
+	c.deferredUntil[id] = retryAt
+}
+
+func (c *Coordinator) clearDeferrals(ctx context.Context, id domain.SessionID, prs []domain.PullRequest) {
+	if ds, ok := c.store.(DeferralStore); ok {
+		for _, pr := range prs {
+			if pr.URL != "" && pr.HeadSHA != "" {
+				_ = ds.DeleteReviewerQuotaDeferral(ctx, id, pr.URL, pr.HeadSHA)
+			}
+		}
+		return
+	}
+	c.deferMu.Lock()
+	defer c.deferMu.Unlock()
+	delete(c.deferredUntil, id)
 }
 
 func (c *Coordinator) selectReviewerRoute(ctx context.Context, project domain.ProjectRecord, projectHarness domain.ReviewerHarness, now time.Time) (workerquota.Target, time.Time, string) {

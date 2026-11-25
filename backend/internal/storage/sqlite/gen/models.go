@@ -716,6 +716,15 @@ type ReviewRun struct {
 	TriggerSource    domain.ReviewTriggerSource
 }
 
+type ReviewerQuotaDeferral struct {
+	SessionID string
+	PRURL     string
+	TargetSha string
+	RetryAt   int64
+	Reason    string
+	UpdatedAt int64
+}
+
 type Session struct {
 	ID                               domain.SessionID
 	ProjectID                        *domain.ProjectID

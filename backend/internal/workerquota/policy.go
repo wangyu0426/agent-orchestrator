@@ -227,7 +227,9 @@ func (p *Policy) Windows(ctx context.Context, targets []Target, failures []Failu
 		for _, f := range failures {
 			scopeMatches := (target.Account == "" && f.Scope != "" && f.Scope == "computer login") ||
 				(target.Account != "" && f.Scope == target.Account)
-			if scopeMatches && model != "" && f.Target.Harness == target.Harness && f.Target.Model == model && f.ResetAt.After(now) {
+			modelMatches := (f.Target.Model == "" && f.Target.Harness == target.Harness) ||
+				(model != "" && f.Target.Model == model && f.Target.Harness == target.Harness)
+			if scopeMatches && modelMatches && f.ResetAt.After(now) {
 				windows[target] = append(windows[target], Window{ObservedAt: f.At, ValidUntil: f.ResetAt, ResetAt: f.ResetAt, Exhausted: true})
 			}
 		}

@@ -137,6 +137,9 @@ func validateReviewerQuotaTarget(source string, target workerquota.Target) error
 	if target.Model != strings.TrimSpace(target.Model) || target.Effort != strings.TrimSpace(target.Effort) || target.Account != strings.TrimSpace(target.Account) {
 		return fmt.Errorf("%s requires trimmed model, effort, and account values", source)
 	}
+	if target.Account != "" {
+		return fmt.Errorf("%s: reviewer quota routes do not support account overrides (%q)", source, target.Account)
+	}
 	if _, err := domain.ParseSessionMode(string(target.Mode)); err != nil {
 		return fmt.Errorf("%s: %w", source, err)
 	}

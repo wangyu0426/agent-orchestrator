@@ -268,6 +268,10 @@ type TriggerOptions struct {
 	// the worker's branch just before this trigger and found none, so a
 	// no-PR error may say so.
 	BranchPRLookupFoundNone bool
+	// DeduplicateAcrossHarnesses prevents automatic quota-routed passes from
+	// starting a duplicate review on a PR head that already has a running,
+	// approved, or changes-requested pass under another reviewer harness.
+	DeduplicateAcrossHarnesses bool
 }
 
 // TriggerWithOptions starts reviews for every PR on the worker session that needs review.
@@ -476,6 +480,9 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		// useful. Ineligible PRs stay excluded: nothing can review those.
 		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
 		if source == domain.ReviewTriggerAuto && autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) {
+			eligible = false
+		}
+		if source == domain.ReviewTriggerAuto && opts.DeduplicateAcrossHarnesses && crossHarnessHeadCovered(runs, reviewState.PRURL, reviewState.TargetSHA) {
 			eligible = false
 		}
 		switch {
@@ -1349,6 +1356,18 @@ func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, har
 			if failedAutoRuns >= autoReviewFailedRetryLimit {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func crossHarnessHeadCovered(runs []domain.ReviewRun, prURL, targetSHA string) bool {
+	for _, run := range runs {
+		if run.PRURL != prURL || run.TargetSHA != targetSHA {
+			continue
+		}
+		if run.Status == domain.ReviewRunRunning || run.Verdict == domain.VerdictApproved || run.Verdict == domain.VerdictChangesRequested {
+			return true
 		}
 	}
 	return false
