@@ -1338,3 +1338,52 @@ func TestNotifyReviewerChatCarriesItsBatch(t *testing.T) {
 		t.Fatalf("review notification: %+v", chat)
 	}
 }
+
+type staticAgentAuth struct {
+	status ports.AgentAuthStatus
+	ok     bool
+}
+
+func (s staticAgentAuth) AuthStatus(context.Context, domain.ReviewerHarness) (ports.AgentAuthStatus, bool, error) {
+	return s.status, s.ok, nil
+}
+
+type authPreflightReviewer struct {
+	fakeReviewer
+	bin          string
+	preflightErr error
+}
+
+func (r *authPreflightReviewer) ReviewCommand(_ context.Context, _ ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
+	return ports.ReviewCommandSpec{Argv: []string{r.bin}}, nil
+}
+
+func (r *authPreflightReviewer) ReviewPreflight(context.Context, string) error {
+	return r.preflightErr
+}
+
+func TestPreflightPreservesTypedAuthRequiredError(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rev := &authPreflightReviewer{
+		bin:          bin,
+		preflightErr: ports.ErrChatAuthRequired,
+	}
+	l := NewLauncher(
+		fakeReviewerResolver{reviewer: rev, ok: true},
+		&fakeRuntime{},
+		t.TempDir(),
+		WithAgentAuth(staticAgentAuth{status: ports.AgentAuthStatusAuthorized, ok: true}),
+	)
+	err := l.Preflight(context.Background(), domain.ReviewerHarness("agy"), t.TempDir(), domain.ReviewerInterfaceTUI)
+	if !errors.Is(err, ports.ErrChatAuthRequired) {
+		t.Fatalf("Preflight err = %v, want ErrChatAuthRequired", err)
+	}
+	// Once auth is restored, preflight succeeds.
+	rev.preflightErr = nil
+	if err := l.Preflight(context.Background(), domain.ReviewerHarness("agy"), t.TempDir(), domain.ReviewerInterfaceTUI); err != nil {
+		t.Fatalf("Preflight after recovery = %v, want nil", err)
+	}
+}

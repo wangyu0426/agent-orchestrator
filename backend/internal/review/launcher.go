@@ -268,7 +268,7 @@ func (l *agentLauncher) Preflight(ctx context.Context, harness domain.ReviewerHa
 	}
 	if pf, ok := reviewer.(preflightReviewer); ok {
 		if err := pf.ReviewPreflight(ctx, workspacePath); err != nil {
-			if authKnown && authStatus == ports.AgentAuthStatusAuthorized && looksLikeAuthFailure(err) {
+			if authKnown && authStatus == ports.AgentAuthStatusAuthorized && looksLikeAuthFailure(err) && !errors.Is(err, ports.ErrChatAuthRequired) && !errors.Is(err, ports.ErrAgentAuthRequired) {
 				return nil
 			}
 			return err
