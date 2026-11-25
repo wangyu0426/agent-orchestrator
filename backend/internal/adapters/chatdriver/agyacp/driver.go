@@ -499,7 +499,7 @@ func isSafeReadOnlyArg(s string) bool {
 			continue
 		}
 		switch c {
-		case '.', '/', '_', '-', ':', '~', '^', '@', '{', '}', ',':
+		case '.', '/', '_', '-', ':', '~', '^', '@', ',':
 			continue
 		default:
 			return false

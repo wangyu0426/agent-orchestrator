@@ -589,6 +589,8 @@ func TestReadOnlySessionPinsDefaultModeSandboxAndStrictPolicy(t *testing.T) {
 		"git diff --ou=/tmp/out",
 		"git diff '--output=/tmp/out'",
 		"git diff \"--output=/tmp/out\"",
+		"git diff {--output=/tmp/out,HEAD}",
+		"git diff HEAD,{--output=/tmp/out,HEAD}",
 		"git diff --ext-diff HEAD~1..HEAD",
 		"git log --output=/tmp/out",
 		"git show --out=/tmp/out HEAD",
