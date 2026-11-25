@@ -974,7 +974,9 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		conversation.FinalAssistantMessage = capHookText(copilot.FinalAssistantMessage(payload), maxHookInteractionLen)
 	}
 	if domain.AgentHarness(agent) == domain.HarnessAgy {
-		if event == "stop" {
+		if agy.HasConflictingConversationIDs(payload) {
+			agentSessionID = ""
+		} else if event == "stop" {
 			resolved := agy.ResolveStopTranscript(payload)
 			if resolved.TranscriptPath != "" {
 				conversation.TranscriptPath = capHookText(resolved.TranscriptPath, maxHookTranscriptPath)

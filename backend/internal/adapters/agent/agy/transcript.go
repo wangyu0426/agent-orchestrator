@@ -128,6 +128,28 @@ func isStrictSubpath(root, target string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
+// HasConflictingConversationIDs reports whether payload contains multiple
+// non-empty conversation/session ID aliases that disagree with each other.
+func HasConflictingConversationIDs(payload []byte) bool {
+	var in agyStopPayload
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return false
+	}
+	var first string
+	for _, candidate := range []string{in.SessionID, in.SessionIDCamel, in.ConversationID, in.ConversationIDCamel} {
+		v := strings.TrimSpace(candidate)
+		if v == "" {
+			continue
+		}
+		if first == "" {
+			first = v
+		} else if first != v {
+			return true
+		}
+	}
+	return false
+}
+
 // canonicalPayloadConversationID returns the single canonical conversation ID
 // from an AGY hook payload. If multiple ID aliases are present and disagree,
 // it fails closed.

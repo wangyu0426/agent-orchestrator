@@ -104,7 +104,7 @@ func TestHooks_AgyStopRejectsConflictingSessionAndConversationIDs(t *testing.T) 
 	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if req.TranscriptPath != "" || req.FinalAssistantMessage != "" {
-		t.Fatalf("conflicting aliases must not ingest transcript: got path=%q msg=%q", req.TranscriptPath, req.FinalAssistantMessage)
+	if req.AgentSessionID != "" || req.TranscriptPath != "" || req.FinalAssistantMessage != "" {
+		t.Fatalf("conflicting aliases must not forward identity or ingest transcript: got id=%q path=%q msg=%q", req.AgentSessionID, req.TranscriptPath, req.FinalAssistantMessage)
 	}
 }

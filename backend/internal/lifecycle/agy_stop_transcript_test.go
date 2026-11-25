@@ -127,6 +127,16 @@ func TestAgyStopTranscriptPersistsTurnDeduplicatesAndGuardsRecovery(t *testing.T
 		t.Fatalf("rebind attempt stop signal: %v", err)
 	}
 
+	// A newer Stop carrying conv-2 as AgentSessionID with an empty/rejected
+	// TranscriptPath on the same launch must also be rejected without rebinding.
+	emptyPathRebind := rebindAttempt
+	emptyPathRebind.Timestamp = now.Add(55 * time.Second)
+	emptyPathRebind.TranscriptPath = ""
+	emptyPathRebind.ProviderTurnID = "step:101"
+	if err := mgr.ApplyActivitySignal(ctx, rec.ID, emptyPathRebind); err != nil {
+		t.Fatalf("empty-path rebind attempt stop signal: %v", err)
+	}
+
 	afterCross, ok, err := st.GetSession(ctx, rec.ID)
 	if err != nil || !ok {
 		t.Fatalf("get session after cross-session: ok=%v err=%v", ok, err)
