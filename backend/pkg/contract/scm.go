@@ -125,6 +125,27 @@ type PullRequestSubmittedReview struct {
 	AutoInjectReview bool           `json:"autoInjectReview"`
 }
 
+// PullRequestStructuredReviewPendingFeedback describes one active structured
+// change request and its durable worker delivery state.
+type PullRequestStructuredReviewPendingFeedback struct {
+	ReviewID       string `json:"reviewId"`
+	Reviewer       string `json:"reviewer"`
+	ReviewURL      string `json:"reviewUrl,omitempty"`
+	ReviewedSHA    string `json:"reviewedSha"`
+	Feedback       string `json:"feedback"`
+	DeliveryStatus string `json:"deliveryStatus"`
+}
+
+// PullRequestStructuredReviewDiagnostics exposes AO's local effective review
+// decision separately from GitHub's native review decision.
+type PullRequestStructuredReviewDiagnostics struct {
+	GitHubDecision    ReviewDecision                               `json:"githubDecision"`
+	EffectiveDecision ReviewDecision                               `json:"effectiveDecision"`
+	Source            string                                       `json:"source,omitempty"`
+	ReviewedSHA       string                                       `json:"reviewedSha,omitempty"`
+	PendingFeedback   []PullRequestStructuredReviewPendingFeedback `json:"pendingFeedback,omitempty"`
+}
+
 // PullRequestReviewSummary is the latest aggregate provider review observation.
 type PullRequestReviewSummary struct {
 	Decision                   ReviewDecision `json:"decision"`
@@ -133,10 +154,11 @@ type PullRequestReviewSummary struct {
 	// individual comments (a thread can contain several comments). It is a
 	// pointer so an unknown count (never observed, or observed only partially)
 	// stays absent on the wire while an observed zero serializes explicitly.
-	UnresolvedThreadCount *int                            `json:"unresolvedThreadCount,omitempty"`
-	UnresolvedBy          []PullRequestUnresolvedReviewer `json:"unresolvedBy"`
-	ResolvedBy            []PullRequestUnresolvedReviewer `json:"resolvedBy,omitempty"`
-	Reviews               []PullRequestSubmittedReview    `json:"reviews"`
+	UnresolvedThreadCount *int                                    `json:"unresolvedThreadCount,omitempty"`
+	UnresolvedBy          []PullRequestUnresolvedReviewer         `json:"unresolvedBy"`
+	ResolvedBy            []PullRequestUnresolvedReviewer         `json:"resolvedBy,omitempty"`
+	Reviews               []PullRequestSubmittedReview            `json:"reviews"`
+	Structured            *PullRequestStructuredReviewDiagnostics `json:"structured,omitempty"`
 }
 
 // PullRequestConflictFile is one file involved in a merge conflict.

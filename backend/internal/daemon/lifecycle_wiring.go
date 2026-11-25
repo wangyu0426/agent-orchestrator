@@ -417,6 +417,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable:        activitydispatch.FullySupportsHarness,
 		OutputTypeReconciler: lcm,
+		PRReviewDiagnostics:  lcm,
 		ArtifactDeleter:      artifactVersions,
 		ShareLinks:           sessionartifacts.NewShareLinks(cfg.DataDir, cfg.CloudControlPlaneURL),
 	}

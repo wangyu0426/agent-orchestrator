@@ -24136,6 +24136,8 @@ components:
           items:
             $ref: '#/components/schemas/SessionPRReviewEntry'
           type: array
+        structured:
+          $ref: '#/components/schemas/SessionPRStructuredReviewDiagnostics'
         unresolvedBy:
           items:
             $ref: '#/components/schemas/SessionPRUnresolvedReviewer'
@@ -24148,6 +24150,61 @@ components:
       - decision
       - hasUnresolvedHumanComments
       - unresolvedBy
+      type: object
+    SessionPRStructuredReviewDiagnostics:
+      properties:
+        effectiveDecision:
+          enum:
+          - none
+          - approved
+          - changes_requested
+          - review_required
+          type: string
+        githubDecision:
+          enum:
+          - none
+          - approved
+          - changes_requested
+          - review_required
+          type: string
+        pendingFeedback:
+          items:
+            $ref: '#/components/schemas/SessionPRStructuredReviewPendingFeedback'
+          type: array
+        reviewedSha:
+          type: string
+        source:
+          enum:
+          - native
+          - structured
+          type: string
+      required:
+      - githubDecision
+      - effectiveDecision
+      type: object
+    SessionPRStructuredReviewPendingFeedback:
+      properties:
+        deliveryStatus:
+          enum:
+          - pending
+          - delivered
+          type: string
+        feedback:
+          type: string
+        reviewId:
+          type: string
+        reviewUrl:
+          type: string
+        reviewedSha:
+          type: string
+        reviewer:
+          type: string
+      required:
+      - reviewId
+      - reviewer
+      - reviewedSha
+      - feedback
+      - deliveryStatus
       type: object
     SessionPRSummary:
       properties:

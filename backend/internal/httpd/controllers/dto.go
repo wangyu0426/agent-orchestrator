@@ -1688,14 +1688,36 @@ type SessionPRFailingCheck struct {
 	URL        string               `json:"url,omitempty"`
 }
 
+// SessionPRStructuredReviewPendingFeedback is one active structured change
+// request and its durable worker delivery state.
+type SessionPRStructuredReviewPendingFeedback struct {
+	ReviewID       string `json:"reviewId"`
+	Reviewer       string `json:"reviewer"`
+	ReviewURL      string `json:"reviewUrl,omitempty"`
+	ReviewedSHA    string `json:"reviewedSha"`
+	Feedback       string `json:"feedback"`
+	DeliveryStatus string `json:"deliveryStatus" enum:"pending,delivered"`
+}
+
+// SessionPRStructuredReviewDiagnostics exposes AO's local effective review
+// decision separately from GitHub's native review decision.
+type SessionPRStructuredReviewDiagnostics struct {
+	GitHubDecision    domain.ReviewDecision                      `json:"githubDecision" enum:"none,approved,changes_requested,review_required"`
+	EffectiveDecision domain.ReviewDecision                      `json:"effectiveDecision" enum:"none,approved,changes_requested,review_required"`
+	Source            string                                     `json:"source,omitempty" enum:"native,structured"`
+	ReviewedSHA       string                                     `json:"reviewedSha,omitempty"`
+	PendingFeedback   []SessionPRStructuredReviewPendingFeedback `json:"pendingFeedback,omitempty"`
+}
+
 // SessionPRReviewSummary is the review state block for a session PR summary.
 type SessionPRReviewSummary struct {
-	Decision                   domain.ReviewDecision         `json:"decision" enum:"none,approved,changes_requested,review_required"`
-	HasUnresolvedHumanComments bool                          `json:"hasUnresolvedHumanComments"`
-	UnresolvedThreadCount      *int                          `json:"unresolvedThreadCount,omitempty"`
-	UnresolvedBy               []SessionPRUnresolvedReviewer `json:"unresolvedBy"`
-	ResolvedBy                 []SessionPRUnresolvedReviewer `json:"resolvedBy,omitempty"`
-	Reviews                    []SessionPRReviewEntry        `json:"reviews,omitempty"`
+	Decision                   domain.ReviewDecision                 `json:"decision" enum:"none,approved,changes_requested,review_required"`
+	HasUnresolvedHumanComments bool                                  `json:"hasUnresolvedHumanComments"`
+	UnresolvedThreadCount      *int                                  `json:"unresolvedThreadCount,omitempty"`
+	UnresolvedBy               []SessionPRUnresolvedReviewer         `json:"unresolvedBy"`
+	ResolvedBy                 []SessionPRUnresolvedReviewer         `json:"resolvedBy,omitempty"`
+	Reviews                    []SessionPRReviewEntry                `json:"reviews,omitempty"`
+	Structured                 *SessionPRStructuredReviewDiagnostics `json:"structured,omitempty"`
 }
 
 // SessionPRReviewEntry is one submitted provider review summary: a reviewer's
@@ -1883,6 +1905,27 @@ func newSessionPRReviewSummary(in sessionsvc.PRReviewSummary) SessionPRReviewSum
 			AutoInjectReview: review.AutoInjectReview,
 		})
 	}
+	var structured *SessionPRStructuredReviewDiagnostics
+	if in.Structured != nil {
+		pending := make([]SessionPRStructuredReviewPendingFeedback, 0, len(in.Structured.PendingFeedback))
+		for _, item := range in.Structured.PendingFeedback {
+			pending = append(pending, SessionPRStructuredReviewPendingFeedback{
+				ReviewID:       item.ReviewID,
+				Reviewer:       item.Reviewer,
+				ReviewURL:      item.ReviewURL,
+				ReviewedSHA:    item.ReviewedSHA,
+				Feedback:       item.Feedback,
+				DeliveryStatus: item.DeliveryStatus,
+			})
+		}
+		structured = &SessionPRStructuredReviewDiagnostics{
+			GitHubDecision:    in.Structured.GitHubDecision,
+			EffectiveDecision: in.Structured.EffectiveDecision,
+			Source:            in.Structured.Source,
+			ReviewedSHA:       in.Structured.ReviewedSHA,
+			PendingFeedback:   pending,
+		}
+	}
 	return SessionPRReviewSummary{
 		Decision:                   in.Decision,
 		HasUnresolvedHumanComments: in.HasUnresolvedHumanComments,
@@ -1890,6 +1933,7 @@ func newSessionPRReviewSummary(in sessionsvc.PRReviewSummary) SessionPRReviewSum
 		UnresolvedBy:               reviewers,
 		ResolvedBy:                 resolvedReviewers,
 		Reviews:                    entries,
+		Structured:                 structured,
 	}
 }
 

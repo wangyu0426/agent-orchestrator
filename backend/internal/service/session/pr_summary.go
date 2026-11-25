@@ -93,6 +93,30 @@ func (s *Service) ListPRSummaries(ctx context.Context, id domain.SessionID) ([]P
 		}
 		summary := summarizePR(group.primary, checks, reviews, threads, comments, threadsExact)
 		summary.Threads = summarizeThreads(threads, comments)
+		if s.prReviewDiagnostics != nil {
+			if diag, ok, err := s.prReviewDiagnostics.PRReviewDiagnostics(ctx, group.primary.URL); err != nil {
+				return nil, err
+			} else if ok && (diag.Source != "" || len(diag.PendingFeedback) > 0 || diag.EffectiveDecision != diag.GitHubDecision) {
+				pending := make([]contract.PullRequestStructuredReviewPendingFeedback, 0, len(diag.PendingFeedback))
+				for _, item := range diag.PendingFeedback {
+					pending = append(pending, contract.PullRequestStructuredReviewPendingFeedback{
+						ReviewID:       item.ReviewID,
+						Reviewer:       item.Reviewer,
+						ReviewURL:      item.ReviewURL,
+						ReviewedSHA:    item.ReviewedSHA,
+						Feedback:       item.Feedback,
+						DeliveryStatus: string(item.DeliveryStatus),
+					})
+				}
+				summary.Review.Structured = &contract.PullRequestStructuredReviewDiagnostics{
+					GitHubDecision:    diag.GitHubDecision,
+					EffectiveDecision: diag.EffectiveDecision,
+					Source:            string(diag.Source),
+					ReviewedSHA:       diag.ReviewedSHA,
+					PendingFeedback:   pending,
+				}
+			}
+		}
 		if err := s.addPRDetails(ctx, &summary, group.primary.URL); err != nil {
 			return nil, err
 		}
