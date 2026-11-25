@@ -251,3 +251,10 @@ func TestVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewerImplementsChatProfileForAgyACP(t *testing.T) {
+	r := New()
+	if got := r.ReviewChatHarness(); got != domain.HarnessAgy {
+		t.Fatalf("ReviewChatHarness() = %q, want %q", got, domain.HarnessAgy)
+	}
+}

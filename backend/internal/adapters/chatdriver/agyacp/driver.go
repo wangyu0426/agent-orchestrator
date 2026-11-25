@@ -22,6 +22,7 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	acpdriver "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -98,7 +99,10 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 				env[disableWorkspaceTrustEnvVar] = "1"
 			}
 			if target.cli {
-				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv), Env: env}, nil
+				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.ReadOnly), Env: env}, nil
+			}
+			if cfg.ReadOnly {
+				return acpdriver.Launch{}, fmt.Errorf("%w: AGY read-only reviewer requires native `agy acp`", ports.ErrChatDriverIncompatible)
 			}
 			if env[harnessPathEnvVar] == "" {
 				if harness := resolve.harnessPath(target.path); harness != "" {
@@ -118,6 +122,7 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 		// allow_always, which would let a cached grant survive a later switch to
 		// a stricter approval mode.
 		PermissionPolicy: permissionPolicy,
+		ReadOnly:         agyReadOnlySession,
 		SteerPrompt:      &acpdriver.SteerPrompt{Supported: cliSteers},
 	}
 }
@@ -128,8 +133,11 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 // `agy acp` ignores the GEMINI_HOME variable and stores under its --gemini-dir,
 // so a GEMINI_HOME set for the session or inherited by the daemon is passed as
 // that flag, the same precedence agy.GeminiHome uses.
-func cliLaunchArgs(env map[string]string, getenv func(string) string) []string {
+func cliLaunchArgs(env map[string]string, getenv func(string) string, readOnly bool) []string {
 	args := []string{"acp"}
+	if readOnly {
+		args = append(args, "--sandbox")
+	}
 	home := strings.TrimSpace(env["GEMINI_HOME"])
 	if home == "" {
 		home = strings.TrimSpace(getenv("GEMINI_HOME"))
@@ -241,4 +249,270 @@ func sessionPreamble(cfg acpdriver.LaunchConfig) []acpsdk.ContentBlock {
 		"Standing instructions from Agent Orchestrator. Follow them for this whole session:\n" +
 			"<ao_standing_instructions>\n" + standing + "\n</ao_standing_instructions>",
 	)}
+}
+
+// agyReadOnlySession pins AGY review sessions to "default" mode (where `agy acp`
+// asks before every file edit and shell command) and enforces a fail-closed
+// permission policy that allows only read-only PR/git inspection commands and
+// the exact reviewer submit commands, rejecting all edits and other commands
+// without ever parking for human approval.
+func agyReadOnlySession(cfg acpdriver.LaunchConfig) acpdriver.ReadOnlySession {
+	return acpdriver.ReadOnlySession{
+		Mode:             modeDefault,
+		PermissionPolicy: reviewerPermissionPolicy(strings.TrimSpace(cfg.Env["AO_REVIEW_WORKER_SESSION_ID"])),
+	}
+}
+
+func reviewerPermissionPolicy(workerSessionID string) acpdriver.PermissionPolicy {
+	return func(_ ports.PermissionMode, params acpsdk.RequestPermissionRequest) (acpsdk.PermissionOptionId, bool) {
+		if params.ToolCall.Kind != nil && *params.ToolCall.Kind == acpsdk.ToolKindExecute {
+			if command := extractCommand(params.ToolCall.RawInput); command != "" {
+				if claudecode.ReviewerSubmitCommandAllowed(command, workerSessionID) || reviewerReadOnlyCommandAllowed(command) {
+					if id, ok := permissionOption(params.Options, acpsdk.PermissionOptionKindAllowOnce); ok {
+						return id, true
+					}
+				}
+			}
+		}
+		for _, kind := range []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways} {
+			if id, ok := permissionOption(params.Options, kind); ok {
+				return id, true
+			}
+		}
+		return acpdriver.CancelPermission, true
+	}
+}
+
+func extractCommand(rawInput any) string {
+	input, ok := rawInput.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"CommandLine", "command"} {
+		if cmd, _ := input[key].(string); strings.TrimSpace(cmd) != "" {
+			return strings.TrimSpace(cmd)
+		}
+	}
+	return ""
+}
+
+func reviewerReadOnlyCommandAllowed(command string) bool {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return false
+	}
+	// Reject any shell chaining, piping, redirection, quoting, or expansion.
+	for _, forbidden := range []string{";", "|", "&", ">", "<", "`", "$", "\n", "\r", "'", "\"", "\\"} {
+		if strings.Contains(cmd, forbidden) {
+			return false
+		}
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "git":
+		return gitReadOnlyArgsAllowed(fields[1], fields[2:])
+	case "gh":
+		if len(fields) >= 3 && fields[1] == "pr" {
+			return ghPRReadOnlyArgsAllowed(fields[2], fields[3:])
+		}
+	}
+	return false
+}
+
+func gitReadOnlyArgsAllowed(subcmd string, args []string) bool {
+	var allowedFlags map[string]bool
+	allowCountFlag := false
+	allowUnifiedFlag := false
+	switch subcmd {
+	case "status":
+		allowedFlags = map[string]bool{
+			"--short": true, "-s": true, "--branch": true, "-b": true,
+			"--porcelain": true, "--untracked-files=no": true,
+			"--untracked-files=normal": true, "--untracked-files=all": true,
+			"-uno": true, "-u": true,
+		}
+	case "diff":
+		allowedFlags = map[string]bool{
+			"--stat": true, "--numstat": true, "--name-only": true,
+			"--name-status": true, "--cached": true, "--staged": true,
+			"--no-color": true, "--color=never": true,
+			"--no-ext-diff": true, "--no-textconv": true,
+		}
+		allowUnifiedFlag = true
+	case "log":
+		allowedFlags = map[string]bool{
+			"--oneline": true, "--stat": true, "--name-only": true,
+			"--name-status": true, "--no-color": true, "--color=never": true,
+			"--no-merges": true, "--first-parent": true,
+		}
+		allowCountFlag = true
+	case "show":
+		allowedFlags = map[string]bool{
+			"--stat": true, "--name-only": true, "--name-status": true,
+			"--no-patch": true, "-s": true, "--oneline": true,
+			"--no-color": true, "--color=never": true,
+			"--no-ext-diff": true, "--no-textconv": true,
+		}
+	case "rev-parse":
+		allowedFlags = map[string]bool{
+			"--short": true, "--abbrev-ref": true, "--verify": true,
+			"--show-toplevel": true, "--is-inside-work-tree": true,
+		}
+	case "merge-base":
+		allowedFlags = map[string]bool{"--is-ancestor": true}
+	case "ls-files":
+		allowedFlags = map[string]bool{
+			"--cached": true, "--others": true, "--exclude-standard": true,
+			"--modified": true,
+		}
+	default:
+		return false
+	}
+
+	afterDoubleDash := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			if allowedFlags[arg] {
+				continue
+			}
+			if allowCountFlag {
+				if arg == "-n" {
+					if i+1 >= len(args) || !isASCIIPositiveInt(args[i+1]) {
+						return false
+					}
+					i++
+					continue
+				}
+				if strings.HasPrefix(arg, "-n") && isASCIIPositiveInt(arg[2:]) {
+					continue
+				}
+				if strings.HasPrefix(arg, "--max-count=") && isASCIIPositiveInt(strings.TrimPrefix(arg, "--max-count=")) {
+					continue
+				}
+				if len(arg) > 1 && isASCIIPositiveInt(arg[1:]) {
+					continue
+				}
+			}
+			if allowUnifiedFlag {
+				if strings.HasPrefix(arg, "-U") && isASCIINonNegativeInt(arg[2:]) {
+					continue
+				}
+				if strings.HasPrefix(arg, "--unified=") && isASCIINonNegativeInt(strings.TrimPrefix(arg, "--unified=")) {
+					continue
+				}
+			}
+			return false
+		}
+		if !isSafeReadOnlyArg(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func ghPRReadOnlyArgsAllowed(subcmd string, args []string) bool {
+	var allowedFlags map[string]bool
+	allowJSON := false
+	switch subcmd {
+	case "view":
+		allowedFlags = map[string]bool{"--comments": true}
+		allowJSON = true
+	case "diff":
+		allowedFlags = map[string]bool{"--name-only": true, "--patch": true, "--color=never": true}
+	case "checks":
+		allowedFlags = map[string]bool{"--required": true}
+	default:
+		return false
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			if allowedFlags[arg] {
+				continue
+			}
+			if arg == "--repo" || arg == "-R" {
+				if i+1 >= len(args) || !isSafeReadOnlyArg(args[i+1]) {
+					return false
+				}
+				i++
+				continue
+			}
+			if allowJSON && arg == "--json" {
+				if i+1 >= len(args) || !isSafeReadOnlyArg(args[i+1]) {
+					return false
+				}
+				i++
+				continue
+			}
+			return false
+		}
+		if !isSafeReadOnlyArg(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIPositiveInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	nonZero := false
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		if s[i] != '0' {
+			nonZero = true
+		}
+	}
+	return nonZero
+}
+
+func isASCIINonNegativeInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeReadOnlyArg(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '.', '/', '_', '-', ':', '~', '^', '@', ',':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func permissionOption(options []acpsdk.PermissionOption, kind acpsdk.PermissionOptionKind) (acpsdk.PermissionOptionId, bool) {
+	for _, option := range options {
+		if option.Kind == kind {
+			return option.OptionId, true
+		}
+	}
+	return "", false
 }

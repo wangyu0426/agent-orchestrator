@@ -526,3 +526,114 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadOnlySessionPinsDefaultModeSandboxAndStrictPolicy(t *testing.T) {
+	cfg := buildConfig(nil, testResolver(t, nil), nil)
+	if cfg.ReadOnly == nil {
+		t.Fatal("ReadOnly binding must be configured for AGY reviewer ACP")
+	}
+	args := cliLaunchArgs(nil, func(string) string { return "" }, true)
+	wantArgs := []string{"acp", "--sandbox"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("cliLaunchArgs(readOnly=true) = %v, want %v", args, wantArgs)
+	}
+
+	ro := cfg.ReadOnly(acpdriver.LaunchConfig{
+		ReadOnly: true,
+		Env:      map[string]string{"AO_REVIEW_WORKER_SESSION_ID": "ao-14"},
+	})
+	if ro.Mode != modeDefault {
+		t.Fatalf("ReadOnly.Mode = %q, want %q", ro.Mode, modeDefault)
+	}
+	if ro.PermissionPolicy == nil {
+		t.Fatal("ReadOnly.PermissionPolicy must be set")
+	}
+
+	execKind := acpsdk.ToolKindExecute
+	editKind := acpsdk.ToolKindEdit
+	opts := []acpsdk.PermissionOption{
+		{OptionId: "allow", Kind: acpsdk.PermissionOptionKindAllowOnce},
+		{OptionId: "deny", Kind: acpsdk.PermissionOptionKindRejectOnce},
+	}
+
+	allowed := []string{
+		"git status",
+		"git diff HEAD~1..HEAD",
+		"git log -n 5 --oneline",
+		"git show HEAD",
+		"gh pr view 151",
+		"gh pr diff 151",
+		"gh pr checks 151",
+		"printf '%s' '{\"verdict\":\"approve\"}' | ao review submit --session ao-14 --reviews -",
+		"printf '%s' '{\"event\":\"APPROVE\"}' | gh api --method POST repos/o/r/pulls/151/reviews --input - --jq '.id'",
+	}
+	for _, cmd := range allowed {
+		req := acpsdk.RequestPermissionRequest{
+			ToolCall: acpsdk.ToolCallUpdate{
+				Kind:     &execKind,
+				RawInput: map[string]any{"CommandLine": cmd},
+			},
+			Options: opts,
+		}
+		got, handled := ro.PermissionPolicy(ports.PermissionModeAuto, req)
+		if !handled || got != "allow" {
+			t.Errorf("command %q: got (%q, %v), want (allow, true)", cmd, got, handled)
+		}
+	}
+
+	denied := []string{
+		"git push origin main",
+		"git commit -m hack",
+		"git diff --output=/tmp/out",
+		"git diff --out=/tmp/out",
+		"git diff --ou=/tmp/out",
+		"git diff '--output=/tmp/out'",
+		"git diff \"--output=/tmp/out\"",
+		"git diff {--output=/tmp/out,HEAD}",
+		"git diff HEAD,{--output=/tmp/out,HEAD}",
+		"git diff --ext-diff HEAD~1..HEAD",
+		"git log --output=/tmp/out",
+		"git show --out=/tmp/out HEAD",
+		"git status && rm -rf /",
+		"gh pr merge 151",
+		"gh pr view 151 --web",
+		"rm -rf .",
+		"printf '%s' '{}' | ao review submit --session other-session --reviews -",
+	}
+	for _, cmd := range denied {
+		req := acpsdk.RequestPermissionRequest{
+			ToolCall: acpsdk.ToolCallUpdate{
+				Kind:     &execKind,
+				RawInput: map[string]any{"CommandLine": cmd},
+			},
+			Options: opts,
+		}
+		got, handled := ro.PermissionPolicy(ports.PermissionModeAuto, req)
+		if !handled || got != "deny" {
+			t.Errorf("command %q: got (%q, %v), want (deny, true)", cmd, got, handled)
+		}
+	}
+
+	editReq := acpsdk.RequestPermissionRequest{
+		ToolCall: acpsdk.ToolCallUpdate{
+			Kind:     &editKind,
+			RawInput: map[string]any{"Path": "foo.go"},
+		},
+		Options: opts,
+	}
+	if got, handled := ro.PermissionPolicy(ports.PermissionModeAuto, editReq); !handled || got != "deny" {
+		t.Errorf("edit tool call: got (%q, %v), want (deny, true)", got, handled)
+	}
+}
+
+func TestReadOnlyLaunchFailsClosedWithoutNativeCLI(t *testing.T) {
+	dir := t.TempDir()
+	legacy := writeExecutable(t, filepath.Join(dir, "agy_acp_server"))
+	res := testResolver(t, map[string]string{serverPathEnvVar: legacy})
+	cfg := buildConfig(nil, res, nil)
+
+	_, err := cfg.Launch(context.Background(), acpdriver.LaunchConfig{ReadOnly: true})
+	if !errors.Is(err, ports.ErrChatDriverIncompatible) {
+		t.Fatalf("Launch(ReadOnly=true) with legacy server = %v, want ErrChatDriverIncompatible", err)
+	}
+}
