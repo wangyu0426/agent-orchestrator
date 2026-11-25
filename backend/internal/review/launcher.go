@@ -594,6 +594,14 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("reviewer runtime: %w", agentlaunch.RedactError(err, spec.ProjectEnv))
 	}
+	if !spec.DeferInitialMessage {
+		if observer, ok := reviewer.(ports.ReviewerStartupAuthObserver); ok {
+			if err := l.observeStartupAuth(ctx, observer, handle); err != nil {
+				_ = l.runtime.Destroy(ctx, handle)
+				return LaunchResult{}, err
+			}
+		}
+	}
 	if cmd.InitialMessage != "" && !spec.DeferInitialMessage {
 		if err := l.waitForPromptReadiness(ctx, reviewer, handle); err != nil {
 			return LaunchResult{}, fmt.Errorf("reviewer prompt readiness: %w", err)
@@ -667,6 +675,65 @@ func outputContainsAny(output string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func outputContainsAnyFold(output string, patterns []string) bool {
+	lower := strings.ToLower(output)
+	for _, pattern := range patterns {
+		if pattern != "" && strings.Contains(lower, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *agentLauncher) observeStartupAuth(ctx context.Context, observer ports.ReviewerStartupAuthObserver, handle ports.RuntimeHandle) error {
+	hints, err := observer.ReviewStartupAuthHints(ctx)
+	if err != nil {
+		return err
+	}
+	if len(hints.AuthRequiredPatterns) == 0 || hints.Timeout <= 0 {
+		return nil
+	}
+	if hints.InitialDelay > 0 {
+		timer := time.NewTimer(hints.InitialDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	poll := hints.PollInterval
+	if poll <= 0 {
+		poll = 200 * time.Millisecond
+	}
+	lines := hints.Lines
+	if lines <= 0 {
+		lines = 80
+	}
+	deadline := time.NewTimer(hints.Timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		output, getErr := l.runtime.GetOutput(ctx, handle, lines)
+		if getErr == nil {
+			if outputContainsAnyFold(output, hints.AuthRequiredPatterns) {
+				return fmt.Errorf("reviewer startup auth required: %w: interactive login prompt detected; sign in on this host and retry", ports.ErrChatAuthRequired)
+			}
+			if len(hints.ReadyPatterns) > 0 && outputContainsAnyFold(output, hints.ReadyPatterns) {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []string, base map[string]string) map[string]string {

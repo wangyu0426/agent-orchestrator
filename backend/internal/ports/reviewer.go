@@ -81,6 +81,25 @@ type ReviewerPromptReadinessProvider interface {
 	ReviewPromptReadinessHints(ctx context.Context) (PromptReadinessHints, error)
 }
 
+// StartupAuthHints configures bounded post-launch terminal observation for
+// interactive reviewers that may stall on an interactive authentication prompt
+// (for example, when a stale/revoked token triggers OAuth).
+type StartupAuthHints struct {
+	InitialDelay         time.Duration
+	Timeout              time.Duration
+	PollInterval         time.Duration
+	Lines                int
+	AuthRequiredPatterns []string
+	ReadyPatterns        []string
+}
+
+// ReviewerStartupAuthObserver lets an interactive reviewer declare startup
+// terminal patterns that distinguish an authentication-required stall from a
+// healthy launch.
+type ReviewerStartupAuthObserver interface {
+	ReviewStartupAuthHints(ctx context.Context) (StartupAuthHints, error)
+}
+
 // ReviewInvocation describes one review pass for a reviewer to act on. All ids
 // the reviewer needs are passed explicitly here (and embedded in the prompt /
 // message), never through environment variables.

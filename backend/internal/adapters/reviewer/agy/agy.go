@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	agentagy "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -54,11 +56,38 @@ var _ ports.Reviewer = (*Reviewer)(nil)
 var _ ports.ReviewerCanceller = (*Reviewer)(nil)
 var _ ports.ReviewerRestorer = (*Reviewer)(nil)
 var _ ports.ReviewerReusePolicy = (*Reviewer)(nil)
+var _ ports.ReviewerStartupAuthObserver = (*Reviewer)(nil)
 
 // ReviewProcessReusable reports false so every AGY TUI review pass launches
-// fresh with the exact selected route's model/effort and never reuses a stale
-// pane running a different model.
+// fresh with the exact selected route's model and never reuses a stale pane
+// running a different model.
 func (*Reviewer) ReviewProcessReusable() bool { return false }
+
+// ReviewStartupAuthHints returns bounded startup observation patterns to detect
+// interactive OAuth / sign-in stalls (for example, when a bridged token is
+// stale or revoked, or when the host uses unsupported keyring-only storage).
+func (*Reviewer) ReviewStartupAuthHints(context.Context) (ports.StartupAuthHints, error) {
+	return ports.StartupAuthHints{
+		InitialDelay: 250 * time.Millisecond,
+		Timeout:      3 * time.Second,
+		PollInterval: 200 * time.Millisecond,
+		Lines:        80,
+		AuthRequiredPatterns: []string{
+			"please sign in",
+			"sign in to",
+			"accounts.google.com",
+			"authorization code",
+			"oauth",
+			"login required",
+		},
+		ReadyPatterns: []string{
+			"claude-",
+			"gemini-",
+			"reading",
+			"thinking",
+		},
+	}, nil
+}
 
 // ReviewCommand launches Agy's permanent interactive TUI in sandbox mode. The
 // checkout and AO prompt root are explicitly added because this experimental
@@ -138,9 +167,11 @@ func (r *Reviewer) resolveHostOAuthToken() (string, error) {
 	return tokenPath, nil
 }
 
-// bridgeHostOAuthToken links only the host user's Antigravity OAuth token file
-// into the private reviewer profile so AGY reuses the existing host login
-// without sharing conversations, brain state, settings, or caches.
+// bridgeHostOAuthToken copies only the host user's Antigravity OAuth token file
+// into the private reviewer profile (mode 0600 inside 0700 directories) so AGY
+// reuses the existing host login without sharing conversations, brain state,
+// settings, or caches, and without giving the reviewer a writable symlink that
+// could mutate the host user's token file.
 func bridgeHostOAuthToken(configRoot, hostTokenPath string) error {
 	geminiDir := filepath.Join(configRoot, ".gemini")
 	cliDir := filepath.Join(geminiDir, "antigravity-cli")
@@ -156,16 +187,32 @@ func bridgeHostOAuthToken(configRoot, hostTokenPath string) error {
 			return fmt.Errorf("secure private directory %q: %w", dir, err)
 		}
 	}
+	src, err := os.Open(hostTokenPath) //nolint:gosec // hostTokenPath is resolved from os.UserHomeDir and verified as a regular file
+	if err != nil {
+		return fmt.Errorf("open host OAuth token: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+
 	dst := filepath.Join(cliDir, "antigravity-oauth-token")
 	if _, err := os.Lstat(dst); err == nil {
 		if err := os.Remove(dst); err != nil {
-			return fmt.Errorf("replace existing token link: %w", err)
+			return fmt.Errorf("replace existing token copy: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect token link: %w", err)
+		return fmt.Errorf("inspect token copy: %w", err)
 	}
-	if err := os.Symlink(hostTokenPath, dst); err != nil {
-		return fmt.Errorf("link host OAuth token: %w", err)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // private owner-only file in AO-owned directory
+	if err != nil {
+		return fmt.Errorf("create private OAuth token copy: %w", err)
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("copy host OAuth token: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("close private OAuth token copy: %w", err)
 	}
 	return nil
 }
@@ -218,22 +265,13 @@ func interactiveArgv(binary, workspacePath, promptRoot string, cfg domain.AgentC
 	if strings.TrimSpace(promptRoot) != "" {
 		argv = append(argv, "--add-dir", promptRoot)
 	}
+	// Forward only --model, matching the worker AGY adapter. AGY model IDs
+	// already encode effort (for example claude-sonnet-5-5-low), and older
+	// supported AGY versions do not guarantee a separate --effort flag.
 	if model := strings.TrimSpace(cfg.Model); model != "" {
 		argv = append(argv, "--model", model)
 	}
-	if effort := normalizeEffort(cfg.Effort); effort != "" {
-		argv = append(argv, "--effort", effort)
-	}
 	return append(argv, "--prompt-interactive", prompt)
-}
-
-func normalizeEffort(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "low", "medium", "high", "xhigh", "max":
-		return strings.ToLower(strings.TrimSpace(raw))
-	default:
-		return ""
-	}
 }
 
 func versionAtLeast(got, minimum string) bool {

@@ -79,9 +79,9 @@ func TestReviewCommandLaunchesHostTrustedInteractiveTUI(t *testing.T) {
 	if spec.Env["HOME"] != configRoot || spec.Env["AO_DATA_DIR"] != dataDir {
 		t.Fatalf("AO-owned environment = %#v", spec.Env)
 	}
-	// Verify private profile isolation: only the OAuth token file is linked,
-	// while .gemini and antigravity-cli are real private dirs and host settings
-	// are not exposed.
+	// Verify private profile isolation: only a private 0600 copy of the OAuth
+	// token is created (never a writable symlink to the host token), .gemini
+	// and antigravity-cli are real private dirs, and host settings are absent.
 	for _, dir := range []string{filepath.Join(configRoot, ".gemini"), filepath.Join(configRoot, ".gemini", "antigravity-cli")} {
 		info, err := os.Lstat(dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -89,19 +89,34 @@ func TestReviewCommandLaunchesHostTrustedInteractiveTUI(t *testing.T) {
 		}
 	}
 	dstToken := filepath.Join(configRoot, ".gemini", "antigravity-cli", "antigravity-oauth-token")
-	linkTarget, err := os.Readlink(dstToken)
-	if err != nil || linkTarget != hostTokenPath {
-		t.Fatalf("token link = %q (err=%v), want %q", linkTarget, err, hostTokenPath)
+	dstInfo, err := os.Lstat(dstToken)
+	if err != nil || !dstInfo.Mode().IsRegular() || dstInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected regular private copy at %q (not symlink), got info=%v err=%v", dstToken, dstInfo, err)
+	}
+	if dstInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("private token copy perms = %o, want 0600", dstInfo.Mode().Perm())
+	}
+	gotBytes, err := os.ReadFile(dstToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes, err := os.ReadFile(hostTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBytes) != string(wantBytes) {
+		t.Fatalf("private token copy mismatch")
 	}
 	if _, err := os.Lstat(filepath.Join(configRoot, ".gemini", "antigravity-cli", "settings.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("host settings.json must not be bridged into private profile, err=%v", err)
 	}
 }
 
-func TestReviewCommandAndRestorePropagateModelAndEffort(t *testing.T) {
+func TestReviewCommandAndRestorePropagateModelWithoutInventingEffort(t *testing.T) {
 	dataDir := t.TempDir()
 	hostHome, _ := testHostHomeWithToken(t)
-	r := testReviewer(strings.Join(requiredFlags, "\n"), "1.5.16")
+	// Supported CLI help includes --model and omits --effort.
+	r := testReviewer(strings.Join(requiredFlags, "\n"), "1.1.9")
 	r.hostHome = func() (string, error) { return hostHome, nil }
 	inv := ports.ReviewInvocation{
 		DataDir:        dataDir,
@@ -119,7 +134,7 @@ func TestReviewCommandAndRestorePropagateModelAndEffort(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ReviewRestoreCommand = ok:%v err:%v", ok, err)
 	}
-	want := []string{"/opt/agy/bin/agy", "--sandbox", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--model", "claude-sonnet-5-5-low", "--effort", "low", "--prompt-interactive", "Read and follow `/ao/task.md`."}
+	want := []string{"/opt/agy/bin/agy", "--sandbox", "--add-dir", "/worker", "--add-dir", "/ao/prompts/worker/reviewer", "--model", "claude-sonnet-5-5-low", "--prompt-interactive", "Read and follow `/ao/task.md`."}
 	if !slices.Equal(cmd.Argv, want) {
 		t.Fatalf("ReviewCommand argv = %#v, want %#v", cmd.Argv, want)
 	}

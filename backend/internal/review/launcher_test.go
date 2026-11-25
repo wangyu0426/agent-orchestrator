@@ -1387,3 +1387,64 @@ func TestPreflightPreservesTypedAuthRequiredError(t *testing.T) {
 		t.Fatalf("Preflight after recovery = %v, want nil", err)
 	}
 }
+
+type startupAuthObserverReviewer struct {
+	fakeReviewer
+	bin   string
+	hints ports.StartupAuthHints
+}
+
+func (r *startupAuthObserverReviewer) ReviewCommand(_ context.Context, _ ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
+	return ports.ReviewCommandSpec{Argv: []string{r.bin, "--prompt-interactive", "task"}}, nil
+}
+
+func (r *startupAuthObserverReviewer) ReviewStartupAuthHints(context.Context) (ports.StartupAuthHints, error) {
+	return r.hints, nil
+}
+
+func TestSpawnDetectsStartupOAuthPromptDestroysPaneAndRecoversOnRetry(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRuntime{
+		output: "Please sign in to continue: https://accounts.google.com/o/oauth2/auth",
+	}
+	rev := &startupAuthObserverReviewer{
+		bin: bin,
+		hints: ports.StartupAuthHints{
+			InitialDelay:         time.Millisecond,
+			Timeout:              100 * time.Millisecond,
+			PollInterval:         5 * time.Millisecond,
+			Lines:                40,
+			AuthRequiredPatterns: []string{"please sign in", "accounts.google.com"},
+			ReadyPatterns:        []string{"claude-"},
+		},
+	}
+	l := NewLauncher(fakeReviewerResolver{reviewer: rev, ok: true}, rt, t.TempDir())
+	spec := launchSpec()
+	spec.Harness = domain.ReviewerAgy
+	spec.WorkspacePath = t.TempDir()
+
+	_, err := l.Spawn(context.Background(), spec)
+	if !errors.Is(err, ports.ErrChatAuthRequired) {
+		t.Fatalf("Spawn with OAuth prompt err = %v, want ErrChatAuthRequired", err)
+	}
+	if rt.destroyed == "" {
+		t.Fatal("expected stuck OAuth pane to be destroyed on startup auth failure")
+	}
+	if domain.IsQuotaFailedReviewRun(domain.ReviewRun{Status: domain.ReviewRunFailed, Body: err.Error()}) {
+		t.Fatal("startup auth failure must not be classified as quota exhaustion")
+	}
+
+	// Retry after host auth is fixed: pane shows ready output and Spawn succeeds.
+	rt.output = "Antigravity using claude-sonnet-5-5-low"
+	rt.destroyed = ""
+	res, err := l.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Spawn retry after auth recovery = %v, want nil", err)
+	}
+	if res.HandleID == "" {
+		t.Fatal("expected non-empty HandleID after recovery")
+	}
+}
