@@ -716,9 +716,13 @@ func (l *agentLauncher) observeStartupAuth(ctx context.Context, observer ports.R
 	defer deadline.Stop()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	var lastErr error
 	for {
 		output, getErr := l.runtime.GetOutput(ctx, handle, lines)
-		if getErr == nil {
+		if getErr != nil {
+			lastErr = getErr
+		} else {
+			lastErr = nil
 			if outputContainsAnyFold(output, hints.AuthRequiredPatterns) {
 				return fmt.Errorf("reviewer startup auth required: %w: interactive login prompt detected; sign in on this host and retry", ports.ErrChatAuthRequired)
 			}
@@ -730,7 +734,10 @@ func (l *agentLauncher) observeStartupAuth(ctx context.Context, observer ports.R
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return nil
+			if lastErr != nil {
+				return fmt.Errorf("reviewer startup: %w: output probe failed (%v); check reviewer terminal and retry", ports.ErrReviewerStartupUnconfirmed, lastErr)
+			}
+			return fmt.Errorf("reviewer startup: %w: timed out waiting for authenticated readiness; check reviewer terminal and retry", ports.ErrReviewerStartupUnconfirmed)
 		case <-ticker.C:
 		}
 	}

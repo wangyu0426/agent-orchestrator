@@ -66,10 +66,13 @@ func (*Reviewer) ReviewProcessReusable() bool { return false }
 // ReviewStartupAuthHints returns bounded startup observation patterns to detect
 // interactive OAuth / sign-in stalls (for example, when a bridged token is
 // stale or revoked, or when the host uses unsupported keyring-only storage).
+// ReadyPatterns match only Antigravity's authenticated interactive TUI footer
+// signals (see internal/adapters/agent/agy/terminal_activity.go), never
+// generic model labels that may appear before authentication completes.
 func (*Reviewer) ReviewStartupAuthHints(context.Context) (ports.StartupAuthHints, error) {
 	return ports.StartupAuthHints{
 		InitialDelay: 250 * time.Millisecond,
-		Timeout:      3 * time.Second,
+		Timeout:      10 * time.Second,
 		PollInterval: 200 * time.Millisecond,
 		Lines:        80,
 		AuthRequiredPatterns: []string{
@@ -81,10 +84,8 @@ func (*Reviewer) ReviewStartupAuthHints(context.Context) (ports.StartupAuthHints
 			"login required",
 		},
 		ReadyPatterns: []string{
-			"claude-",
-			"gemini-",
-			"reading",
-			"thinking",
+			"esc to cancel",
+			"? for shortcuts",
 		},
 	}, nil
 }

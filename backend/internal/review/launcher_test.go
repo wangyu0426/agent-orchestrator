@@ -1402,25 +1402,49 @@ func (r *startupAuthObserverReviewer) ReviewStartupAuthHints(context.Context) (p
 	return r.hints, nil
 }
 
+type scriptedOutputRuntime struct {
+	fakeRuntime
+	outputs []string
+	errs    []error
+	calls   int
+}
+
+func (r *scriptedOutputRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int) (string, error) {
+	idx := r.calls
+	r.calls++
+	if idx < len(r.errs) && r.errs[idx] != nil {
+		return "", r.errs[idx]
+	}
+	if len(r.outputs) == 0 {
+		return "", nil
+	}
+	if idx >= len(r.outputs) {
+		return r.outputs[len(r.outputs)-1], nil
+	}
+	return r.outputs[idx], nil
+}
+
+func testAGYStartupHints() ports.StartupAuthHints {
+	return ports.StartupAuthHints{
+		InitialDelay:         time.Millisecond,
+		Timeout:              60 * time.Millisecond,
+		PollInterval:         5 * time.Millisecond,
+		Lines:                40,
+		AuthRequiredPatterns: []string{"please sign in", "accounts.google.com"},
+		ReadyPatterns:        []string{"esc to cancel", "? for shortcuts"},
+	}
+}
+
 func TestSpawnDetectsStartupOAuthPromptDestroysPaneAndRecoversOnRetry(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "agy")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rt := &fakeRuntime{
-		output: "Please sign in to continue: https://accounts.google.com/o/oauth2/auth",
+	// Delayed OAuth prompt after initial blank output.
+	rt := &scriptedOutputRuntime{
+		outputs: []string{"", "Please sign in to continue: https://accounts.google.com/o/oauth2/auth"},
 	}
-	rev := &startupAuthObserverReviewer{
-		bin: bin,
-		hints: ports.StartupAuthHints{
-			InitialDelay:         time.Millisecond,
-			Timeout:              100 * time.Millisecond,
-			PollInterval:         5 * time.Millisecond,
-			Lines:                40,
-			AuthRequiredPatterns: []string{"please sign in", "accounts.google.com"},
-			ReadyPatterns:        []string{"claude-"},
-		},
-	}
+	rev := &startupAuthObserverReviewer{bin: bin, hints: testAGYStartupHints()}
 	l := NewLauncher(fakeReviewerResolver{reviewer: rev, ok: true}, rt, t.TempDir())
 	spec := launchSpec()
 	spec.Harness = domain.ReviewerAgy
@@ -1428,7 +1452,7 @@ func TestSpawnDetectsStartupOAuthPromptDestroysPaneAndRecoversOnRetry(t *testing
 
 	_, err := l.Spawn(context.Background(), spec)
 	if !errors.Is(err, ports.ErrChatAuthRequired) {
-		t.Fatalf("Spawn with OAuth prompt err = %v, want ErrChatAuthRequired", err)
+		t.Fatalf("Spawn with delayed OAuth prompt err = %v, want ErrChatAuthRequired", err)
 	}
 	if rt.destroyed == "" {
 		t.Fatal("expected stuck OAuth pane to be destroyed on startup auth failure")
@@ -1437,8 +1461,9 @@ func TestSpawnDetectsStartupOAuthPromptDestroysPaneAndRecoversOnRetry(t *testing
 		t.Fatal("startup auth failure must not be classified as quota exhaustion")
 	}
 
-	// Retry after host auth is fixed: pane shows ready output and Spawn succeeds.
-	rt.output = "Antigravity using claude-sonnet-5-5-low"
+	// Retry after host auth is fixed: pane shows authenticated TUI footer and Spawn succeeds.
+	rt.outputs = []string{"", "Generating...\nesc to cancel"}
+	rt.calls = 0
 	rt.destroyed = ""
 	res, err := l.Spawn(context.Background(), spec)
 	if err != nil {
@@ -1446,5 +1471,68 @@ func TestSpawnDetectsStartupOAuthPromptDestroysPaneAndRecoversOnRetry(t *testing
 	}
 	if res.HandleID == "" {
 		t.Fatal("expected non-empty HandleID after recovery")
+	}
+}
+
+func TestSpawnStartupObserverFailsClosedOnBlankAndErrorOutput(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rev := &startupAuthObserverReviewer{bin: bin, hints: testAGYStartupHints()}
+	spec := launchSpec()
+	spec.Harness = domain.ReviewerAgy
+	spec.WorkspacePath = t.TempDir()
+
+	for _, tc := range []struct {
+		name string
+		rt   *scriptedOutputRuntime
+	}{
+		{name: "blank output", rt: &scriptedOutputRuntime{outputs: []string{""}}},
+		{name: "repeated get output error", rt: &scriptedOutputRuntime{errs: []error{errors.New("pty unavailable"), errors.New("pty unavailable"), errors.New("pty unavailable")}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher(fakeReviewerResolver{reviewer: rev, ok: true}, tc.rt, t.TempDir())
+			_, err := l.Spawn(context.Background(), spec)
+			if !errors.Is(err, ports.ErrReviewerStartupUnconfirmed) {
+				t.Fatalf("Spawn err = %v, want ErrReviewerStartupUnconfirmed", err)
+			}
+			if errors.Is(err, ports.ErrChatAuthRequired) {
+				t.Fatalf("timeout must not fabricate ErrChatAuthRequired: %v", err)
+			}
+			if domain.IsQuotaFailedReviewRun(domain.ReviewRun{Status: domain.ReviewRunFailed, Body: err.Error()}) {
+				t.Fatal("startup timeout must not be classified as quota exhaustion")
+			}
+			if tc.rt.destroyed == "" {
+				t.Fatal("expected unconfirmed pane to be destroyed on timeout")
+			}
+		})
+	}
+}
+
+func TestSpawnStartupObserverIgnoresPreAuthModelBannerBeforeOAuth(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "agy")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-auth model banner appears first, followed by OAuth prompt.
+	rt := &scriptedOutputRuntime{
+		outputs: []string{
+			"Antigravity CLI · claude-sonnet-5-5-low",
+			"Antigravity CLI · claude-sonnet-5-5-low\nPlease sign in at https://accounts.google.com/o/oauth2/auth",
+		},
+	}
+	rev := &startupAuthObserverReviewer{bin: bin, hints: testAGYStartupHints()}
+	l := NewLauncher(fakeReviewerResolver{reviewer: rev, ok: true}, rt, t.TempDir())
+	spec := launchSpec()
+	spec.Harness = domain.ReviewerAgy
+	spec.WorkspacePath = t.TempDir()
+
+	_, err := l.Spawn(context.Background(), spec)
+	if !errors.Is(err, ports.ErrChatAuthRequired) {
+		t.Fatalf("Spawn with pre-auth model banner + OAuth err = %v, want ErrChatAuthRequired", err)
+	}
+	if rt.destroyed == "" {
+		t.Fatal("expected pane to be destroyed when OAuth follows model banner")
 	}
 }

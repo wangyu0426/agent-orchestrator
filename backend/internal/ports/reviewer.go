@@ -2,10 +2,17 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
+
+// ErrReviewerStartupUnconfirmed is returned when bounded post-launch
+// observation times out before the reviewer emits an authenticated ready
+// signal (for example, blank output, repeated probe errors, or an unrecognized
+// stall). It is distinct from ErrChatAuthRequired and quota exhaustion.
+var ErrReviewerStartupUnconfirmed = errors.New("reviewer startup readiness unconfirmed")
 
 // Reviewer is the contract a code-review adapter satisfies. It is deliberately
 // separate from Agent: a reviewer is invoked once over a checkout to review a
