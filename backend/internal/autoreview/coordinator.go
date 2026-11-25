@@ -198,6 +198,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	eligible := false
 	hasRunning := false
 	reason := "planner_ineligible"
+	quotaManaged := selectedRoute != nil
 	for _, state := range states {
 		switch state.Status {
 		case reviewcore.ReviewStateRunning:
@@ -210,13 +211,13 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		case reviewcore.ReviewStateIneligible:
 			reason = ineligibleReason(prs, state.PRURL)
 		case reviewcore.ReviewStateNeedsReview:
-			if blocked := existingHeadReason(harnessRuns, state.PRURL, state.TargetSHA); blocked != "" {
+			if blocked := existingHeadReason(harnessRuns, state.PRURL, state.TargetSHA, quotaManaged); blocked != "" {
 				reason = blocked
 				continue
 			}
 			// When quota failover selects a different reviewer harness, never
 			// duplicate a review that is already running or decided on this HEAD.
-			if selectedRoute != nil {
+			if quotaManaged {
 				if crossBlocked := crossHarnessHeadReason(runs, state.PRURL, state.TargetSHA); crossBlocked != "" {
 					reason = crossBlocked
 					continue
@@ -251,7 +252,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: result.SkipReason}, nil
 	}
 	if !result.Created {
-		return Result{Reason: triggerResultReason(prs, result, harness)}, nil
+		return Result{Reason: triggerResultReason(prs, result, harness, quotaManaged)}, nil
 	}
 	c.clearDeferrals(ctx, id, prs)
 	return Result{Triggered: true, Reason: "triggered"}, nil
@@ -414,7 +415,7 @@ func allPendingPRsRetryCapped(prs []domain.PullRequest, runs []domain.ReviewRun,
 				harnessRuns = append(harnessRuns, r)
 			}
 		}
-		if existingHeadReason(harnessRuns, pr.URL, pr.HeadSHA) == "failed_same_sha_retry_limit" {
+		if existingHeadReason(harnessRuns, pr.URL, pr.HeadSHA, true) == "failed_same_sha_retry_limit" {
 			capped++
 		}
 	}
@@ -448,7 +449,7 @@ func crossHarnessHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) st
 	return ""
 }
 
-func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResult, harness domain.ReviewerHarness) string {
+func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResult, harness domain.ReviewerHarness, quotaManaged bool) string {
 	for _, state := range result.Reviews {
 		if state.Status == reviewcore.ReviewStateRunning {
 			return "review_running"
@@ -461,14 +462,15 @@ func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResu
 		}
 	}
 	for _, pr := range prs {
-		if blocked := existingHeadReason(runs, pr.URL, pr.HeadSHA); blocked != "" {
+		if blocked := existingHeadReason(runs, pr.URL, pr.HeadSHA, quotaManaged); blocked != "" {
 			return blocked
 		}
 	}
 	return "planner_up_to_date"
 }
 
-func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string {
+func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string, quotaManaged ...bool) string {
+	ignoreQuotaFailures := len(quotaManaged) > 0 && quotaManaged[0]
 	failedAutoRuns := 0
 	for _, run := range runs {
 		if run.PRURL != prURL || run.TargetSHA != targetSHA {
@@ -486,7 +488,7 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string
 		if run.Verdict == domain.VerdictChangesRequested {
 			return "changes_requested_same_sha"
 		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !domain.IsQuotaFailedReviewRun(run) {
+		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && (!ignoreQuotaFailures || !domain.IsQuotaFailedReviewRun(run)) {
 			failedAutoRuns++
 		}
 	}

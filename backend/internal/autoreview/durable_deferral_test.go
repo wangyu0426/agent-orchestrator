@@ -385,3 +385,57 @@ func TestReviewerQuotaActiveDeferralScansPastUnknownPrimaryToPositiveFallback(t 
 		t.Fatalf("active deferral should scan past unknown primary to positive fallback: res=%+v err=%v calls=%+v", res, err, trig.calls)
 	}
 }
+
+func TestReviewerQuotaDisabledAndExplicitOverridePreserveLegacyRetryCap(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	quotaRuns := []domain.ReviewRun{
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
+	}
+
+	t.Run("disabled policy preserves 3-attempt retry cap", func(t *testing.T) {
+		st := &fakeStore{
+			session: domain.SessionRecord{
+				ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				AutoReviewEnabled: true,
+				Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+			},
+			project: domain.ProjectRecord{ID: "p", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}}},
+			prs:     []domain.PullRequest{{URL: "https://github.com/o/r/pull/1", Number: 1, HeadSHA: "sha-1"}},
+			runs:    quotaRuns,
+		}
+		trig := &recordingOptionsTrigger{}
+		coord := New(st, trig, Config{Clock: func() time.Time { return now }})
+		res, err := coord.EvaluateSession(context.Background(), "p-1")
+		if err != nil || res.Triggered || res.Reason != "failed_same_sha_retry_limit" || len(trig.calls) != 0 {
+			t.Fatalf("disabled policy must preserve retry cap: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		}
+	})
+
+	t.Run("explicit session reviewer override preserves 3-attempt retry cap", func(t *testing.T) {
+		st := &fakeStore{
+			session: domain.SessionRecord{
+				ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				ReviewerHarness:   domain.ReviewerCodex,
+				AutoReviewEnabled: true,
+				Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+			},
+			project: domain.ProjectRecord{ID: "p"},
+			prs:     []domain.PullRequest{{URL: "https://github.com/o/r/pull/1", Number: 1, HeadSHA: "sha-1"}},
+			runs:    quotaRuns,
+		}
+		trig := &recordingOptionsTrigger{}
+		coord := New(st, trig, Config{
+			Clock: func() time.Time { return now },
+			Quota: &workerquota.Policy{
+				Role:      workerquota.RoleReviewer,
+				Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+			},
+		})
+		res, err := coord.EvaluateSession(context.Background(), "p-1")
+		if err != nil || res.Triggered || res.Reason != "failed_same_sha_retry_limit" || len(trig.calls) != 0 {
+			t.Fatalf("explicit override must preserve retry cap: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		}
+	})
+}

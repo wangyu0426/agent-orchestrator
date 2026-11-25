@@ -479,7 +479,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		// so refusing it makes the reviewer choice inert exactly when it is most
 		// useful. Ineligible PRs stay excluded: nothing can review those.
 		eligible := reviewState.Status == ReviewStateNeedsReview || (source != domain.ReviewTriggerAuto && reviewState.Status == ReviewStateChangesRequested) || (opts.Rerun && reviewState.Status != ReviewStateIneligible)
-		if source == domain.ReviewTriggerAuto && (autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness) ||
+		if source == domain.ReviewTriggerAuto && (autoReviewHeadBlocked(runs, reviewState.PRURL, reviewState.TargetSHA, harness, opts.DeduplicateAcrossHarnesses) ||
 			(opts.DeduplicateAcrossHarnesses && crossHarnessHeadCovered(runs, reviewState.PRURL, reviewState.TargetSHA))) {
 			continue
 		}
@@ -1340,7 +1340,8 @@ func (e *Engine) TeardownReviewerTerminal(ctx stdctx.Context, workerID domain.Se
 	return nil
 }
 
-func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, harness domain.ReviewerHarness) bool {
+func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, harness domain.ReviewerHarness, quotaManaged ...bool) bool {
+	ignoreQuotaFailures := len(quotaManaged) > 0 && quotaManaged[0]
 	failedAutoRuns := 0
 	for _, run := range runs {
 		if run.PRURL != prURL || run.TargetSHA != targetSHA || (run.Harness != harness && run.Harness != "") {
@@ -1349,7 +1350,7 @@ func autoReviewHeadBlocked(runs []domain.ReviewRun, prURL, targetSHA string, har
 		if run.Status == domain.ReviewRunRunning || run.Status == domain.ReviewRunCancelled || run.Verdict == domain.VerdictApproved || run.Verdict == domain.VerdictChangesRequested {
 			return true
 		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && !domain.IsQuotaFailedReviewRun(run) {
+		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && (!ignoreQuotaFailures || !domain.IsQuotaFailedReviewRun(run)) {
 			failedAutoRuns++
 			if failedAutoRuns >= autoReviewFailedRetryLimit {
 				return true
