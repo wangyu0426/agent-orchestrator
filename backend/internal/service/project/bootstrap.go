@@ -16,6 +16,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
+// BootstrapAction values report what Service.Bootstrap did for the requested repository.
 const (
 	BootstrapActionClonedAndRegistered         = "cloned_and_registered"
 	BootstrapActionReusedCheckoutAndRegistered = "reused_checkout_and_registered"
@@ -204,7 +205,7 @@ func (m *Service) findRegisteredProjectAtPath(ctx context.Context, path string) 
 	}
 	selectedInfo, statErr := os.Stat(path)
 	if statErr != nil || !selectedInfo.IsDir() {
-		return domain.ProjectRecord{}, false, nil
+		return domain.ProjectRecord{}, false, nil //nolint:nilerr // Missing or non-directory path simply means no existing alias matches.
 	}
 	activeProjects, err := m.store.ListProjects(ctx)
 	if err != nil {
