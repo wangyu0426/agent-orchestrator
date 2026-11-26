@@ -108,7 +108,10 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 	compatibleTargets := make([]workerquota.Target, 0, len(targets))
 	for i, route := range targets {
 		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(route.Harness, cfg.Kind, project.Config, m.projectDefaults), cfg.AgentConfig).Sandbox
-		if validateSpawnSandbox(route.Harness, effectiveSandbox) != nil {
+		if err := validateSpawnSandbox(route.Harness, effectiveSandbox); err != nil {
+			if firstSandboxErr == nil {
+				firstSandboxErr = err
+			}
 			continue
 		}
 		compatibleTargets = append(compatibleTargets, route)

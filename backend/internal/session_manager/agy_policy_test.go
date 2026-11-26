@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,8 +201,8 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 			AllowQuotaFailover: true,
 		}
 		_, err = m.selectWorkerQuota(context.Background(), &noCompatCfg, &project)
-		if !errors.Is(err, workerquota.ErrNoReadyRoute) {
-			t.Fatalf("err = %v, want workerquota.ErrNoReadyRoute", err)
+		if !errors.Is(err, workerquota.ErrNoReadyRoute) || !strings.Contains(err.Error(), "does not support explicit sandbox mode") {
+			t.Fatalf("err = %v, want workerquota.ErrNoReadyRoute with unsupported sandbox reason", err)
 		}
 
 		// Implicit project primary (policy.Primary == nil) that is sandbox-incompatible
