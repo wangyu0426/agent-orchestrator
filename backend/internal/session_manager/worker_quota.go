@@ -117,17 +117,17 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 			continue
 		}
 		bypassReady := policy.Primary == nil && route == primary
-		ready, preflighted := true, false
-		var sandboxErr error
+		readiness := quotaTargetReadiness{ready: true}
 		if !bypassReady {
-			ready, preflighted, sandboxErr = m.quotaTargetReady(ctx, route, project.Config, *cfg)
+			readiness = m.quotaTargetReady(ctx, route, project.Config, *cfg)
 		}
-		if !ready {
-			if sandboxErr != nil && firstSandboxErr == nil {
-				firstSandboxErr = sandboxErr
+		if !readiness.ready {
+			if readiness.sandboxErr != nil && firstSandboxErr == nil {
+				firstSandboxErr = readiness.sandboxErr
 			}
 			continue
 		}
+		preflighted := readiness.chatPreflighted
 		routeModel := route.Model
 		if routeModel == "" {
 			routeModel = defaults[route.Harness]
@@ -223,47 +223,53 @@ func (m *Manager) roleQuotaWindows(ctx context.Context, policy *workerquota.Poli
 	return windows
 }
 
-func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (ready, chatPreflighted bool, sandboxErr error) {
+type quotaTargetReadiness struct {
+	ready           bool
+	chatPreflighted bool
+	sandboxErr      error
+}
+
+func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) quotaTargetReadiness {
 	if _, ok := m.agents.Agent(target.Harness); !ok || validateSpawnModel(target.Harness, target.Model) != nil {
-		return false, false, nil
+		return quotaTargetReadiness{}
 	}
 	effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
 	if validateSpawnSandbox(target.Harness, effectiveSandbox) != nil {
-		return false, false, nil
+		return quotaTargetReadiness{}
 	}
 	if !target.Harness.SupportsMode(target.Mode) {
-		return false, false, nil
+		return quotaTargetReadiness{}
 	}
 	if target.Mode == domain.SessionModeTUI && m.validateRuntimePrerequisites() != nil {
-		return false, false, nil
+		return quotaTargetReadiness{}
 	}
 	if m.agentReadiness != nil {
 		readiness, err := m.agentReadiness.EnsureAgentReadiness(ctx, string(target.Harness), domain.AgentReadinessPurposeLaunch)
 		if err != nil || readiness.Installation.State == domain.AgentInstallationNotInstalled {
-			return false, false, nil
+			return quotaTargetReadiness{}
 		}
 		if readiness.Authentication.State == domain.AgentAuthenticationUnauthorized && readiness.Authentication.Freshness == domain.AgentReadinessFresh {
 			if target.Harness != domain.HarnessAgy || target.Mode != domain.SessionModeTUI {
-				return false, false, nil
+				return quotaTargetReadiness{}
 			}
 		}
 	}
 	if target.Mode == domain.SessionModeChat || (target.Mode == "" && (cfg.RequestedMode == domain.SessionModeChat || target.Harness.ChatOnly())) {
 		if m.chat == nil || !m.chat.SupportsChat(target.Harness) {
-			return false, false, nil
+			return quotaTargetReadiness{}
 		}
 		targetCfg := cfg
 		targetCfg.Harness = target.Harness
 		permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
 		if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
-			return false, true, nil
+			return quotaTargetReadiness{chatPreflighted: true}
 		}
 		if err := m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox); err != nil {
-			return false, true, err
+			return quotaTargetReadiness{chatPreflighted: true, sandboxErr: err}
 		}
-		return true, true, nil
+		return quotaTargetReadiness{ready: true, chatPreflighted: true}
 	}
-	return true, false, nil
+	return quotaTargetReadiness{ready: true}
 }
 
 func (m *Manager) resolveQuotaRouteMode(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (mode domain.SessionMode, chatPreflighted bool, preflightErr error) {
