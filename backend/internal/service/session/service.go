@@ -1000,7 +1000,7 @@ func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, se
 	return nil
 }
 
-func (s *Service) orchestratorQuotaAllowsHarness(primary domain.AgentHarness, actual domain.AgentHarness) bool {
+func (s *Service) orchestratorQuotaAllowsHarness(primary, actual domain.AgentHarness) bool {
 	if s.orchestratorQuota == nil {
 		return false
 	}
