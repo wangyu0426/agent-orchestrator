@@ -33,12 +33,14 @@ This launches:
 
 Policies resolve deterministically in the following order (highest precedence first):
 
-1. Per-spawn / per-session override (`AgentConfig.Permissions` / `AgentConfig.Sandbox`)
+1. Per-spawn override where supported:
+   - `permissions`: exposed on public HTTP/CLI/UI spawn requests (`approvalMode`) and internal callers (`SpawnConfig.AgentConfig.Permissions`).
+   - `sandbox`: preserved by internal callers such as session forks (`SpawnConfig.AgentConfig.Sandbox`); public HTTP/CLI/UI spawn requests do not currently expose a per-spawn sandbox flag and inherit `sandbox` from project or daemon config below.
 2. Project role override (`ProjectConfig.Worker.AgentConfig`)
 3. Project base config (`ProjectConfig.AgentConfig`)
 4. Daemon-wide worker defaults:
    - `AO_DEFAULT_WORKER_PERMISSIONS` (`default`, `accept-edits`, `auto`, `bypass-permissions`)
-   - `AO_DEFAULT_WORKER_SANDBOX` (`default`, `restricted`, `unrestricted`)
+   - `AO_DEFAULT_WORKER_SANDBOX` (`default`, `restricted`, `unrestricted`) — scoped to AGY workers
 5. Built-in defaults: `permissions = auto`, `sandbox = default`.
 
 Resolved `permissions` and `sandbox` are persisted in `SessionMetadata` at spawn so later resume/restore calls preserve the exact policy even if project or global defaults change.
