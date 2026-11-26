@@ -452,6 +452,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 			reviewcore.WithReviewerChat(reviewerChat)),
 
 		ChatRecoveryDone: reviewerRecoveryDone,
+		ProjectDefaults:  cfg.ProjectDefaults,
 	})
 	reviewOpts := []reviewsvc.Option{
 		reviewsvc.WithTelemetry(telemetry),

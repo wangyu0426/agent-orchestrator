@@ -116,15 +116,17 @@ func (c ProjectConfig) EffectiveOrchestratorAgent(defaults ProjectDefaults, quot
 }
 
 // EffectiveReviewers resolves the effective reviewer list and its source
-// ("project", "quota_primary", "global", "worker_inherited", or "default").
+// ("quota_primary", "project", "global", "worker_inherited", or "default").
+// When daemon-wide reviewer quota failover configures a primary target,
+// runtime quota routing takes precedence over per-project reviewer selection.
 func (c ProjectConfig) EffectiveReviewers(defaults ProjectDefaults, quotaPrimary ReviewerHarness) ([]ReviewerConfig, string) {
+	if quotaPrimary != "" {
+		return []ReviewerConfig{{Harness: quotaPrimary}}, "quota_primary"
+	}
 	if len(c.Reviewers) > 0 {
 		out := make([]ReviewerConfig, len(c.Reviewers))
 		copy(out, c.Reviewers)
 		return out, "project"
-	}
-	if quotaPrimary != "" {
-		return []ReviewerConfig{{Harness: quotaPrimary}}, "quota_primary"
 	}
 	if len(defaults.Reviewers) > 0 {
 		out := make([]ReviewerConfig, len(defaults.Reviewers))

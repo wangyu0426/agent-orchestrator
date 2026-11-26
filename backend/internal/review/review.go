@@ -102,6 +102,8 @@ type Deps struct {
 	Launcher   Launcher
 	// ChatRecoveryDone gates operations that could mistake a recovering reviewer for an exited one.
 	ChatRecoveryDone <-chan struct{}
+	// ProjectDefaults holds daemon-wide default settings (e.g. AO_DEFAULT_REVIEWERS).
+	ProjectDefaults domain.ProjectDefaults
 
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
@@ -110,14 +112,15 @@ type Deps struct {
 
 // Engine is the core code-review engine.
 type Engine struct {
-	harnessUse HarnessUseGate
-	store      Store
-	sessions   Sessions
-	prs        PRs
-	projects   Projects
-	launcher   Launcher
-	clock      func() time.Time
-	newID      func() string
+	harnessUse      HarnessUseGate
+	store           Store
+	sessions        Sessions
+	prs             PRs
+	projects        Projects
+	launcher        Launcher
+	clock           func() time.Time
+	newID           func() string
+	projectDefaults domain.ProjectDefaults
 
 	chatRecoveryDone <-chan struct{}
 
@@ -152,6 +155,7 @@ func New(d Deps) *Engine {
 		triggerLocks: make(map[domain.SessionID]*sync.Mutex),
 
 		chatRecoveryDone: d.ChatRecoveryDone,
+		projectDefaults:  d.ProjectDefaults,
 	}
 }
 
@@ -1998,6 +2002,9 @@ func (e *Engine) projectReviewerSelection(
 	}
 	if len(cfg.Reviewers) > 0 {
 		return cfg.Reviewers[0].Harness, cfg.Reviewers[0].AgentConfig, nil
+	}
+	if len(e.projectDefaults.Reviewers) > 0 {
+		return e.projectDefaults.Reviewers[0].Harness, e.projectDefaults.Reviewers[0].AgentConfig, nil
 	}
 	harness, config := cfg.DefaultWorkerReviewer()
 	if harness != "" {
