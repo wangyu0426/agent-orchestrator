@@ -115,7 +115,7 @@ func TestSessionTempEligibilityFailsClosed(t *testing.T) {
 }
 
 func TestFailedChatHostStopWithoutControllerDoesNotAuthorizeTempGC(t *testing.T) {
-	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	stopErr := errors.New("provider host stop failed")
 	launcher := &recordingLauncher{stopErr: stopErr}
 	manager, store, _ := newChatManager(launcher)
