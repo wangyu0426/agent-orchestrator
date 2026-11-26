@@ -45,7 +45,7 @@ Resolved `permissions` and `sandbox` are persisted in `SessionMetadata` at spawn
 
 ## Compatibility and Fail-Closed Behavior
 
-- **Unsupported sandbox mode**: Both `agy` TUI and `agy acp` fail closed with an actionable error rather than silently ignoring an unrecognized sandbox policy.
+- **Unsupported sandbox mode**: Both `agy` TUI and `agy acp` fail closed with an actionable error rather than silently ignoring an unrecognized sandbox policy. `AO_DEFAULT_WORKER_SANDBOX` scopes to AGY workers, and explicit non-default `sandbox` values (`restricted`, `unrestricted`) on harnesses that do not enforce `SandboxMode` are rejected before launch.
 - **Legacy `agy_acp_server`**: Requesting `sandbox: restricted` on the legacy separate `agy_acp_server` fails closed with `ErrChatDriverIncompatible` because `--sandbox` requires native `agy acp` (`agy >= 1.5.4`).
 - **Reviewer isolation**: Read-only reviewer sessions (`ReadOnly: true`) always pin `--sandbox`, `default` mode, and the strict read-only reviewer permission policy regardless of worker `permissions` or `sandbox` settings. `ProjectConfig.DefaultWorkerReviewer()` never inherits worker `permissions` or `sandbox`.
 

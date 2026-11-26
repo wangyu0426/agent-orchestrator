@@ -110,4 +110,20 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 			t.Fatalf("seed metadata (%+v) != resolved (%+v)", seed.Metadata, resolved)
 		}
 	})
+
+	t.Run("daemon WorkerSandbox scopes to AGY and explicit non-default sandbox fails closed on other harnesses", func(t *testing.T) {
+		effCodex := effectiveAgentConfigWithDefaults(domain.HarnessCodex, domain.KindWorker, domain.ProjectConfig{}, defaults)
+		if effCodex.Sandbox != "" {
+			t.Fatalf("codex inherited AGY-only WorkerSandbox: %q", effCodex.Sandbox)
+		}
+		if err := validateSpawnSandbox(domain.HarnessCodex, domain.SandboxModeDefault); err != nil {
+			t.Fatalf("default sandbox on codex should be allowed, got %v", err)
+		}
+		if err := validateSpawnSandbox(domain.HarnessCodex, domain.SandboxModeRestricted); err == nil {
+			t.Fatal("expected error for explicit restricted sandbox on codex")
+		}
+		if err := validateSpawnSandbox(domain.HarnessAgy, domain.SandboxModeRestricted); err != nil {
+			t.Fatalf("restricted sandbox on agy should be allowed, got %v", err)
+		}
+	})
 }

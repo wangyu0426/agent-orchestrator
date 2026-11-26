@@ -1230,6 +1230,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	if err := validateSpawnModel(cfg.Harness, agentConfig.Model); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %s", ErrUnsupportedModel, err.Error())
 	}
+	if err := validateSpawnSandbox(cfg.Harness, agentConfig.Sandbox); err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+	}
 	// Resolve the controller mode here, before anything durable is created, for
 	// the same reason an unknown harness is rejected above: an explicit Chat
 	// request AO cannot honor should cost nothing, not leave a terminated row and
@@ -2700,7 +2703,7 @@ func effectiveAgentConfigWithDefaults(harness domain.AgentHarness, kind domain.S
 		if merged.Permissions == "" && defaults.WorkerPermissions != "" {
 			merged.Permissions = defaults.WorkerPermissions
 		}
-		if merged.Sandbox == "" && defaults.WorkerSandbox != "" {
+		if harness == domain.HarnessAgy && merged.Sandbox == "" && defaults.WorkerSandbox != "" {
 			merged.Sandbox = defaults.WorkerSandbox
 		}
 	}
@@ -2785,6 +2788,22 @@ func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
 		base.Sandbox = ports.SandboxModeDefault
 	}
 	return base
+}
+
+// validateSpawnSandbox fails closed when an explicit non-default SandboxMode is
+// requested for a harness that does not enforce it, rather than silently
+// launching without the requested sandbox.
+func validateSpawnSandbox(harness domain.AgentHarness, sandbox domain.SandboxMode) error {
+	if sandbox == "" || sandbox == domain.SandboxModeDefault {
+		return nil
+	}
+	if !sandbox.Valid() {
+		return fmt.Errorf("unsupported sandbox mode %q (want default, restricted, or unrestricted)", sandbox)
+	}
+	if harness != domain.HarnessAgy {
+		return fmt.Errorf("harness %q does not support explicit sandbox mode %q", harness, sandbox)
+	}
+	return nil
 }
 
 // normalizeAgentConfigForHarness returns a copy of cfg with any effective
