@@ -73,6 +73,14 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 		if restored.Permissions != domain.PermissionModeBypassPermissions || restored.Sandbox != domain.SandboxModeRestricted {
 			t.Fatalf("restored = %+v, want bypass-permissions + restricted", restored)
 		}
+
+		legacyCodex := domain.SessionRecord{Harness: domain.HarnessCodex, Kind: domain.KindWorker}
+		restoredLegacy := restoredAgentConfig(legacyCodex, domain.ProjectConfig{
+			AgentConfig: domain.AgentConfig{Sandbox: domain.SandboxModeRestricted},
+		})
+		if restoredLegacy.Sandbox != domain.SandboxModeDefault {
+			t.Fatalf("legacy restored sandbox = %q, want default", restoredLegacy.Sandbox)
+		}
 	})
 
 	t.Run("reviewer never inherits worker permissions or sandbox", func(t *testing.T) {

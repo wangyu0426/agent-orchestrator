@@ -2748,6 +2748,11 @@ func restoredAgentConfig(rec domain.SessionRecord, cfg domain.ProjectConfig) por
 	}
 	if rec.Metadata.Sandbox != "" {
 		merged.Sandbox = rec.Metadata.Sandbox
+	} else {
+		// Pre-migration sessions had no persisted sandbox policy; resolve to
+		// default rather than inheriting a newly configured project/role
+		// sandbox that the harness may not enforce.
+		merged.Sandbox = ports.SandboxModeDefault
 	}
 	return merged
 }
