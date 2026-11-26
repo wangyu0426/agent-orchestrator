@@ -668,10 +668,6 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string, quotaM
 	return ""
 }
 
-func effectiveReviewerHarness(session domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {
-	return effectiveReviewerHarnessWithDefaults(session, config, domain.ProjectDefaults{})
-}
-
 func effectiveReviewerHarnessWithDefaults(session domain.SessionRecord, config domain.ProjectConfig, defaults domain.ProjectDefaults) domain.ReviewerHarness {
 	if session.ReviewerHarness != "" {
 		return session.ReviewerHarness
