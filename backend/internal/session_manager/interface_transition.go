@@ -1074,7 +1074,10 @@ func (m *Manager) preflightInterfaceTarget(
 			return err
 		}
 		permissions := effectiveAgentConfig(rec.Harness, rec.Kind, project.Config).Permissions
-		return m.chat.PreflightChat(ctx, rec.Harness, permissions)
+		if err := m.chat.PreflightChat(ctx, rec.Harness, permissions); err != nil {
+			return err
+		}
+		return m.preflightChatSandbox(ctx, rec.Harness, restoredAgentConfig(rec, project.Config).Sandbox)
 	}
 	agent, ok := m.agents.Agent(rec.Harness)
 	if !ok {
