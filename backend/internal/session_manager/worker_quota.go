@@ -3,6 +3,7 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -103,6 +104,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 	var remaining []workerquota.Target
 	var blocked bool
 	var firstPauseErr error
+	var firstSandboxErr error
 	compatibleTargets := make([]workerquota.Target, 0, len(targets))
 	for i, route := range targets {
 		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(route.Harness, cfg.Kind, project.Config, m.projectDefaults), cfg.AgentConfig).Sandbox
@@ -116,10 +118,14 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		}
 		bypassReady := policy.Primary == nil && route == primary
 		ready, preflighted := true, false
+		var sandboxErr error
 		if !bypassReady {
-			ready, preflighted = m.quotaTargetReady(ctx, route, project.Config, *cfg)
+			ready, preflighted, sandboxErr = m.quotaTargetReady(ctx, route, project.Config, *cfg)
 		}
 		if !ready {
+			if sandboxErr != nil && firstSandboxErr == nil {
+				firstSandboxErr = sandboxErr
+			}
 			continue
 		}
 		routeModel := route.Model
@@ -155,6 +161,9 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		if blocked {
 			retryAt, _ := workerquota.NextResetAt(compatibleTargets, windows, m.clock())
 			return quotaSelection{}, &workerquota.DeferredError{Role: role, RetryAt: retryAt}
+		}
+		if firstSandboxErr != nil {
+			return quotaSelection{}, fmt.Errorf("%w: %w", workerquota.ErrNoReadyRoute, firstSandboxErr)
 		}
 		return quotaSelection{}, workerquota.ErrNoReadyRoute
 	}
@@ -214,50 +223,47 @@ func (m *Manager) roleQuotaWindows(ctx context.Context, policy *workerquota.Poli
 	return windows
 }
 
-func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (ready, chatPreflighted bool) {
+func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (ready, chatPreflighted bool, sandboxErr error) {
 	if _, ok := m.agents.Agent(target.Harness); !ok || validateSpawnModel(target.Harness, target.Model) != nil {
-		return false, false
+		return false, false, nil
 	}
 	effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
 	if validateSpawnSandbox(target.Harness, effectiveSandbox) != nil {
-		return false, false
+		return false, false, nil
 	}
 	if !target.Harness.SupportsMode(target.Mode) {
-		return false, false
+		return false, false, nil
 	}
 	if target.Mode == domain.SessionModeTUI && m.validateRuntimePrerequisites() != nil {
-		return false, false
+		return false, false, nil
 	}
 	if m.agentReadiness != nil {
 		readiness, err := m.agentReadiness.EnsureAgentReadiness(ctx, string(target.Harness), domain.AgentReadinessPurposeLaunch)
 		if err != nil || readiness.Installation.State == domain.AgentInstallationNotInstalled {
-			return false, false
+			return false, false, nil
 		}
 		if readiness.Authentication.State == domain.AgentAuthenticationUnauthorized && readiness.Authentication.Freshness == domain.AgentReadinessFresh {
 			if target.Harness != domain.HarnessAgy || target.Mode != domain.SessionModeTUI {
-				return false, false
+				return false, false, nil
 			}
 		}
 	}
 	if target.Mode == domain.SessionModeChat || (target.Mode == "" && (cfg.RequestedMode == domain.SessionModeChat || target.Harness.ChatOnly())) {
 		if m.chat == nil || !m.chat.SupportsChat(target.Harness) {
-			return false, false
+			return false, false, nil
 		}
 		targetCfg := cfg
 		targetCfg.Harness = target.Harness
 		permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
-		if err := func() error {
-			if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
-				return err
-			}
-			effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
-			return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox)
-		}(); err != nil {
-			return false, true
+		if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
+			return false, true, nil
 		}
-		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox) == nil, true
+		if err := m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox); err != nil {
+			return false, true, err
+		}
+		return true, true, nil
 	}
-	return true, false
+	return true, false, nil
 }
 
 func (m *Manager) resolveQuotaRouteMode(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) (mode domain.SessionMode, chatPreflighted bool, preflightErr error) {

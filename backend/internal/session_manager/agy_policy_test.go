@@ -231,7 +231,39 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 		if implicitCfg.Harness != agyFallback.Harness || implicitCfg.AgentConfig.Model != agyFallback.Model {
 			t.Fatalf("implicit selected = (%q, %q), want AGY fallback (%q, %q)", implicitCfg.Harness, implicitCfg.AgentConfig.Model, agyFallback.Harness, agyFallback.Model)
 		}
+
+		// When the only AGY Chat route fails sandbox preflight (e.g., legacy agy_acp_server),
+		// selectWorkerQuota preserves the actionable ErrChatDriverIncompatible cause.
+		chatTarget := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini-4-neon-low", Mode: domain.SessionModeChat}
+		m.workerQuota = &workerquota.Policy{
+			Role:    workerquota.RoleWorker,
+			Primary: &chatTarget,
+		}
+		m.chat = stubSandboxChat{sandboxErr: ports.ErrChatDriverIncompatible}
+		chatCfg := ports.SpawnConfig{
+			ProjectID:          "proj-1",
+			Kind:               domain.KindWorker,
+			IssueID:            "gh#54",
+			AllowQuotaFailover: true,
+		}
+		_, err = m.selectWorkerQuota(context.Background(), &chatCfg, &project)
+		if !errors.Is(err, workerquota.ErrNoReadyRoute) || !errors.Is(err, ports.ErrChatDriverIncompatible) {
+			t.Fatalf("err = %v, want wrapped ErrNoReadyRoute + ErrChatDriverIncompatible", err)
+		}
 	})
+}
+
+type stubSandboxChat struct {
+	ChatLauncher
+	sandboxErr error
+}
+
+func (s stubSandboxChat) SupportsChat(domain.AgentHarness) bool { return true }
+func (s stubSandboxChat) PreflightChat(context.Context, domain.AgentHarness, ports.PermissionMode) error {
+	return nil
+}
+func (s stubSandboxChat) PreflightChatSandbox(context.Context, domain.AgentHarness, ports.SandboxMode) error {
+	return s.sandboxErr
 }
 
 type staticQuotaSource struct {
