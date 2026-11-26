@@ -104,6 +104,9 @@ type Deps struct {
 	ChatRecoveryDone <-chan struct{}
 	// ProjectDefaults holds daemon-wide default settings (e.g. AO_DEFAULT_REVIEWERS).
 	ProjectDefaults domain.ProjectDefaults
+	// ReviewerQuotaPrimary, when set by daemon-wide reviewer quota failover,
+	// takes precedence over per-project and global reviewer defaults.
+	ReviewerQuotaPrimary domain.ReviewerHarness
 
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
@@ -112,15 +115,16 @@ type Deps struct {
 
 // Engine is the core code-review engine.
 type Engine struct {
-	harnessUse      HarnessUseGate
-	store           Store
-	sessions        Sessions
-	prs             PRs
-	projects        Projects
-	launcher        Launcher
-	clock           func() time.Time
-	newID           func() string
-	projectDefaults domain.ProjectDefaults
+	harnessUse           HarnessUseGate
+	store                Store
+	sessions             Sessions
+	prs                  PRs
+	projects             Projects
+	launcher             Launcher
+	clock                func() time.Time
+	newID                func() string
+	projectDefaults      domain.ProjectDefaults
+	reviewerQuotaPrimary domain.ReviewerHarness
 
 	chatRecoveryDone <-chan struct{}
 
@@ -154,8 +158,9 @@ func New(d Deps) *Engine {
 		newID:        newID,
 		triggerLocks: make(map[domain.SessionID]*sync.Mutex),
 
-		chatRecoveryDone: d.ChatRecoveryDone,
-		projectDefaults:  d.ProjectDefaults,
+		chatRecoveryDone:     d.ChatRecoveryDone,
+		projectDefaults:      d.ProjectDefaults,
+		reviewerQuotaPrimary: d.ReviewerQuotaPrimary,
 	}
 }
 
@@ -1999,6 +2004,9 @@ func (e *Engine) projectReviewerSelection(
 		} else if ok {
 			cfg = proj.Config
 		}
+	}
+	if e.reviewerQuotaPrimary != "" {
+		return e.reviewerQuotaPrimary, domain.AgentConfig{}, nil
 	}
 	if len(cfg.Reviewers) > 0 {
 		return cfg.Reviewers[0].Harness, cfg.Reviewers[0].AgentConfig, nil
