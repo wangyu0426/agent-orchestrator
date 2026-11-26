@@ -959,6 +959,8 @@ func NormalizePermissionMode(mode PermissionMode) PermissionMode {
 // PermissionMode. It is a type alias for domain.SandboxMode.
 type SandboxMode = domain.SandboxMode
 
+// The sandbox modes adapters map onto their agent's native sandbox flags.
+// These re-export the domain constants so adapter code can refer to ports.SandboxMode*.
 const (
 	SandboxModeDefault      = domain.SandboxModeDefault
 	SandboxModeRestricted   = domain.SandboxModeRestricted
