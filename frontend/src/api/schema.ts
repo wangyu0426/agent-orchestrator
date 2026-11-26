@@ -2150,6 +2150,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/bootstrap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clone or reuse a clean checkout of a git repository URL, register it idempotently, and return effective policy and readiness */
+        post: operations["bootstrapProject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/clone": {
         parameters: {
             query?: never;
@@ -5810,6 +5827,28 @@ export interface components {
             /** Format: date-time */
             startedAt?: null | string;
         };
+        BootstrapProjectInput: {
+            config?: components["schemas"]["ProjectConfig"];
+            destinationParent?: string;
+            name?: null | string;
+            projectId?: null | string;
+            remoteUrl: string;
+        };
+        BootstrapProjectResult: {
+            /** @enum {string} */
+            action: "cloned_and_registered" | "reused_checkout_and_registered" | "reused_project";
+            effective: components["schemas"]["EffectiveProjectPolicy"];
+            project: components["schemas"]["Project"];
+            readiness: components["schemas"]["BootstrapReadiness"];
+        };
+        BootstrapReadiness: {
+            agentOk: boolean;
+            blockers?: string[];
+            gitOk: boolean;
+            ready: boolean;
+            scmOk: boolean;
+            trackerOk: boolean;
+        };
         BrowserCommandRequest: {
             action: string;
             args?: {
@@ -7139,6 +7178,34 @@ export interface components {
             retainedContent?: null | number[];
             text: string;
         };
+        EffectiveProjectPolicy: {
+            autoReview: boolean;
+            autoReviewSource: string;
+            defaultBranch: string;
+            defaultBranchSource: string;
+            orchestratorAgent?: string;
+            orchestratorAgentSource: string;
+            quotaRouting: components["schemas"]["EffectiveQuotaPolicy"];
+            reviewers?: components["schemas"]["DomainReviewerConfig"][];
+            reviewersSource: string;
+            trackerIntake: components["schemas"]["EffectiveTrackerIntakePolicy"];
+            workerAgent?: string;
+            workerAgentSource: string;
+        };
+        EffectiveQuotaPolicy: {
+            orchestratorFailover: boolean;
+            quotumConfigured: boolean;
+            reviewerFailover: boolean;
+            workerFailover: boolean;
+        };
+        EffectiveTrackerIntakePolicy: {
+            assignee?: string;
+            daemonGateEnabled: boolean;
+            enabled: boolean;
+            provider?: string;
+            repo?: string;
+            source: string;
+        };
         EndpointsResponse: {
             endpoints: components["schemas"]["MobileEndpoint"][];
         };
@@ -7820,6 +7887,7 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
+            autoReviewOverride?: null | boolean;
             canonicalRepoURL?: string;
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
@@ -9253,6 +9321,7 @@ export interface components {
         };
         TrackerIntakeConfig: {
             assignee?: string;
+            disabled?: boolean;
             enabled?: boolean;
             /** @enum {string} */
             provider?: "github" | "gitlab";
@@ -17005,6 +17074,75 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    bootstrapProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BootstrapProjectInput"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapProjectResult"];
+                };
+            };
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapProjectResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

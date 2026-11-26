@@ -25,6 +25,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 // Manager is the controller-facing contract for the /api/v1/projects surface.
@@ -42,6 +43,10 @@ type Manager interface {
 	// Clone checks out a remote git repository and registers the resulting
 	// local repository as a project.
 	Clone(ctx context.Context, in CloneInput) (Project, error)
+	// Bootstrap clones (or reuses a clean matching checkout of) a remote git
+	// repository, registers it idempotently, and returns the effective inherited
+	// policy and readiness preflight.
+	Bootstrap(ctx context.Context, in BootstrapInput) (BootstrapResult, error)
 	PrepareClone(ctx context.Context, in CloneInput) (ClonePreparationResult, error)
 	// PrepareCloneWithProgress is PrepareClone that reports each git step
 	// through onProgress as the clone reaches it.
@@ -87,14 +92,24 @@ type Service struct {
 	clock          func() time.Time
 	telemetry      ports.EventSink
 	milestones     ports.InstallMilestones
-	defaultHarness domain.AgentHarness
-	logger         *slog.Logger
-	githubRepos    ports.GitHubRepositoryResolver
+	defaultHarness    domain.AgentHarness
+	logger            *slog.Logger
+	githubRepos       ports.GitHubRepositoryResolver
+	projectDefaults   domain.ProjectDefaults
+	trackerIntakeGate bool
+	workerQuota       *workerquota.Policy
+	reviewerQuota     *workerquota.Policy
+	orchestratorQuota *workerquota.Policy
+	tracker           ports.Tracker
 	// addMu serialises the whole body of Add. Workspace registration performs
 	// filesystem mutations (git init, .gitignore writes, commits) that are not
 	// covered by the store's own writeMu, so path/id conflict checks plus the
 	// subsequent mutation must be atomic from the perspective of concurrent callers.
 	addMu sync.Mutex
+	// bootstrapLocks serializes concurrent Bootstrap calls targeting the same
+	// destination path without blocking unrelated repositories.
+	bootstrapLocksMu sync.Mutex
+	bootstrapLocks   map[string]*sync.Mutex
 }
 
 const maxDisplayNameLen = 100
@@ -119,6 +134,15 @@ type Deps struct {
 	// GitHubRepos resolves a github.com origin to its current owner/name so
 	// Get can report CanonicalRepo after a rename. Left nil, it is omitted.
 	GitHubRepos ports.GitHubRepositoryResolver
+	// ProjectDefaults holds daemon-wide default settings inherited by projects.
+	ProjectDefaults domain.ProjectDefaults
+	// TrackerIntakeGate reports whether AO_TRACKER_INTAKE is enabled daemon-wide.
+	TrackerIntakeGate bool
+	WorkerQuota       *workerquota.Policy
+	ReviewerQuota     *workerquota.Policy
+	OrchestratorQuota *workerquota.Policy
+	// Tracker is the optional tracker adapter used for bootstrap readiness checks.
+	Tracker ports.Tracker
 }
 
 // New returns a project service backed by the given durable store.
@@ -133,14 +157,21 @@ func NewWithDeps(d Deps) *Service {
 		defaultHarness = domain.AgentHarness(config.DefaultAgent)
 	}
 	s := &Service{
-		store:          d.Store,
-		sessions:       d.Sessions,
-		clock:          d.Clock,
-		telemetry:      d.Telemetry,
-		milestones:     d.Milestones,
-		defaultHarness: defaultHarness,
-		logger:         d.Logger,
-		githubRepos:    d.GitHubRepos,
+		store:             d.Store,
+		sessions:          d.Sessions,
+		clock:             d.Clock,
+		telemetry:         d.Telemetry,
+		milestones:        d.Milestones,
+		defaultHarness:    defaultHarness,
+		logger:            d.Logger,
+		githubRepos:       d.GitHubRepos,
+		projectDefaults:   d.ProjectDefaults,
+		trackerIntakeGate: d.TrackerIntakeGate,
+		workerQuota:       d.WorkerQuota,
+		reviewerQuota:     d.ReviewerQuota,
+		orchestratorQuota: d.OrchestratorQuota,
+		tracker:           d.Tracker,
+		bootstrapLocks:    make(map[string]*sync.Mutex),
 	}
 	if s.clock == nil {
 		s.clock = time.Now

@@ -29,6 +29,7 @@ func (c *ProjectsController) Register(r chi.Router) {
 	r.Get("/projects", c.list)
 	r.Post("/projects", c.add)
 	r.Post("/projects/clone", c.clone)
+	r.Post("/projects/bootstrap", c.bootstrap)
 	r.Post("/projects/clone/prepare", c.prepareClone)
 	r.Post("/projects/clone/prepare/stream", c.prepareCloneStream)
 	r.Post("/projects/clone/check", c.checkCloneDestination)
@@ -166,6 +167,28 @@ func (c *ProjectsController) clone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteJSON(w, http.StatusCreated, ProjectResponse{Project: p})
+}
+
+func (c *ProjectsController) bootstrap(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/bootstrap")
+		return
+	}
+	var in projectsvc.BootstrapInput
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	res, err := c.Mgr.Bootstrap(r.Context(), in)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if res.Action == projectsvc.BootstrapActionReusedProject {
+		status = http.StatusOK
+	}
+	envelope.WriteJSON(w, status, res)
 }
 
 func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {

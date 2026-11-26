@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
@@ -216,6 +217,9 @@ type Config struct {
 	// StructuredReview controls opt-in parsing and authorization of structured
 	// AO-REVIEW review-body decisions on submitted COMMENTED reviews.
 	StructuredReview structuredreview.Policy
+	// ProjectDefaults holds daemon-wide default settings inherited by projects
+	// when per-project config leaves the corresponding field unset.
+	ProjectDefaults domain.ProjectDefaults
 	// Client identifies which client this deployment serves (AO_CLIENT). It is
 	// reported to clients through the settings API and gates nothing in the
 	// daemon: the cloud offering (B2B/B2C, providers, billing) is decided per
@@ -527,6 +531,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.StructuredReview = srPolicy
+
+	projectDefaults, err := loadProjectDefaults()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProjectDefaults = projectDefaults
 
 	if raw := os.Getenv("AO_CLIENT"); raw != "" {
 		cfg.Client = strings.TrimSpace(raw)

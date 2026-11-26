@@ -430,6 +430,7 @@ type conversationSettingsStore interface {
 type Manager struct {
 	workerQuota       *workerquota.Policy
 	orchestratorQuota *workerquota.Policy
+	projectDefaults   domain.ProjectDefaults
 	runtime           runtimeController
 	agents            ports.AgentResolver
 	workspace         ports.Workspace
@@ -1343,7 +1344,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	if prep != nil {
 		rec = prep.record
 	} else {
-		seed := seedRecord(cfg, project.Config, m.clock())
+		seed := seedRecordWithDefaults(cfg, project.Config, m.projectDefaults, m.clock())
 		seed.WorkerQuotaRemaining = remainingRoutes
 		if remainingRoutes != nil {
 			seed.Metadata.Model, seed.Metadata.Effort = agentConfig.Model, agentConfig.Effort
@@ -1474,7 +1475,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrWorkspaceCreate, err)
 			}
 		}
-		seed := seedRecord(cfg, project.Config, m.clock())
+		seed := seedRecordWithDefaults(cfg, project.Config, m.projectDefaults, m.clock())
 		seed.ID = id
 		seed.Metadata.ArtifactDir = artifactDir
 		if mode == domain.SessionModeChat {
@@ -6358,7 +6359,18 @@ func normalizeWorkspacePath(p string) string {
 
 // ---- helpers ----
 
+// SetProjectDefaults configures daemon-wide project defaults inherited when a
+// project leaves settings such as AutoReview unset.
+func (m *Manager) SetProjectDefaults(defaults domain.ProjectDefaults) {
+	m.projectDefaults = defaults
+}
+
 func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now time.Time) domain.SessionRecord {
+	return seedRecordWithDefaults(cfg, projectConfig, domain.ProjectDefaults{}, now)
+}
+
+func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, defaults domain.ProjectDefaults, now time.Time) domain.SessionRecord {
+	autoReview, _ := projectConfig.EffectiveAutoReview(defaults)
 	return domain.SessionRecord{
 		ProjectID:           cfg.ProjectID,
 		IssueID:             cfg.IssueID,
@@ -6378,7 +6390,7 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		Metadata:           domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
 		RequestedOutput:    cfg.RequestedOutput,
 		OutputType:         domain.SessionOutputNone,
-		AutoReviewEnabled:  projectConfig.AutoReview,
+		AutoReviewEnabled:  autoReview,
 		AutoInjectReview:   true,
 		AutoInjectCI:       true,
 		TerminateOnPRMerge: cfg.Kind == domain.KindWorker && cfg.TerminateOnPRMerge != nil && *cfg.TerminateOnPRMerge,

@@ -77,10 +77,12 @@ type ProjectConfig struct {
 
 	// AutoReview controls whether new worker sessions spawned for this project
 	// have automatic PR review enabled by default. The default (false) leaves
-	// sessions with auto-review off; enabling it copies the setting into each
-	// new session at spawn time. Users can still override the per-session toggle
-	// after spawn.
+	// sessions with auto-review off unless a daemon-wide default enables it;
+	// set AutoReviewOverride to false to explicitly opt a project out.
 	AutoReview bool `json:"autoReview,omitempty"`
+	// AutoReviewOverride distinguishes an explicit project-level auto-review
+	// decision (true or false) from unset (nil, inherit daemon-wide default).
+	AutoReviewOverride *bool `json:"autoReviewOverride,omitempty"`
 	// TerminateOnPRMerge is the optional project default for new worker sessions.
 	// Nil inherits the user's global default; explicit false opts this project out.
 	TerminateOnPRMerge *bool `json:"terminateOnPrMerge,omitempty"`
@@ -277,6 +279,9 @@ func (c ProjectConfig) Validate() error {
 		if err := rv.AgentConfig.Validate(); err != nil {
 			return fmt.Errorf("reviewers[%d].agentConfig: %w", i, err)
 		}
+	}
+	if c.AutoReview && c.AutoReviewOverride != nil && !*c.AutoReviewOverride {
+		return fmt.Errorf("autoReview: cannot be both enabled and disabled")
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
 		return err
