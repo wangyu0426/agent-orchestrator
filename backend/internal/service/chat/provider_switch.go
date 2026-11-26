@@ -230,6 +230,13 @@ func (s *Service) switchProvider(ctx context.Context, id domain.SessionID, reque
 		}
 		return &domain.ProviderSwitchError{Kind: kind, Detail: err.Error(), Cause: err}
 	}
+	if err := s.PreflightChatSandbox(ctx, request.TargetHarness, record.Metadata.Sandbox); err != nil {
+		kind := domain.ProviderSwitchRefusalUnsupported
+		if errors.Is(err, ports.ErrChatDriverUnavailable) {
+			kind = domain.ProviderSwitchRefusalUnavailable
+		}
+		return &domain.ProviderSwitchError{Kind: kind, Detail: err.Error(), Cause: err}
+	}
 	conversation, err := s.store.ConversationForSession(ctx, id)
 	if err != nil {
 		return err
