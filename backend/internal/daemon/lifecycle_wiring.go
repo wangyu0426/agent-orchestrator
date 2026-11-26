@@ -421,6 +421,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		PRReviewDiagnostics:  lcm,
 		ArtifactDeleter:      artifactVersions,
 		ShareLinks:           sessionartifacts.NewShareLinks(cfg.DataDir, cfg.CloudControlPlaneURL),
+		OrchestratorQuota:    cfg.OrchestratorQuota,
 	}
 	// Guard the typed nil some tests pass, so reads list files by path instead.
 	if artifactVersions != nil {

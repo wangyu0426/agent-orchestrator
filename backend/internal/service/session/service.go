@@ -299,6 +299,9 @@ type Service struct {
 	// githubRepos lets ClaimPR accept a PR on the repository a github.com
 	// origin was renamed or transferred to. Nil keeps exact origin matching.
 	githubRepos ports.GitHubRepositoryResolver
+	// orchestratorQuota enables configured primary/fallback route selection for
+	// project orchestrator launches and clean replacements without explicit overrides.
+	orchestratorQuota *workerquota.Policy
 }
 
 // SetGitHubRepositoryResolver late-binds the resolver ClaimPR uses to follow
@@ -376,8 +379,9 @@ type Deps struct {
 	ArtifactDeleter artifactDeleter
 	// ArtifactTracker follows renamed artifact files; daemon wiring passes the
 	// same Capturer. Left nil, files are listed by path with no identity.
-	ArtifactTracker artifactTracker
-	ShareLinks      *sessionartifacts.ShareLinks
+	ArtifactTracker   artifactTracker
+	ShareLinks        *sessionartifacts.ShareLinks
+	OrchestratorQuota *workerquota.Policy
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -386,7 +390,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, prReviewDiagnostics: d.PRReviewDiagnostics, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, prReviewDiagnostics: d.PRReviewDiagnostics, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, orchestratorQuota: d.OrchestratorQuota}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
@@ -918,12 +922,12 @@ func (s *Service) SpawnOrchestrator(
 				sessionmanager.SetupBudget(project)+time.Duration(len(existing))*sessionmanager.ReplacementCleanupBudget(project))
 			defer cancelRetireBudget()
 		}
-		if len(existing) > 0 && mode == "" {
+		if len(existing) > 0 && mode == "" && s.orchestratorQuota == nil {
 			// Clean replacement preserves the controller contract of the
 			// orchestrator being replaced only when the caller did not make an
-			// explicit choice. The global default still must not silently flip an
-			// existing project's coordinator, but an explicit replacement mode is
-			// authoritative.
+			// explicit choice and role quota routing is not managing mode selection.
+			// The global default still must not silently flip an existing project's
+			// coordinator, but an explicit replacement mode is authoritative.
 			mode = newestSession(existing).Mode
 		}
 		retireCtx := context.WithoutCancel(ctx)
@@ -947,10 +951,11 @@ func (s *Service) SpawnOrchestrator(
 		}
 	}
 	sess, _, _, err := s.spawn(ctx, ports.SpawnConfig{
-		ProjectID:     projectID,
-		Kind:          domain.KindOrchestrator,
-		Async:         true,
-		RequestedMode: mode,
+		ProjectID:          projectID,
+		Kind:               domain.KindOrchestrator,
+		Async:              true,
+		RequestedMode:      mode,
+		AllowQuotaFailover: s.orchestratorQuota != nil && requestedMode == "",
 		AgentConfig: ports.AgentConfig{
 			Permissions: approval,
 		},
@@ -985,7 +990,7 @@ func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, se
 	if sess.Kind != domain.KindOrchestrator {
 		return orchestratorReplacementUnverified("new session %s has kind %q", sess.ID, sess.Kind)
 	}
-	if expected := project.Config.Orchestrator.Harness; expected != "" && sess.Harness != expected {
+	if expected := project.Config.Orchestrator.Harness; expected != "" && sess.Harness != expected && !s.orchestratorQuotaAllowsHarness(expected, sess.Harness) {
 		return orchestratorReplacementUnverified("new session %s uses harness %q, want %q", sess.ID, sess.Harness, expected)
 	}
 	expectedBranch := sessionmanager.DefaultOrchestratorBranch(serviceSessionPrefix(project), s.dataDir)
@@ -993,6 +998,18 @@ func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, se
 		return orchestratorReplacementUnverified("new session %s uses branch %q, want %q", sess.ID, branch, expectedBranch)
 	}
 	return nil
+}
+
+func (s *Service) orchestratorQuotaAllowsHarness(primary, actual domain.AgentHarness) bool {
+	if s.orchestratorQuota == nil {
+		return false
+	}
+	for _, target := range s.orchestratorQuota.Targets(workerquota.Target{Harness: primary}) {
+		if target.Harness == actual {
+			return true
+		}
+	}
+	return false
 }
 
 // orchestratorReplacementUnverified carries a code so a failed check is not

@@ -27,6 +27,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 type fakeTelemetrySink struct{ events []ports.TelemetryEvent }
@@ -4534,6 +4535,141 @@ func TestSpawnOrchestratorVerifiesReplacementHarness(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `uses harness "claude-code", want "codex"`) {
 		t.Fatalf("SpawnOrchestrator err = %v, want harness verification failure", err)
 	}
+}
+
+func TestSpawnOrchestratorQuotaFailoverNewAndCleanReplacement(t *testing.T) {
+	policy := &workerquota.Policy{
+		Role: workerquota.RoleOrchestrator,
+		Primary: &workerquota.Target{
+			Harness: domain.HarnessCodex,
+			Model:   "codex-luna-max",
+			Mode:    domain.SessionModeChat,
+		},
+		Fallbacks: []workerquota.Target{{
+			Harness: domain.HarnessAgy,
+			Model:   "claude-sonnet-5-5-low",
+			Mode:    domain.SessionModeTUI,
+		}},
+	}
+
+	t.Run("new launch opts into quota failover and accepts configured fallback harness", func(t *testing.T) {
+		st := newFakeStore()
+		st.projects["por"] = domain.ProjectRecord{
+			ID:     "por",
+			Config: domain.ProjectConfig{Orchestrator: domain.RoleOverride{Harness: domain.HarnessCodex}},
+		}
+		fc := &fakeCommander{
+			spawnRecord: domain.SessionRecord{
+				ID:        "por-2",
+				ProjectID: "por",
+				Kind:      domain.KindOrchestrator,
+				Mode:      domain.SessionModeTUI,
+				Harness:   domain.HarnessAgy,
+				Metadata:  domain.SessionMetadata{Branch: "ao/por-orchestrator", Model: "claude-sonnet-5-5-low"},
+			},
+		}
+		svc := NewWithDeps(Deps{Manager: fc, Store: st, OrchestratorQuota: policy})
+
+		sess, err := svc.SpawnOrchestrator(context.Background(), "por", false, "", "")
+		if err != nil {
+			t.Fatalf("SpawnOrchestrator: %v", err)
+		}
+		if !fc.spawnedCfg.AllowQuotaFailover {
+			t.Fatal("AllowQuotaFailover = false, want true")
+		}
+		if fc.spawnedCfg.RequestedMode != "" {
+			t.Fatalf("RequestedMode = %q, want empty so quota route mode applies", fc.spawnedCfg.RequestedMode)
+		}
+		if sess.Harness != domain.HarnessAgy || sess.Mode != domain.SessionModeTUI {
+			t.Fatalf("session = %+v, want agy tui fallback", sess)
+		}
+	})
+
+	t.Run("clean replacement without explicit mode does not pin old chat mode", func(t *testing.T) {
+		st := newFakeStore()
+		st.projects["por"] = domain.ProjectRecord{
+			ID:     "por",
+			Config: domain.ProjectConfig{Orchestrator: domain.RoleOverride{Harness: domain.HarnessCodex}},
+		}
+		st.sessions["por-1"] = domain.SessionRecord{
+			ID: "por-1", ProjectID: "por", Kind: domain.KindOrchestrator,
+			Mode: domain.SessionModeChat, Harness: domain.HarnessCodex,
+			CreatedAt: time.Unix(100, 0).UTC(),
+		}
+		fc := &fakeCommander{
+			spawnRecord: domain.SessionRecord{
+				ID:        "por-2",
+				ProjectID: "por",
+				Kind:      domain.KindOrchestrator,
+				Mode:      domain.SessionModeTUI,
+				Harness:   domain.HarnessAgy,
+				Metadata:  domain.SessionMetadata{Branch: "ao/por-orchestrator"},
+			},
+		}
+		svc := NewWithDeps(Deps{Manager: fc, Store: st, OrchestratorQuota: policy})
+
+		if _, err := svc.SpawnOrchestrator(context.Background(), "por", true, "", ""); err != nil {
+			t.Fatalf("SpawnOrchestrator(clean): %v", err)
+		}
+		if !fc.spawnedCfg.AllowQuotaFailover {
+			t.Fatal("AllowQuotaFailover = false, want true")
+		}
+		if fc.spawnedCfg.RequestedMode != "" {
+			t.Fatalf("RequestedMode = %q, want empty so fallback route mode can apply", fc.spawnedCfg.RequestedMode)
+		}
+	})
+
+	t.Run("explicit mode override bypasses quota failover", func(t *testing.T) {
+		st := newFakeStore()
+		st.projects["por"] = domain.ProjectRecord{
+			ID:     "por",
+			Config: domain.ProjectConfig{Orchestrator: domain.RoleOverride{Harness: domain.HarnessCodex}},
+		}
+		fc := &fakeCommander{
+			spawnRecord: domain.SessionRecord{
+				ID:        "por-3",
+				ProjectID: "por",
+				Kind:      domain.KindOrchestrator,
+				Mode:      domain.SessionModeChat,
+				Harness:   domain.HarnessCodex,
+				Metadata:  domain.SessionMetadata{Branch: "ao/por-orchestrator"},
+			},
+		}
+		svc := NewWithDeps(Deps{Manager: fc, Store: st, OrchestratorQuota: policy})
+
+		if _, err := svc.SpawnOrchestrator(context.Background(), "por", false, domain.SessionModeChat, ""); err != nil {
+			t.Fatalf("SpawnOrchestrator(explicit chat): %v", err)
+		}
+		if fc.spawnedCfg.AllowQuotaFailover {
+			t.Fatal("AllowQuotaFailover = true, want false when explicit mode is requested")
+		}
+		if fc.spawnedCfg.RequestedMode != domain.SessionModeChat {
+			t.Fatalf("RequestedMode = %q, want chat", fc.spawnedCfg.RequestedMode)
+		}
+	})
+
+	t.Run("unconfigured harness still fails replacement verification", func(t *testing.T) {
+		st := newFakeStore()
+		st.projects["por"] = domain.ProjectRecord{
+			ID:     "por",
+			Config: domain.ProjectConfig{Orchestrator: domain.RoleOverride{Harness: domain.HarnessCodex}},
+		}
+		fc := &fakeCommander{
+			spawnRecord: domain.SessionRecord{
+				ID:        "por-4",
+				ProjectID: "por",
+				Kind:      domain.KindOrchestrator,
+				Harness:   domain.HarnessClaudeCode,
+				Metadata:  domain.SessionMetadata{Branch: "ao/por-orchestrator"},
+			},
+		}
+		svc := NewWithDeps(Deps{Manager: fc, Store: st, OrchestratorQuota: policy})
+
+		_, err := svc.SpawnOrchestrator(context.Background(), "por", false, "", "")
+		if err == nil || !strings.Contains(err.Error(), `uses harness "claude-code", want "codex"`) {
+			t.Fatalf("SpawnOrchestrator err = %v, want harness verification failure", err)
+		}
+	})
 }
 
 func TestDelegateTaskPassesAttachmentsToSpawnConfig(t *testing.T) {
