@@ -1,6 +1,7 @@
 package sessionmanager
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -85,6 +86,28 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 		_, revCfg := project.DefaultWorkerReviewer()
 		if revCfg.Permissions != "" || revCfg.Sandbox != "" {
 			t.Fatalf("reviewer inherited worker policy: %+v", revCfg)
+		}
+	})
+
+	t.Run("resolveAgentConfig carries daemon worker defaults into Chat launch and matches persisted metadata", func(t *testing.T) {
+		m := &Manager{}
+		m.SetProjectDefaults(defaults)
+		spawnCfg := ports.SpawnConfig{
+			ProjectID:     "proj-1",
+			Kind:          domain.KindWorker,
+			Harness:       domain.HarnessAgy,
+			RequestedMode: domain.SessionModeChat,
+		}
+		resolved, err := m.resolveAgentConfig(context.Background(), spawnCfg, domain.ProjectConfig{})
+		if err != nil {
+			t.Fatalf("resolveAgentConfig() error = %v", err)
+		}
+		seed := seedRecordWithDefaults(spawnCfg, domain.ProjectConfig{}, m.projectDefaults, time.Now())
+		if resolved.Permissions != domain.PermissionModeBypassPermissions || resolved.Sandbox != domain.SandboxModeRestricted {
+			t.Fatalf("resolved = %+v, want bypass-permissions + restricted", resolved)
+		}
+		if seed.Metadata.Permissions != resolved.Permissions || seed.Metadata.Sandbox != resolved.Sandbox {
+			t.Fatalf("seed metadata (%+v) != resolved (%+v)", seed.Metadata, resolved)
 		}
 	})
 }

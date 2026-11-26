@@ -1242,7 +1242,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	NoteSpawnLaunch(ctx, mode, false)
 	if mode == domain.SessionModeChat && m.chat != nil && cfg.AgentConfig.Permissions == "" &&
-		effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config).Permissions == "" {
+		effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project.Config, m.projectDefaults).Permissions == "" {
 		// Auto is AO's generic default, not a provider capability. An agent
 		// with no alternate modes keeps its native approval behavior. Never
 		// select bypass implicitly for agents without an approval channel.
@@ -1939,7 +1939,7 @@ func (m *Manager) resolveAgentConfig(ctx context.Context, cfg ports.SpawnConfig,
 }
 
 func (m *Manager) resolveAgentConfigOnce(ctx context.Context, cfg ports.SpawnConfig, project domain.ProjectConfig) (ports.AgentConfig, error) {
-	base := effectiveAgentConfig(cfg.Harness, cfg.Kind, project)
+	base := effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project, m.projectDefaults)
 	requested := cfg.AgentConfig
 	resolved := applySpawnAgentConfig(base, requested)
 	modelChangedWithoutExplicitEffort := requested.Model != "" && requested.Model != base.Model &&

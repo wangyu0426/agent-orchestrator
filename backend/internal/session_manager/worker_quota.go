@@ -87,7 +87,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 		return quotaSelection{}, nil
 	}
 	harness := effectiveHarnessWithDefaults("", cfg.Kind, project.Config, m.projectDefaults)
-	base := effectiveAgentConfig(harness, cfg.Kind, project.Config)
+	base := effectiveAgentConfigWithDefaults(harness, cfg.Kind, project.Config, m.projectDefaults)
 	primary := workerquota.Target{Harness: harness, Model: base.Model, Effort: base.Effort}
 	targets := policy.Targets(primary)
 	if len(targets) == 0 {
@@ -272,12 +272,13 @@ func (m *Manager) resolveQuotaRouteMode(ctx context.Context, target workerquota.
 }
 
 func (m *Manager) quotaTargetPermissions(ctx context.Context, target workerquota.Target, project domain.ProjectConfig, cfg ports.SpawnConfig) ports.PermissionMode {
-	permissions := applySpawnAgentConfig(effectiveAgentConfig(target.Harness, cfg.Kind, project), cfg.AgentConfig).Permissions
+	base := effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults)
+	permissions := applySpawnAgentConfig(base, cfg.AgentConfig).Permissions
 	if target.Harness == domain.HarnessUnreal && cfg.AgentConfig.Permissions == "" &&
-		effectiveAgentConfig(target.Harness, cfg.Kind, project).Permissions == "" {
+		base.Permissions == "" {
 		return ports.PermissionModeBypassPermissions
 	}
-	if cfg.AgentConfig.Permissions == "" && effectiveAgentConfig(target.Harness, cfg.Kind, project).Permissions == "" && m.chat != nil {
+	if cfg.AgentConfig.Permissions == "" && base.Permissions == "" && m.chat != nil {
 		if catalog, ok := m.chat.(interface {
 			PermissionModes(context.Context, domain.AgentHarness) ([]ports.PermissionMode, error)
 		}); ok {
