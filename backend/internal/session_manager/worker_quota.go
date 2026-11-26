@@ -212,6 +212,10 @@ func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Targe
 	if _, ok := m.agents.Agent(target.Harness); !ok || validateSpawnModel(target.Harness, target.Model) != nil {
 		return false, false
 	}
+	effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
+	if validateSpawnSandbox(target.Harness, effectiveSandbox) != nil {
+		return false, false
+	}
 	if !target.Harness.SupportsMode(target.Mode) {
 		return false, false
 	}

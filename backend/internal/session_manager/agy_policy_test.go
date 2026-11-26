@@ -2,11 +2,14 @@ package sessionmanager
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
@@ -126,4 +129,86 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 			t.Fatalf("restricted sandbox on agy should be allowed, got %v", err)
 		}
 	})
+
+	t.Run("quota failover skips sandbox-incompatible fallback and selects later compatible route", func(t *testing.T) {
+		now := time.Now()
+		primary := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini-4-neon-low", Mode: domain.SessionModeTUI}
+		codexFallback := workerquota.Target{Harness: domain.HarnessCodex, Model: "gpt-5", Mode: domain.SessionModeTUI}
+		agyFallback := workerquota.Target{Harness: domain.HarnessAgy, Model: "gemini-4-hydrogen-low", Mode: domain.SessionModeTUI}
+
+		policy := &workerquota.Policy{
+			Role:      workerquota.RoleWorker,
+			Primary:   &primary,
+			Fallbacks: []workerquota.Target{codexFallback, agyFallback},
+			Source: staticQuotaSource{windows: map[workerquota.Target][]workerquota.Window{
+				primary: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: true}},
+			}},
+		}
+		m := &Manager{
+			agents:      stubAgentRegistry{domain.HarnessAgy: nil, domain.HarnessCodex: nil},
+			workerQuota: policy,
+			clock:       func() time.Time { return now },
+			logger:      slog.Default(),
+		}
+		project := domain.ProjectRecord{
+			ID: "proj-1",
+			Config: domain.ProjectConfig{
+				AgentConfig: domain.AgentConfig{Sandbox: domain.SandboxModeRestricted},
+			},
+		}
+		cfg := ports.SpawnConfig{
+			ProjectID:          "proj-1",
+			Kind:               domain.KindWorker,
+			IssueID:            "gh#54",
+			AllowQuotaFailover: true,
+		}
+		if _, err := m.selectWorkerQuota(context.Background(), &cfg, &project); err != nil {
+			t.Fatalf("selectWorkerQuota() error = %v", err)
+		}
+		if cfg.Harness != agyFallback.Harness || cfg.AgentConfig.Model != agyFallback.Model {
+			t.Fatalf("selected = (%q, %q), want later compatible AGY fallback (%q, %q)", cfg.Harness, cfg.AgentConfig.Model, agyFallback.Harness, agyFallback.Model)
+		}
+
+		// When only the exhausted AGY primary is compatible and the Codex fallback is incompatible,
+		// defer rather than selecting the incompatible Codex fallback.
+		policy.Fallbacks = []workerquota.Target{codexFallback}
+		noRouteCfg := ports.SpawnConfig{
+			ProjectID:          "proj-1",
+			Kind:               domain.KindWorker,
+			IssueID:            "gh#54",
+			AllowQuotaFailover: true,
+		}
+		_, err := m.selectWorkerQuota(context.Background(), &noRouteCfg, &project)
+		if !errors.Is(err, workerquota.ErrDeferred) {
+			t.Fatalf("err = %v, want workerquota.ErrDeferred", err)
+		}
+
+		// When no route at all is sandbox-compatible, return ErrNoReadyRoute.
+		policy.Primary = &codexFallback
+		noCompatCfg := ports.SpawnConfig{
+			ProjectID:          "proj-1",
+			Kind:               domain.KindWorker,
+			IssueID:            "gh#54",
+			AllowQuotaFailover: true,
+		}
+		_, err = m.selectWorkerQuota(context.Background(), &noCompatCfg, &project)
+		if !errors.Is(err, workerquota.ErrNoReadyRoute) {
+			t.Fatalf("err = %v, want workerquota.ErrNoReadyRoute", err)
+		}
+	})
+}
+
+type staticQuotaSource struct {
+	windows map[workerquota.Target][]workerquota.Window
+}
+
+func (s staticQuotaSource) Read(_ context.Context, _ []workerquota.Target) (map[workerquota.Target][]workerquota.Window, error) {
+	return s.windows, nil
+}
+
+type stubAgentRegistry map[domain.AgentHarness]ports.Agent
+
+func (r stubAgentRegistry) Agent(h domain.AgentHarness) (ports.Agent, bool) {
+	a, ok := r[h]
+	return a, ok
 }
