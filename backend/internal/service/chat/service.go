@@ -2393,11 +2393,6 @@ func (s *Service) SupportsChat(harness domain.AgentHarness) bool {
 	return s.drivers.SupportsChat(harness)
 }
 
-// PreflightChat reports whether a harness can start in chat mode right now.
-//
-// Called before any durable state exists, so an unsupported request costs nothing
-// — no terminated orphan row, no wasted worktree. It never downgrades to TUI:
-// that would put the user in a terminal they did not ask for.
 // PreflightChatSandbox validates transport-specific sandbox compatibility for
 // harness before any session or worktree is allocated.
 func (s *Service) PreflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error {
@@ -2412,6 +2407,11 @@ func (s *Service) PreflightChatSandbox(ctx context.Context, harness domain.Agent
 	return checker.CheckSandboxMode(ctx, sandbox)
 }
 
+// PreflightChat reports whether a harness can start in chat mode right now.
+//
+// Called before any durable state exists, so an unsupported request costs nothing
+// — no terminated orphan row, no wasted worktree. It never downgrades to TUI:
+// that would put the user in a terminal they did not ask for.
 func (s *Service) PreflightChat(
 	ctx context.Context,
 	harness domain.AgentHarness,

@@ -413,7 +413,6 @@ func (d *Driver) checkReadOnly(cfg LaunchConfig) error {
 	return nil
 }
 
-// Probe checks the provider binding without creating an ACP session or worktree.
 // CheckSandboxMode implements ports.ChatSandboxModeChecker.
 func (d *Driver) CheckSandboxMode(ctx context.Context, sandbox ports.SandboxMode) error {
 	if d.cfg.CheckSandbox == nil {
@@ -422,6 +421,7 @@ func (d *Driver) CheckSandboxMode(ctx context.Context, sandbox ports.SandboxMode
 	return d.cfg.CheckSandbox(ctx, sandbox)
 }
 
+// Probe checks the provider binding without creating an ACP session or worktree.
 func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	if d.cfg.Probe == nil || d.cfg.Launch == nil {
 		return nil, fmt.Errorf("%w: incomplete ACP binding", ports.ErrChatDriverUnavailable)
