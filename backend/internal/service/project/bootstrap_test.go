@@ -30,7 +30,8 @@ func openTestStore(t *testing.T) *sqlite.Store {
 }
 
 type fakeBootstrapTracker struct {
-	issues []domain.Issue
+	issues       []domain.Issue
+	preflightErr error
 }
 
 func (f *fakeBootstrapTracker) Get(_ context.Context, _ domain.TrackerID) (domain.Issue, error) {
@@ -39,7 +40,7 @@ func (f *fakeBootstrapTracker) Get(_ context.Context, _ domain.TrackerID) (domai
 func (f *fakeBootstrapTracker) List(_ context.Context, _ domain.TrackerRepo, _ domain.ListFilter) ([]domain.Issue, error) {
 	return f.issues, nil
 }
-func (f *fakeBootstrapTracker) Preflight(_ context.Context) error { return nil }
+func (f *fakeBootstrapTracker) Preflight(_ context.Context) error { return f.preflightErr }
 
 type fakeBootstrapSpawner struct {
 	mu      sync.Mutex
@@ -343,6 +344,35 @@ func TestBootstrapErrorPathsAndSafety(t *testing.T) {
 		joined := strings.Join(res.Readiness.Blockers, "; ")
 		if !strings.Contains(joined, "AO_TRACKER_INTAKE") {
 			t.Fatalf("Blockers = %q, want AO_TRACKER_INTAKE mention", joined)
+		}
+	})
+
+	t.Run("tracker preflight failure marks not ready with sanitized blocker", func(t *testing.T) {
+		remoteURL := initBareRemoteWithBranch(t, "main", true)
+		svc := projectsvc.NewWithDeps(projectsvc.Deps{
+			Store: openTestStore(t),
+			ProjectDefaults: domain.ProjectDefaults{
+				WorkspaceRoot:         t.TempDir(),
+				TrackerIntakeEnabled:  true,
+				TrackerIntakeSet:      true,
+				TrackerIntakeAssignee: "octocat",
+			},
+			TrackerIntakeGate: true,
+			Tracker:           &fakeBootstrapTracker{preflightErr: errors.New("401 unauthorized ghp_SUPERSECRETTOKEN123")},
+		})
+		res, err := svc.Bootstrap(context.Background(), projectsvc.BootstrapInput{RemoteURL: remoteURL})
+		if err != nil {
+			t.Fatalf("Bootstrap() error = %v", err)
+		}
+		if res.Readiness.Ready || res.Readiness.TrackerOK {
+			t.Fatalf("Readiness = %+v, want Ready=false TrackerOK=false", res.Readiness)
+		}
+		joined := strings.Join(res.Readiness.Blockers, "; ")
+		if !strings.Contains(joined, "tracker credential preflight failed") {
+			t.Fatalf("Blockers = %q, want sanitized preflight failure", joined)
+		}
+		if strings.Contains(joined, "ghp_SUPERSECRETTOKEN123") {
+			t.Fatalf("Blockers leaked secret token: %q", joined)
 		}
 	})
 }

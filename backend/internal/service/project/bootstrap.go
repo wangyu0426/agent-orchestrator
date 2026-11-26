@@ -356,6 +356,9 @@ func (m *Service) buildBootstrapResult(ctx context.Context, action string, proj 
 		if m.tracker == nil {
 			readiness.TrackerOK = false
 			readiness.Blockers = append(readiness.Blockers, "no tracker adapter is configured on the daemon; verify GitHub/GitLab credentials.")
+		} else if err := m.tracker.Preflight(ctx); err != nil {
+			readiness.TrackerOK = false
+			readiness.Blockers = append(readiness.Blockers, "tracker credential preflight failed; verify GitHub/GitLab credentials and repository permissions.")
 		}
 	}
 
