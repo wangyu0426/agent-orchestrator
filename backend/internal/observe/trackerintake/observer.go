@@ -90,10 +90,10 @@ type Observer struct {
 	spawner         Spawner
 	tick            time.Duration
 	projectDefaults domain.ProjectDefaults
-	failureBackoff time.Duration
-	clock          func() time.Time
-	logger         *slog.Logger
-	backoffUntil   map[string]time.Time
+	failureBackoff  time.Duration
+	clock           func() time.Time
+	logger          *slog.Logger
+	backoffUntil    map[string]time.Time
 }
 
 // New constructs an Observer with safe defaults.

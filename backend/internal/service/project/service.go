@@ -87,11 +87,11 @@ type autoSpawnPauser interface {
 
 // Service implements project registration and lookup use-cases for controllers.
 type Service struct {
-	store          Store
-	sessions       SessionTeardowner
-	clock          func() time.Time
-	telemetry      ports.EventSink
-	milestones     ports.InstallMilestones
+	store             Store
+	sessions          SessionTeardowner
+	clock             func() time.Time
+	telemetry         ports.EventSink
+	milestones        ports.InstallMilestones
 	defaultHarness    domain.AgentHarness
 	logger            *slog.Logger
 	githubRepos       ports.GitHubRepositoryResolver

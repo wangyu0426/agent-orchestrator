@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	BootstrapActionClonedAndRegistered        = "cloned_and_registered"
+	BootstrapActionClonedAndRegistered         = "cloned_and_registered"
 	BootstrapActionReusedCheckoutAndRegistered = "reused_checkout_and_registered"
-	BootstrapActionReusedProject              = "reused_project"
+	BootstrapActionReusedProject               = "reused_project"
 )
 
 // Bootstrap takes an authorized Git repository from URL to a registered,
@@ -234,26 +234,6 @@ func isWorkingTreeClean(ctx context.Context, repoPath string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == "", nil
-}
-
-func authCloneFailure(stderr string) bool {
-	lower := strings.ToLower(stderr)
-	for _, needle := range []string{
-		"authentication failed",
-		"could not read username",
-		"terminal prompts disabled",
-		"permission denied",
-		"access denied",
-		"repository not found",
-		"returned error: 401",
-		"returned error: 403",
-		"http basic: access denied",
-	} {
-		if strings.Contains(lower, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func sanitizeRepoURL(raw string) string {
