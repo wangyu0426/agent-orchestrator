@@ -247,12 +247,12 @@ func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Targe
 		targetCfg.Harness = target.Harness
 		permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
 		if err := func() error {
-		if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
-			return err
-		}
-		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
-		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox)
-	}(); err != nil {
+			if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
+				return err
+			}
+			effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
+			return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox)
+		}(); err != nil {
 			return false, true
 		}
 		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox) == nil, true
