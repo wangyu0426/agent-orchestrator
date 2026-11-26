@@ -12,6 +12,12 @@ type ProjectDefaults struct {
 	// WorkerAgent is the default worker harness when neither project config nor
 	// global worker quota primary specifies one.
 	WorkerAgent AgentHarness
+	// WorkerPermissions is the daemon-wide default approval policy for worker
+	// sessions when neither per-spawn nor project/role config sets one.
+	WorkerPermissions PermissionMode
+	// WorkerSandbox is the daemon-wide default sandbox/access policy for worker
+	// sessions when neither per-spawn nor project/role config sets one.
+	WorkerSandbox SandboxMode
 	// OrchestratorAgent is the default orchestrator harness when neither project
 	// config nor global orchestrator quota primary specifies one.
 	OrchestratorAgent AgentHarness

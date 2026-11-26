@@ -1226,7 +1226,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	// override) and validate the model before any durable state is created. A
 	// model the harness cannot honor should not leave a seed row behind.
 	explicitModel := cfg.AgentConfig.Model != ""
-	agentConfig := applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config), cfg.AgentConfig)
+	agentConfig := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project.Config, m.projectDefaults), cfg.AgentConfig)
 	if err := validateSpawnModel(cfg.Harness, agentConfig.Model); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %s", ErrUnsupportedModel, err.Error())
 	}
@@ -1734,6 +1734,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		IssueID:          string(cfg.IssueID),
 		Config:           adapterConfig,
 		Permissions:      adapterConfig.Permissions,
+		Sandbox:          adapterConfig.Sandbox,
 		Env:              env,
 	}
 	delivery, err := agent.GetPromptDeliveryStrategy(ctx, launchCfg)
@@ -1814,6 +1815,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 
 	metadata := domain.SessionMetadata{
 		Permissions:               rec.Metadata.Permissions,
+		Sandbox:                   rec.Metadata.Sandbox,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
@@ -2671,6 +2673,10 @@ func roleConfigName(kind domain.SessionKind) string {
 // harness means "not pinned" and always matches. Permissions is
 // harness-neutral and is always inherited.
 func effectiveAgentConfig(harness domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig) ports.AgentConfig {
+	return effectiveAgentConfigWithDefaults(harness, kind, cfg, domain.ProjectDefaults{})
+}
+
+func effectiveAgentConfigWithDefaults(harness domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig, defaults domain.ProjectDefaults) ports.AgentConfig {
 	merged := cfg.AgentConfig
 	role := roleOverride(kind, cfg)
 	override := role.AgentConfig
@@ -2686,6 +2692,17 @@ func effectiveAgentConfig(harness domain.AgentHarness, kind domain.SessionKind, 
 	}
 	if override.Permissions != "" {
 		merged.Permissions = override.Permissions
+	}
+	if override.Sandbox != "" {
+		merged.Sandbox = override.Sandbox
+	}
+	if kind == domain.KindWorker {
+		if merged.Permissions == "" && defaults.WorkerPermissions != "" {
+			merged.Permissions = defaults.WorkerPermissions
+		}
+		if merged.Sandbox == "" && defaults.WorkerSandbox != "" {
+			merged.Sandbox = defaults.WorkerSandbox
+		}
 	}
 	// A project may carry a model from its previous worker harness. Memcode
 	// accepts only its native catalog; leave an incompatible inherited choice
@@ -2726,6 +2743,9 @@ func restoredAgentConfig(rec domain.SessionRecord, cfg domain.ProjectConfig) por
 	if rec.Metadata.Permissions != "" {
 		merged.Permissions = rec.Metadata.Permissions
 	}
+	if rec.Metadata.Sandbox != "" {
+		merged.Sandbox = rec.Metadata.Sandbox
+	}
 	return merged
 }
 
@@ -2755,8 +2775,14 @@ func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
 	if override.Permissions != "" {
 		base.Permissions = override.Permissions
 	}
+	if override.Sandbox != "" {
+		base.Sandbox = override.Sandbox
+	}
 	if base.Permissions == "" {
 		base.Permissions = ports.PermissionModeAuto
+	}
+	if base.Sandbox == "" {
+		base.Sandbox = ports.SandboxModeDefault
 	}
 	return base
 }
@@ -4336,6 +4362,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	metadata := domain.SessionMetadata{
 		ImportSource:              rec.Metadata.ImportSource,
 		Permissions:               rec.Metadata.Permissions,
+		Sandbox:                   rec.Metadata.Sandbox,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
@@ -6378,6 +6405,7 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 
 func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, defaults domain.ProjectDefaults, now time.Time) domain.SessionRecord {
 	autoReview, _ := projectConfig.EffectiveAutoReview(defaults)
+	resolvedPolicy := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, projectConfig, defaults), cfg.AgentConfig)
 	return domain.SessionRecord{
 		ProjectID:           cfg.ProjectID,
 		IssueID:             cfg.IssueID,
@@ -6394,7 +6422,7 @@ func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectC
 		// Resolved before this point and persisted here. There is no UPDATE
 		// statement that can change it afterwards.
 		Mode:               domain.NormalizeSessionMode(cfg.RequestedMode),
-		Metadata:           domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
+		Metadata:           domain.SessionMetadata{Permissions: resolvedPolicy.Permissions, Sandbox: resolvedPolicy.Sandbox},
 		RequestedOutput:    cfg.RequestedOutput,
 		OutputType:         domain.SessionOutputNone,
 		AutoReviewEnabled:  autoReview,
@@ -7907,7 +7935,7 @@ func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, wo
 		WorkspacePath: workspacePath,
 		Metadata:      metadata,
 	}
-	cfg := ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions, Env: env}
+	cfg := ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions, Sandbox: agentConfig.Sandbox, Env: env}
 	var cmd []string
 	var ok bool
 	var err error
@@ -7990,6 +8018,7 @@ func freshLaunchArgv(ctx context.Context, agent ports.Agent, id domain.SessionID
 		SystemPromptFile: systemPromptFile,
 		Config:           agentConfig,
 		Permissions:      agentConfig.Permissions,
+		Sandbox:          agentConfig.Sandbox,
 		NativeSessionID:  nativeSessionID,
 		Env:              env,
 	}

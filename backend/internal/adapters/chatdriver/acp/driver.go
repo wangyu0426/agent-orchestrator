@@ -45,6 +45,7 @@ type LaunchConfig struct {
 	Env             map[string]string
 	Model           string
 	Permissions     ports.PermissionMode
+	Sandbox         ports.SandboxMode
 	SystemPrompt    string
 	DisableTools    bool
 	ReadOnly        bool // a review-owned session; see Config.ReadOnly
@@ -465,7 +466,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		Model: cfg.Model, Permissions: cfg.Permissions, Sandbox: cfg.Sandbox, SystemPrompt: cfg.SystemPrompt,
 		DisableTools:    cfg.DisableTools,
 		ReadOnly:        cfg.ReadOnly,
 		ProviderScopeID: cfg.ProviderScopeID,
@@ -636,7 +637,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		Model: cfg.Model, Permissions: cfg.Permissions, Sandbox: cfg.Sandbox, SystemPrompt: cfg.SystemPrompt,
 		ReadOnly:        cfg.ReadOnly,
 		ProviderScopeID: cfg.ProviderScopeID,
 		ReconnectOnly:   cfg.ReconnectOnly,

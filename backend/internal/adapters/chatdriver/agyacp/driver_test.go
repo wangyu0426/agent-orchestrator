@@ -532,7 +532,7 @@ func TestReadOnlySessionPinsDefaultModeSandboxAndStrictPolicy(t *testing.T) {
 	if cfg.ReadOnly == nil {
 		t.Fatal("ReadOnly binding must be configured for AGY reviewer ACP")
 	}
-	args := cliLaunchArgs(nil, func(string) string { return "" }, true)
+	args := cliLaunchArgs(nil, func(string) string { return "" }, true, ports.SandboxModeDefault)
 	wantArgs := []string{"acp", "--sandbox"}
 	if !reflect.DeepEqual(args, wantArgs) {
 		t.Fatalf("cliLaunchArgs(readOnly=true) = %v, want %v", args, wantArgs)

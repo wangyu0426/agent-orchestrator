@@ -297,6 +297,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		Model:                   agentConfig.Model,
 		Effort:                  agentConfig.Effort,
 		Permissions:             agentConfig.Permissions,
+		Sandbox:                 agentConfig.Sandbox,
 		SystemPrompt:            in.systemPrompt,
 		ForkHandoffNote:         forkHandoffNote,
 		ForkFirstStart:          in.cfg.Fork != nil && in.cfg.Fork.PrepareChat != nil,
@@ -319,6 +320,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		ControllerReady: func(started ChatStarted) (ChatControllerCommit, error) {
 			metadata := domain.SessionMetadata{
 				Permissions:       in.record.Metadata.Permissions,
+				Sandbox:           in.record.Metadata.Sandbox,
 				Branch:            in.workspace.Branch,
 				WorkspacePath:     in.workspace.Path,
 				WorkspaceRepoPath: in.workspace.RepoPath,
@@ -634,6 +636,7 @@ func (m *Manager) resumeChatController(
 		Model:                   agentConfig.Model,
 		Effort:                  agentConfig.Effort,
 		Permissions:             agentConfig.Permissions,
+		Sandbox:                 agentConfig.Sandbox,
 		SystemPrompt:            systemPrompt,
 		AdditionalDirectories:   additionalDirectories,
 		MCPServers:              m.aoMCPServers(ctx, rec.Harness, env),

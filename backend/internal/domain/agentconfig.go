@@ -19,6 +19,23 @@ const (
 	PermissionModeBypassPermissions PermissionMode = "bypass-permissions"
 )
 
+// SandboxMode controls the execution sandbox/access policy independently from
+// approval policy (PermissionMode) and interaction transport (SessionMode).
+type SandboxMode string
+
+// The sandbox modes adapters map onto their agent's native sandbox flags.
+const (
+	// SandboxModeDefault defers to the adapter/agent baseline without silently
+	// weakening or overriding sandbox settings.
+	SandboxModeDefault SandboxMode = "default"
+	// SandboxModeRestricted requests provider-enforced sandbox restrictions
+	// (for example, `agy --sandbox` / `agy acp --sandbox`).
+	SandboxModeRestricted SandboxMode = "restricted"
+	// SandboxModeUnrestricted explicitly opts out of provider sandbox
+	// restrictions. It must only be chosen via explicit operator configuration.
+	SandboxModeUnrestricted SandboxMode = "unrestricted"
+)
+
 // AgentConfig is the typed per-project agent configuration. It replaces the
 // former free-form map so the fields are validated and the API/UI render a
 // real form rather than arbitrary JSON. An empty value (IsZero) means unset.
@@ -35,6 +52,9 @@ type AgentConfig struct {
 	// project/role preference; new sessions fall back to Auto when none is saved.
 	// Other adapter callers retain their existing baseline for an empty value.
 	Permissions PermissionMode `json:"permissions,omitempty"`
+	// Sandbox sets the agent's sandbox/access policy independently of
+	// Permissions. Empty inherits the project/role/daemon default.
+	Sandbox SandboxMode `json:"sandbox,omitempty"`
 	// Launch carries one session's own launch choices to its adapter. It is
 	// never part of a saved or served project config.
 	Launch AgentLaunchOptions `json:"-"`
@@ -80,6 +100,17 @@ func (m PermissionMode) Valid() bool {
 	}
 }
 
+// Valid reports whether the sandbox mode is one AO knows. Empty counts as
+// valid: it means "inherit/unset".
+func (m SandboxMode) Valid() bool {
+	switch m {
+	case "", SandboxModeDefault, SandboxModeRestricted, SandboxModeUnrestricted:
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate rejects values outside the typed vocabulary so a bad config is
 // refused when it is set (CLI/API) rather than silently dropped at spawn.
 func (c AgentConfig) Validate() error {
@@ -88,8 +119,11 @@ func (c AgentConfig) Validate() error {
 	default:
 		return fmt.Errorf("invalid mode %q: want one of low, medium, high, ultra", c.Mode)
 	}
-	if c.Permissions.Valid() {
-		return nil
+	if !c.Permissions.Valid() {
+		return fmt.Errorf("invalid permissions %q: choose a supported permission mode", c.Permissions)
 	}
-	return fmt.Errorf("invalid permissions %q: choose a supported permission mode", c.Permissions)
+	if !c.Sandbox.Valid() {
+		return fmt.Errorf("invalid sandbox %q: choose a supported sandbox mode (default, restricted, unrestricted)", c.Sandbox)
+	}
+	return nil
 }

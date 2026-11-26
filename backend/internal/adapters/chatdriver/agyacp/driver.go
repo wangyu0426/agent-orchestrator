@@ -98,11 +98,18 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 			if env[disableWorkspaceTrustEnvVar] == "" {
 				env[disableWorkspaceTrustEnvVar] = "1"
 			}
+			sandbox := ports.NormalizeSandboxMode(cfg.Sandbox)
+			if !cfg.ReadOnly && !sandbox.Valid() {
+				return acpdriver.Launch{}, fmt.Errorf("%w: agy acp: unsupported sandbox mode %q", ports.ErrChatDriverIncompatible, cfg.Sandbox)
+			}
 			if target.cli {
-				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.ReadOnly), Env: env}, nil
+				return acpdriver.Launch{Command: target.path, Args: cliLaunchArgs(env, resolve.getenv, cfg.ReadOnly, sandbox), Env: env}, nil
 			}
 			if cfg.ReadOnly {
 				return acpdriver.Launch{}, fmt.Errorf("%w: AGY read-only reviewer requires native `agy acp`", ports.ErrChatDriverIncompatible)
+			}
+			if sandbox == ports.SandboxModeRestricted {
+				return acpdriver.Launch{}, fmt.Errorf("%w: AGY restricted sandbox requires native `agy acp`", ports.ErrChatDriverIncompatible)
 			}
 			if env[harnessPathEnvVar] == "" {
 				if harness := resolve.harnessPath(target.path); harness != "" {
@@ -133,9 +140,9 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 // `agy acp` ignores the GEMINI_HOME variable and stores under its --gemini-dir,
 // so a GEMINI_HOME set for the session or inherited by the daemon is passed as
 // that flag, the same precedence agy.GeminiHome uses.
-func cliLaunchArgs(env map[string]string, getenv func(string) string, readOnly bool) []string {
+func cliLaunchArgs(env map[string]string, getenv func(string) string, readOnly bool, sandbox ports.SandboxMode) []string {
 	args := []string{"acp"}
-	if readOnly {
+	if readOnly || sandbox == ports.SandboxModeRestricted {
 		args = append(args, "--sandbox")
 	}
 	home := strings.TrimSpace(env["GEMINI_HOME"])

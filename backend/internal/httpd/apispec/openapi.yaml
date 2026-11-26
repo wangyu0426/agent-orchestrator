@@ -16086,6 +16086,8 @@ components:
           type: string
         permissions:
           type: string
+        sandbox:
+          type: string
       type: object
     AgentInfo:
       properties:

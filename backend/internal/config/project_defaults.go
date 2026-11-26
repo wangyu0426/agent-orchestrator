@@ -28,6 +28,22 @@ func loadProjectDefaults() (domain.ProjectDefaults, error) {
 		d.WorkerAgent = h
 	}
 
+	if raw, ok := os.LookupEnv("AO_DEFAULT_WORKER_PERMISSIONS"); ok && strings.TrimSpace(raw) != "" {
+		p := domain.PermissionMode(strings.TrimSpace(raw))
+		if !p.Valid() {
+			return domain.ProjectDefaults{}, fmt.Errorf("invalid AO_DEFAULT_WORKER_PERMISSIONS %q: choose a supported permission mode", raw)
+		}
+		d.WorkerPermissions = p
+	}
+
+	if raw, ok := os.LookupEnv("AO_DEFAULT_WORKER_SANDBOX"); ok && strings.TrimSpace(raw) != "" {
+		s := domain.SandboxMode(strings.TrimSpace(raw))
+		if !s.Valid() {
+			return domain.ProjectDefaults{}, fmt.Errorf("invalid AO_DEFAULT_WORKER_SANDBOX %q: choose a supported sandbox mode (default, restricted, unrestricted)", raw)
+		}
+		d.WorkerSandbox = s
+	}
+
 	if raw, ok := os.LookupEnv("AO_DEFAULT_ORCHESTRATOR_AGENT"); ok && strings.TrimSpace(raw) != "" {
 		h := domain.AgentHarness(strings.TrimSpace(raw))
 		if !h.IsKnown() {

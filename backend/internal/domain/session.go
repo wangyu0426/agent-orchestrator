@@ -312,6 +312,8 @@ type SessionMetadata struct {
 
 	// Permissions pins the resolved launch policy independently of future project defaults.
 	Permissions PermissionMode `json:"permissions,omitempty"`
+	// Sandbox pins the resolved sandbox/access policy independently of future project defaults.
+	Sandbox SandboxMode `json:"sandbox,omitempty"`
 
 	Branch            string `json:"branch,omitempty"`
 	WorkspacePath     string `json:"workspacePath,omitempty"`
