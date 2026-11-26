@@ -8,7 +8,7 @@
 
 Make fork-specific capabilities discoverable and operable through the existing AO UI, rather than requiring SSH, shell commands, environment-file inspection, or log digging for routine administration. The problem is feature parity between our daemon/CLI and our UI, not dissatisfaction with the upstream visual design.
 
-On 2026-11-26 the operator's yuworker reported 39 merged Worker candidates: 3 eligible, 36 deferred (25 runtime ownership unknown, 11 Chat ownership unknown). After manual termination the merged-candidate preview was empty, but /tmp still occupied 22 GiB of a 31 GiB tmpfs; task-cache cleanup reduced that to 5.1 GiB, and available memory increased from 32 to 48 GiB. This is evidence of a real operator workflow gap, not evidence that all deferred processes were live, or that the proposed GC would collect legacy paths.
+On 2026-11-26 the operator's yuworker reported 39 merged Worker candidates: 3 eligible, 36 deferred (24 runtime ownership unknown, 12 Chat ownership unknown). After manual termination the merged-candidate preview was empty, but /tmp still occupied 22 GiB of a 31 GiB tmpfs; task-cache cleanup reduced that to 5.1 GiB, and available memory increased from 32 to 48 GiB. This is evidence of a real operator workflow gap, not evidence that all deferred processes were live, or that the proposed GC would collect legacy paths.
 
 Success: an operator can understand effective policy, runtime decisions and maintenance eligibility, and perform supported, explicitly authorized actions without leaving the UI. CLI remains a supported equivalent.
 
@@ -96,7 +96,7 @@ Parallelize genuinely independent slices after audit, not changes that fight ove
 ## 7. Testable acceptance
 
 - UI-0 records every listed capability with implementation status, API source, actual screen/entry or gap, and plan for upstream overlap. No claims of missing UI solely from changed-file counts.
-- UI-1 fixture reproduces the observed 3 eligible / 36 deferred result (25 runtime ownership unknown, 11 Chat ownership unknown). Only explicitly selected eligible IDs are sent on apply; deferred reasons visible; tests cover empty list, preview cancellation, stale/changed candidates, partial failures, duplicate submit, auth/transport failure and refresh after uncertain result. A changed or newly eligible ID is never silently added. CLI and UI call the same service.
+- UI-1 fixture reproduces the observed 3 eligible / 36 deferred result (24 runtime ownership unknown, 12 Chat ownership unknown). Only explicitly selected eligible IDs are sent on apply; deferred reasons visible; tests cover empty list, preview cancellation, stale/changed candidates, partial failures, duplicate submit, auth/transport failure and refresh after uncertain result. A changed or newly eligible ID is never silently added. CLI and UI call the same service.
 - Routing tests cover role separation, configured vs effective route, stale/unknown quota, exhausted primary with eligible fallback, all unavailable and explicit override. No client-side route choice or credential exposure. Unsupported write actions are absent/disabled with explanation.
 - GC tests verify retention/eligibility/result display, unsupported backend, preview/confirm semantics, unknown ownership and no arbitrary path deletion. UI never weakens backend policy.
 - Session tests cover stale HEAD verdict, provider handoff, unknown process ownership, missing evidence, error/recovery and distinction between terminated vs exited.
