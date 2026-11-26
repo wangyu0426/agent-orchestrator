@@ -221,7 +221,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions, session_sandbox,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
@@ -290,6 +290,7 @@ type GetSessionRow struct {
 	Model                            string
 	Effort                           string
 	SessionPermissions               string
+	SessionSandbox                   string
 	RequestedOutput                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
@@ -376,6 +377,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.Model,
 		&i.Effort,
 		&i.SessionPermissions,
+		&i.SessionSandbox,
 		&i.RequestedOutput,
 		&i.ProvisionState,
 		&i.ProvisionError,
@@ -415,7 +417,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions, session_sandbox,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
@@ -484,6 +486,7 @@ type GetSessionByAutomationRunIDRow struct {
 	Model                            string
 	Effort                           string
 	SessionPermissions               string
+	SessionSandbox                   string
 	RequestedOutput                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
@@ -570,6 +573,7 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.Model,
 		&i.Effort,
 		&i.SessionPermissions,
+		&i.SessionSandbox,
 		&i.RequestedOutput,
 		&i.ProvisionState,
 		&i.ProvisionError,
@@ -619,7 +623,7 @@ INSERT INTO sessions (
     native_transcript_path,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     artifact_dir, session_output_type,
-    session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions,
+    session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions, session_sandbox,
     requested_output,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
@@ -631,7 +635,7 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?
 )
 `
 
@@ -685,6 +689,7 @@ type InsertSessionParams struct {
 	Model                            string
 	Effort                           string
 	SessionPermissions               string
+	SessionSandbox                   string
 	RequestedOutput                  string
 	CreatedAt                        time.Time
 	UpdatedAt                        time.Time
@@ -754,6 +759,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.Model,
 		arg.Effort,
 		arg.SessionPermissions,
+		arg.SessionSandbox,
 		arg.RequestedOutput,
 		arg.CreatedAt,
 		arg.UpdatedAt,
@@ -787,7 +793,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions, session_sandbox,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
@@ -856,6 +862,7 @@ type ListAllSessionsRow struct {
 	Model                            string
 	Effort                           string
 	SessionPermissions               string
+	SessionSandbox                   string
 	RequestedOutput                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
@@ -948,6 +955,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.Model,
 			&i.Effort,
 			&i.SessionPermissions,
+			&i.SessionSandbox,
 			&i.RequestedOutput,
 			&i.ProvisionState,
 			&i.ProvisionError,
@@ -1085,7 +1093,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions, session_sandbox,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
@@ -1154,6 +1162,7 @@ type ListSessionsByProjectRow struct {
 	Model                            string
 	Effort                           string
 	SessionPermissions               string
+	SessionSandbox                   string
 	RequestedOutput                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
@@ -1246,6 +1255,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.Model,
 			&i.Effort,
 			&i.SessionPermissions,
+			&i.SessionSandbox,
 			&i.RequestedOutput,
 			&i.ProvisionState,
 			&i.ProvisionError,
@@ -1475,17 +1485,18 @@ UPDATE sessions SET
     model = ?10,
     effort = ?11,
     session_permissions = ?12,
-    requested_output = ?13,
-    created_at = ?14,
-    updated_at = ?15,
-    auto_inject_review = ?16,
-    auto_inject_ci = ?17,
-    provision_state = ?18,
+    session_sandbox = ?13,
+    requested_output = ?14,
+    created_at = ?15,
+    updated_at = ?16,
+    auto_inject_review = ?17,
+    auto_inject_ci = ?18,
+    provision_state = ?19,
     provision_error = '',
-    client_request_id = ?19,
-    client_request_hash = ?20,
+    client_request_id = ?20,
+    client_request_hash = ?21,
     is_task_preparation = 0
-WHERE id = ?21 AND is_task_preparation = 1
+WHERE id = ?22 AND is_task_preparation = 1
 `
 
 type PromoteTaskPreparationParams struct {
@@ -1501,6 +1512,7 @@ type PromoteTaskPreparationParams struct {
 	Model               string
 	Effort              string
 	SessionPermissions  string
+	SessionSandbox      string
 	RequestedOutput     string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
@@ -1528,6 +1540,7 @@ func (q *Queries) PromoteTaskPreparation(ctx context.Context, arg PromoteTaskPre
 		arg.Model,
 		arg.Effort,
 		arg.SessionPermissions,
+		arg.SessionSandbox,
 		arg.RequestedOutput,
 		arg.CreatedAt,
 		arg.UpdatedAt,

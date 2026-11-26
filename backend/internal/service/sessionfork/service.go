@@ -351,7 +351,7 @@ func (s *Service) ForkTurn(ctx context.Context, sourceID domain.SessionID, clien
 		Kind:              domain.KindWorker,
 		Harness:           plan.source.Harness,
 		AgentConfig: ports.AgentConfig{
-			Model: plan.source.Metadata.Model, Effort: plan.source.Metadata.Effort, Permissions: plan.source.Metadata.Permissions,
+			Model: plan.source.Metadata.Model, Effort: plan.source.Metadata.Effort, Permissions: plan.source.Metadata.Permissions, Sandbox: plan.source.Metadata.Sandbox,
 		},
 		EffortOverride:  true,
 		RequestedMode:   domain.NormalizeSessionMode(plan.source.Mode),

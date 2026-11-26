@@ -6438,7 +6438,7 @@ func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectC
 		// Resolved before this point and persisted here. There is no UPDATE
 		// statement that can change it afterwards.
 		Mode:               domain.NormalizeSessionMode(cfg.RequestedMode),
-		Metadata:           domain.SessionMetadata{Permissions: resolvedPolicy.Permissions, Sandbox: resolvedPolicy.Sandbox},
+		Metadata:           domain.SessionMetadata{Permissions: resolvedPolicy.Permissions, Sandbox: ports.NormalizeSandboxMode(resolvedPolicy.Sandbox)},
 		RequestedOutput:    cfg.RequestedOutput,
 		OutputType:         domain.SessionOutputNone,
 		AutoReviewEnabled:  autoReview,
