@@ -89,6 +89,7 @@ type agentConfig struct {
 	Effort      string `json:"effort,omitempty"`
 	Mode        string `json:"mode,omitempty"`
 	Permissions string `json:"permissions,omitempty"`
+	Sandbox     string `json:"sandbox,omitempty"`
 }
 
 // roleOverride mirrors domain.RoleOverride.
