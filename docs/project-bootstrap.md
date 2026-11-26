@@ -55,16 +55,14 @@ For each setting, AO distinguishes **unset** (inherit), **explicitly disabled**,
 
 1. **Mandatory daemon gates & active quota primary** (cannot be bypassed by project config):
    - `AO_TRACKER_INTAKE=off` keeps tracker intake disabled daemon-wide even if a project enables it.
-   - Daemon-wide quota failover and Quotum bindings remain owned by the daemon; when `AO_REVIEWER_QUOTA_PRIMARY` is configured with reviewer quota failover, it takes precedence over per-project reviewer selection (`source: "quota_primary"`).
+   - Daemon-wide quota failover and Quotum bindings remain owned by the daemon; when `AO_WORKER_QUOTA_PRIMARY`, `AO_ORCHESTRATOR_QUOTA_PRIMARY`, or `AO_REVIEWER_QUOTA_PRIMARY` is configured with quota failover enabled, runtime quota routing takes precedence over per-project role/reviewer selection (`source: "quota_primary"`).
 2. **Explicit project override** (`source: "project"`):
    - `autoReview: true` or `autoReviewOverride: false` (`--auto-review` / `--no-auto-review`)
    - `trackerIntake.enabled: true` or `trackerIntake.disabled: true` (`--tracker-intake` / `--no-tracker-intake`)
-   - `worker.agent`, `orchestrator.agent`, `reviewers` (when no reviewer quota primary overrides it), `defaultBranch`
-3. **Daemon quota primary** (`source: "quota_primary"`, for worker/orchestrator harnesses when project role is unset):
-   - `AO_WORKER_QUOTA_PRIMARY`, `AO_ORCHESTRATOR_QUOTA_PRIMARY`
-4. **Daemon global defaults** (`source: "global"`):
+   - `worker.agent`, `orchestrator.agent`, `reviewers` (when no corresponding quota primary overrides them), `defaultBranch`
+3. **Daemon global defaults** (`source: "global"`):
    - `AO_DEFAULT_*` environment variables
-5. **Built-in fallback** (`source: "default"` / `"git_remote"` / `"worker_inherited"`):
+4. **Built-in fallback** (`source: "default"` / `"git_remote"` / `"worker_inherited"`):
    - Git remote `HEAD` for default branch; `AO_AGENT` / `claude-code` for fallback harness.
 
 ## Safe Retry & Troubleshooting

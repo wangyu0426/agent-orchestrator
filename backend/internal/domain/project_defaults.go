@@ -86,13 +86,15 @@ func (c ProjectConfig) EffectiveTrackerIntake(defaults ProjectDefaults) (Tracker
 }
 
 // EffectiveWorkerAgent resolves the effective worker harness and its source
-// ("project", "quota_primary", "global", or "default").
+// ("quota_primary", "project", "global", or "default").
+// When daemon-wide worker quota failover configures a primary target,
+// runtime quota routing takes precedence over per-project role overrides.
 func (c ProjectConfig) EffectiveWorkerAgent(defaults ProjectDefaults, quotaPrimary AgentHarness) (AgentHarness, string) {
-	if c.Worker.Harness != "" {
-		return c.Worker.Harness, "project"
-	}
 	if quotaPrimary != "" {
 		return quotaPrimary, "quota_primary"
+	}
+	if c.Worker.Harness != "" {
+		return c.Worker.Harness, "project"
 	}
 	if defaults.WorkerAgent != "" {
 		return defaults.WorkerAgent, "global"
@@ -101,13 +103,15 @@ func (c ProjectConfig) EffectiveWorkerAgent(defaults ProjectDefaults, quotaPrima
 }
 
 // EffectiveOrchestratorAgent resolves the effective orchestrator harness and its
-// source ("project", "quota_primary", "global", or "default").
+// source ("quota_primary", "project", "global", or "default").
+// When daemon-wide orchestrator quota failover configures a primary target,
+// runtime quota routing takes precedence over per-project role overrides.
 func (c ProjectConfig) EffectiveOrchestratorAgent(defaults ProjectDefaults, quotaPrimary AgentHarness) (AgentHarness, string) {
-	if c.Orchestrator.Harness != "" {
-		return c.Orchestrator.Harness, "project"
-	}
 	if quotaPrimary != "" {
 		return quotaPrimary, "quota_primary"
+	}
+	if c.Orchestrator.Harness != "" {
+		return c.Orchestrator.Harness, "project"
 	}
 	if defaults.OrchestratorAgent != "" {
 		return defaults.OrchestratorAgent, "global"
