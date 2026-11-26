@@ -34,7 +34,7 @@ func autoSpawnAdmitterFrom(ctx context.Context) AutoSpawnAdmitter {
 
 func automaticQuotaSpawn(cfg ports.SpawnConfig) (workerquota.Role, bool) {
 	if cfg.ProjectID == "" ||
-		(cfg.CreatedBy != domain.SessionCreatedByAutomation && cfg.AutomationRunID == nil && cfg.ParentSessionID == "") ||
+		(!cfg.AllowQuotaFailover && cfg.CreatedBy != domain.SessionCreatedByAutomation && cfg.AutomationRunID == nil && cfg.ParentSessionID == "") ||
 		cfg.Harness != "" || cfg.AgentAccountID != "" || cfg.AgentConfig.Model != "" ||
 		cfg.AgentConfig.Mode != "" || cfg.AgentConfig.Effort != "" || cfg.EffortOverride || cfg.AgentConfigResolved ||
 		cfg.RequestedMode != "" {

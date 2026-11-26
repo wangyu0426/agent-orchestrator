@@ -86,6 +86,22 @@ func TestOrchestratorQuotaFailoverIndependentOfWorkerPolicy(t *testing.T) {
 	if err != nil || manualRem != nil || manualOrch.Harness != "" {
 		t.Fatalf("manual orchestrator should bypass quota failover: cfg=%+v rem=%v err=%v", manualOrch, manualRem, err)
 	}
+
+	// Role-managed orchestrator launch (SpawnOrchestrator with AllowQuotaFailover
+	// and no explicit overrides) fails over to AGY TUI without spoofing CreatedBy.
+	managedOrch := ports.SpawnConfig{
+		ProjectID:          "mer",
+		Kind:               domain.KindOrchestrator,
+		AllowQuotaFailover: true,
+	}
+	managedRem, err := manager.selectWorkerQuotaTarget(t.Context(), &managedOrch, &project)
+	if err != nil {
+		t.Fatalf("selectWorkerQuotaTarget(managed orchestrator): %v", err)
+	}
+	if managedRem == nil || managedOrch.Harness != domain.HarnessAgy || managedOrch.AgentConfig.Model != "agy-orch-pro" ||
+		managedOrch.RequestedMode != domain.SessionModeTUI || managedOrch.AgentAccountID != "acct-orch" {
+		t.Fatalf("managed orchestrator cfg = %+v, remaining=%v", managedOrch, managedRem)
+	}
 }
 
 func TestOrchestratorQuotaAllExhaustedReturnsDeferredWithResetAt(t *testing.T) {

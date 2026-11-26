@@ -75,6 +75,10 @@ type SpawnConfig struct {
 	// controller while preserving the AO session. An unsupported explicit request
 	// fails the spawn rather than falling back to the other mode.
 	RequestedMode domain.SessionMode
+	// AllowQuotaFailover opts a role-managed spawn (such as project orchestrator
+	// launch/replacement with no explicit overrides) into configured role quota
+	// failover without changing CreatedBy attribution.
+	AllowQuotaFailover bool
 
 	// RequestedOutput is the deliverable the caller asks for. Empty is the ordinary
 	// task flow; artifact adds an artifact-delivery section to the worker prompt.
