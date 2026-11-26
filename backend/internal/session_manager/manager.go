@@ -2784,9 +2784,6 @@ func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
 	if base.Permissions == "" {
 		base.Permissions = ports.PermissionModeAuto
 	}
-	if base.Sandbox == "" {
-		base.Sandbox = ports.SandboxModeDefault
-	}
 	return base
 }
 
