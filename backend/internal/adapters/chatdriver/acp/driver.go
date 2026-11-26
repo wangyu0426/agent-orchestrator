@@ -61,6 +61,9 @@ type Config struct {
 	Harness      domain.AgentHarness
 	Capabilities ports.ChatCapabilities
 	Probe        func(context.Context) error
+	// CheckSandbox optionally validates transport-specific sandbox compatibility
+	// during preflight before any session or worktree is allocated.
+	CheckSandbox func(context.Context, ports.SandboxMode) error
 	// InstallCheck optionally reports a missing chat adapter without starting
 	// anything. See ports.ChatInstallChecker.
 	InstallCheck func(context.Context) error
@@ -411,6 +414,14 @@ func (d *Driver) checkReadOnly(cfg LaunchConfig) error {
 }
 
 // Probe checks the provider binding without creating an ACP session or worktree.
+// CheckSandboxMode implements ports.ChatSandboxModeChecker.
+func (d *Driver) CheckSandboxMode(ctx context.Context, sandbox ports.SandboxMode) error {
+	if d.cfg.CheckSandbox == nil {
+		return nil
+	}
+	return d.cfg.CheckSandbox(ctx, sandbox)
+}
+
 func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	if d.cfg.Probe == nil || d.cfg.Launch == nil {
 		return nil, fmt.Errorf("%w: incomplete ACP binding", ports.ErrChatDriverUnavailable)

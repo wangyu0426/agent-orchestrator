@@ -246,7 +246,16 @@ func (m *Manager) quotaTargetReady(ctx context.Context, target workerquota.Targe
 		targetCfg := cfg
 		targetCfg.Harness = target.Harness
 		permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
-		return m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)) == nil, true
+		if err := func() error {
+		if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
+			return err
+		}
+		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
+		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox)
+	}(); err != nil {
+			return false, true
+		}
+		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox) == nil, true
 	}
 	return true, false
 }
@@ -268,7 +277,13 @@ func (m *Manager) resolveQuotaRouteMode(ctx context.Context, target workerquota.
 	targetCfg := cfg
 	targetCfg.Harness = target.Harness
 	permissions := m.quotaTargetPermissions(ctx, target, project, targetCfg)
-	if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
+	if err := func() error {
+		if err := m.preflightChat(ctx, target.Harness, permissions, m.chatPreflightEnv(targetCfg, project.Env)); err != nil {
+			return err
+		}
+		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(target.Harness, cfg.Kind, project, m.projectDefaults), cfg.AgentConfig).Sandbox
+		return m.preflightChatSandbox(ctx, target.Harness, effectiveSandbox)
+	}(); err != nil {
 		fallbackAllowed := errors.Is(err, ports.ErrChatUnsupported) ||
 			errors.Is(err, ports.ErrChatDriverUnavailable) ||
 			errors.Is(err, ports.ErrChatDriverIncompatible) ||

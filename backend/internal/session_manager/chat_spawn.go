@@ -65,11 +65,25 @@ type chatEnvironmentPreflighter interface {
 	PreflightChatWithEnv(context.Context, domain.AgentHarness, ports.PermissionMode, map[string]string) error
 }
 
+type chatSandboxPreflighter interface {
+	PreflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error
+}
+
 func (m *Manager) preflightChat(ctx context.Context, harness domain.AgentHarness, permissions ports.PermissionMode, env map[string]string) error {
 	if preflighter, ok := m.chat.(chatEnvironmentPreflighter); ok {
 		return preflighter.PreflightChatWithEnv(ctx, harness, permissions, env)
 	}
 	return m.chat.PreflightChat(ctx, harness, permissions)
+}
+
+func (m *Manager) preflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error {
+	if m.chat == nil {
+		return nil
+	}
+	if preflighter, ok := m.chat.(chatSandboxPreflighter); ok {
+		return preflighter.PreflightChatSandbox(ctx, harness, sandbox)
+	}
+	return nil
 }
 
 type chatBackgroundTaskRunner interface {

@@ -1206,6 +1206,13 @@ type ChatPermissionModeChecker interface {
 	SupportsPermissionMode(mode PermissionMode) bool
 }
 
+// ChatSandboxModeChecker is optionally implemented by chat drivers that enforce
+// transport-specific sandbox compatibility during preflight (for example, AGY
+// restricted sandbox requiring native `agy acp` rather than legacy `agy_acp_server`).
+type ChatSandboxModeChecker interface {
+	CheckSandboxMode(ctx context.Context, sandbox SandboxMode) error
+}
+
 // ChatDriver opens conversations for one harness.
 type ChatDriver interface {
 	// Harness is the agent this driver serves.

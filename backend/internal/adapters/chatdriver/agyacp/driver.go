@@ -86,6 +86,23 @@ func buildConfig(plugin Plugin, resolve resolver, log *slog.Logger) acpdriver.Co
 			}
 			return nil
 		},
+		CheckSandbox: func(ctx context.Context, sandbox ports.SandboxMode) error {
+			norm := ports.NormalizeSandboxMode(sandbox)
+			if !norm.Valid() {
+				return fmt.Errorf("%w: agy acp: unsupported sandbox mode %q", ports.ErrChatDriverIncompatible, sandbox)
+			}
+			if norm != ports.SandboxModeRestricted {
+				return nil
+			}
+			target, err := resolve.target(ctx)
+			if err != nil {
+				return fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
+			}
+			if !target.cli {
+				return fmt.Errorf("%w: AGY restricted sandbox requires native `agy acp`", ports.ErrChatDriverIncompatible)
+			}
+			return nil
+		},
 		Launch: func(ctx context.Context, cfg acpdriver.LaunchConfig) (acpdriver.Launch, error) {
 			target, err := resolve.target(ctx)
 			if err != nil {
