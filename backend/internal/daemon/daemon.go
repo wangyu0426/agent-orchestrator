@@ -1160,9 +1160,10 @@ func Run(buildVersion string) (retErr error) {
 	automationSvc, automationDone := startAutomations(ctx, store, sessionSvc, telemetrySink, log)
 	lcStack.automationDone = automationDone
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{
-		Logger:        log,
-		Quota:         cfg.ReviewerQuota,
-		QuotaFailures: store.WorkerQuotaFailures,
+		Logger:          log,
+		Quota:           cfg.ReviewerQuota,
+		QuotaFailures:   store.WorkerQuotaFailures,
+		ProjectDefaults: cfg.ProjectDefaults,
 		RouteReady: func(ctx context.Context, target workerquota.Target) bool {
 			needsChat := target.Mode == domain.SessionModeChat ||
 				(target.Mode == "" && (target.Harness.ChatOnly() || (chatSvc != nil && chatSvc.SupportsChat(target.Harness))))

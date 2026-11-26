@@ -64,7 +64,10 @@ func (c ProjectConfig) EffectiveTrackerIntake(defaults ProjectDefaults) (Tracker
 		}
 		return out, "project"
 	}
-	if defaults.TrackerIntakeSet && defaults.TrackerIntakeEnabled {
+	if defaults.TrackerIntakeSet {
+		if !defaults.TrackerIntakeEnabled {
+			return TrackerIntakeConfig{}, "global"
+		}
 		out := TrackerIntakeConfig{
 			Enabled:  true,
 			Provider: c.TrackerIntake.Provider,

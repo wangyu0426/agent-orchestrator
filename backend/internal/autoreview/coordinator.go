@@ -64,15 +64,16 @@ type Result struct {
 
 // Coordinator evaluates auto-review policy and owns the periodic sweep.
 type Coordinator struct {
-	store         Store
-	reviews       Trigger
-	clock         func() time.Time
-	idleThreshold time.Duration
-	sweepInterval time.Duration
-	logger        *slog.Logger
-	quota         *workerquota.Policy
-	quotaFailures func(context.Context, time.Time) ([]workerquota.Failure, error)
-	routeReady    func(context.Context, workerquota.Target) bool
+	store           Store
+	reviews         Trigger
+	clock           func() time.Time
+	idleThreshold   time.Duration
+	sweepInterval   time.Duration
+	logger          *slog.Logger
+	quota           *workerquota.Policy
+	quotaFailures   func(context.Context, time.Time) ([]workerquota.Failure, error)
+	routeReady      func(context.Context, workerquota.Target) bool
+	projectDefaults domain.ProjectDefaults
 
 	deferMu         sync.Mutex
 	deferredUntil   map[domain.SessionID]time.Time
@@ -81,13 +82,14 @@ type Coordinator struct {
 
 // Config customizes coordinator timing, logging, and optional reviewer quota failover.
 type Config struct {
-	Clock         func() time.Time
-	IdleThreshold time.Duration
-	SweepInterval time.Duration
-	Logger        *slog.Logger
-	Quota         *workerquota.Policy
-	QuotaFailures func(context.Context, time.Time) ([]workerquota.Failure, error)
-	RouteReady    func(context.Context, workerquota.Target) bool
+	Clock           func() time.Time
+	IdleThreshold   time.Duration
+	SweepInterval   time.Duration
+	Logger          *slog.Logger
+	Quota           *workerquota.Policy
+	QuotaFailures   func(context.Context, time.Time) ([]workerquota.Failure, error)
+	RouteReady      func(context.Context, workerquota.Target) bool
+	ProjectDefaults domain.ProjectDefaults
 }
 
 // New constructs an auto-review coordinator.
@@ -102,6 +104,7 @@ func New(store Store, reviews Trigger, cfg Config) *Coordinator {
 		quota:           cfg.Quota,
 		quotaFailures:   cfg.QuotaFailures,
 		routeReady:      cfg.RouteReady,
+		projectDefaults: cfg.ProjectDefaults,
 		deferredUntil:   make(map[domain.SessionID]time.Time),
 		lastDeferralSig: make(map[domain.SessionID]string),
 	}
@@ -152,7 +155,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	if err != nil {
 		return Result{}, err
 	}
-	harness := effectiveReviewerHarness(session, project.Config)
+	harness := effectiveReviewerHarnessWithDefaults(session, project.Config, c.projectDefaults)
 	var selectedRoute *workerquota.Target
 	if c.quota != nil && session.ReviewerHarness == "" {
 		// Always evaluate current routes and fresh quota evidence so positive
@@ -666,8 +669,15 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string, quotaM
 }
 
 func effectiveReviewerHarness(session domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {
+	return effectiveReviewerHarnessWithDefaults(session, config, domain.ProjectDefaults{})
+}
+
+func effectiveReviewerHarnessWithDefaults(session domain.SessionRecord, config domain.ProjectConfig, defaults domain.ProjectDefaults) domain.ReviewerHarness {
 	if session.ReviewerHarness != "" {
 		return session.ReviewerHarness
+	}
+	if len(config.Reviewers) == 0 && len(defaults.Reviewers) > 0 {
+		return defaults.Reviewers[0].Harness
 	}
 	return config.ResolveReviewerHarness(session.Harness)
 }

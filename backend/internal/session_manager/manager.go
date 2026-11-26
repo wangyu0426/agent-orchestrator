@@ -1172,7 +1172,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 
 	// A per-project role override picks the harness when the spawn names none,
 	// so a project can default workers to one agent and orchestrators to another.
-	cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
+	cfg.Harness = effectiveHarnessWithDefaults(cfg.Harness, cfg.Kind, project.Config, m.projectDefaults)
 	if cfg.Harness == "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness", ErrMissingHarness, roleConfigName(cfg.Kind))
 	}
@@ -2639,13 +2639,20 @@ func (m *Manager) preserveFailedSpawnWorkspace(ctx context.Context, id domain.Se
 // otherwise the project's role override for the session kind applies. Empty is
 // invalid for new worker/orchestrator launches and is rejected by Spawn.
 func effectiveHarness(explicit domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig) domain.AgentHarness {
+	return effectiveHarnessWithDefaults(explicit, kind, cfg, domain.ProjectDefaults{})
+}
+
+func effectiveHarnessWithDefaults(explicit domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig, defaults domain.ProjectDefaults) domain.AgentHarness {
 	if explicit != "" {
 		return explicit
 	}
 	if role := roleOverride(kind, cfg).Harness; role != "" {
 		return role
 	}
-	return ""
+	if kind == domain.KindOrchestrator {
+		return defaults.OrchestratorAgent
+	}
+	return defaults.WorkerAgent
 }
 
 func roleConfigName(kind domain.SessionKind) string {

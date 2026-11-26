@@ -29,6 +29,13 @@ const (
 // retry, never duplicates an already-registered project, and returns a truthful
 // effective-policy and readiness preflight without leaking secrets.
 func (m *Service) Bootstrap(ctx context.Context, in BootstrapInput) (BootstrapResult, error) {
+	if hasEmbeddedCredentials(in.RemoteURL) {
+		return BootstrapResult{}, apierr.Invalid(
+			"CLONE_URL_EMBEDDED_CREDENTIALS",
+			"Do not embed credentials in repository URLs; configure Git/SCM credentials on the daemon instead.",
+			nil,
+		)
+	}
 	remoteURL := normalizeCloneURL(in.RemoteURL)
 	repoName, err := cloneRepositoryName(remoteURL)
 	if err != nil {
@@ -235,6 +242,19 @@ func isWorkingTreeClean(ctx context.Context, repoPath string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == "", nil
+}
+
+func hasEmbeddedCredentials(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.User == nil {
+		return false
+	}
+	// SSH URLs like ssh://git@github.com/org/repo.git carry a transport username
+	// without a password; reject any password or any userinfo on http(s) URLs.
+	if _, hasPassword := u.User.Password(); hasPassword {
+		return true
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
 }
 
 func sanitizeRepoURL(raw string) string {

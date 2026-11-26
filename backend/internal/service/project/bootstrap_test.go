@@ -375,4 +375,37 @@ func TestBootstrapErrorPathsAndSafety(t *testing.T) {
 			t.Fatalf("Blockers leaked secret token: %q", joined)
 		}
 	})
+
+	t.Run("embedded credentials in remote URL are rejected", func(t *testing.T) {
+		svc := projectsvc.NewWithDeps(projectsvc.Deps{
+			Store:           openTestStore(t),
+			ProjectDefaults: domain.ProjectDefaults{WorkspaceRoot: t.TempDir()},
+		})
+		_, err := svc.Bootstrap(context.Background(), projectsvc.BootstrapInput{
+			RemoteURL: "https://x-access-token:ghp_SECRET123@github.com/acme/demo.git",
+		})
+		var ae *apierr.Error
+		if !errors.As(err, &ae) || ae.Code != "CLONE_URL_EMBEDDED_CREDENTIALS" {
+			t.Fatalf("err = %v, want CLONE_URL_EMBEDDED_CREDENTIALS", err)
+		}
+	})
+
+	t.Run("explicit global tracker intake off reports global provenance", func(t *testing.T) {
+		remoteURL := initBareRemoteWithBranch(t, "main", true)
+		svc := projectsvc.NewWithDeps(projectsvc.Deps{
+			Store: openTestStore(t),
+			ProjectDefaults: domain.ProjectDefaults{
+				WorkspaceRoot:        t.TempDir(),
+				TrackerIntakeEnabled: false,
+				TrackerIntakeSet:     true,
+			},
+		})
+		res, err := svc.Bootstrap(context.Background(), projectsvc.BootstrapInput{RemoteURL: remoteURL})
+		if err != nil {
+			t.Fatalf("Bootstrap() error = %v", err)
+		}
+		if res.Effective.TrackerIntake.Enabled || res.Effective.TrackerIntake.Source != "global" {
+			t.Fatalf("TrackerIntake = %+v, want enabled=false source=global", res.Effective.TrackerIntake)
+		}
+	})
 }
