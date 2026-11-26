@@ -1843,6 +1843,8 @@ func (s *Service) stopLocked(ctx context.Context, id domain.SessionID) error {
 		var stopErr error
 		if s.stopProviderHost != nil {
 			stopErr = s.stopProviderHost(ctx, id)
+		} else {
+			stopErr = errors.New("chat controller is not attached and provider host stop is unavailable")
 		}
 		return errors.Join(stopErr, s.clearHibernation(ctx, id))
 	}

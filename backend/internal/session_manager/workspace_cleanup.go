@@ -504,6 +504,9 @@ func (m *Manager) DeleteSession(ctx context.Context, id domain.SessionID, cleanu
 		// Resolve while the session still has its account binding.
 		forkNative = m.forkNativeSessionFile(ctx, rec)
 	}
+	// Keep durable process-exit evidence if the row is removed while its temp
+	// directory is still retained for troubleshooting.
+	m.markSessionTempExitedIfConclusive(ctx, rec)
 	deleted, err := deleter.DeleteTerminatedSession(ctx, id)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", id, err)

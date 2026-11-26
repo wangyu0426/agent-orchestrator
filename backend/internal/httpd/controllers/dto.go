@@ -1492,6 +1492,32 @@ type ApplyMergedArchiveResponse struct {
 	Results []MergeArchiveApplyResultResponse `json:"results"`
 }
 
+// SessionTempGCRequest is the body accepted by POST /api/v1/sessions/temp-gc.
+type SessionTempGCRequest struct {
+	DryRun bool `json:"dryRun,omitempty" description:"When true, report eligible directories and byte estimates without removing them."`
+	Limit  int  `json:"limit,omitempty" minimum:"0" maximum:"256" description:"Maximum owned directories to inspect in this pass; omitted or zero uses the daemon's bounded batch size."`
+}
+
+// SessionTempGCEntry reports one owned temp directory considered by GC.
+type SessionTempGCEntry struct {
+	SessionID string `json:"sessionId,omitempty"`
+	Action    string `json:"action" enum:"removed,would_remove,skipped,failed"`
+	Reason    string `json:"reason,omitempty"`
+	Bytes     int64  `json:"bytes"`
+	Error     string `json:"error,omitempty"`
+}
+
+// SessionTempGCResponse is the bounded diagnostics snapshot from temp GC.
+type SessionTempGCResponse struct {
+	Root           string               `json:"root"`
+	Scanned        int                  `json:"scanned"`
+	Removed        int                  `json:"removed"`
+	ReclaimedBytes int64                `json:"reclaimedBytes"`
+	More           bool                 `json:"more"`
+	DryRun         bool                 `json:"dryRun"`
+	Entries        []SessionTempGCEntry `json:"entries"`
+}
+
 // SendSessionMessageRequest is the body of POST /api/v1/sessions/{sessionId}/send.
 type SendSessionMessageRequest struct {
 	// SenderSessionID is cooperative loopback attribution, not authentication.

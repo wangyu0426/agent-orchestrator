@@ -41,6 +41,7 @@ import (
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessiontemp"
 	"github.com/aoagents/agent-orchestrator/backend/pkg/contract"
 )
 
@@ -71,6 +72,10 @@ type fakeSessionService struct {
 	cleanupProjects            []domain.ProjectID
 	cleanupResult              []domain.SessionID
 	cleanupSkipped             []sessionsvc.CleanupSkipped
+	sessionTempGCResult        sessionmanager.SessionTempGCResult
+	sessionTempGCDryRun        bool
+	sessionTempGCLimit         int
+	sessionTempGCErr           error
 	workspaceFiles             sessionsvc.WorkspaceFiles
 	workspaceListHook          func(context.Context) error
 	workspaceFile              sessionsvc.WorkspaceFileDetail
@@ -503,6 +508,12 @@ func (f *fakeSessionService) Cleanup(_ context.Context, project domain.ProjectID
 		cleaned = []domain.SessionID{"ao-1"}
 	}
 	return sessionsvc.CleanupOutcome{Cleaned: cleaned, Skipped: f.cleanupSkipped}, nil
+}
+
+func (f *fakeSessionService) CollectSessionTemp(_ context.Context, dryRun bool, limit int) (sessionmanager.SessionTempGCResult, error) {
+	f.sessionTempGCDryRun = dryRun
+	f.sessionTempGCLimit = limit
+	return f.sessionTempGCResult, f.sessionTempGCErr
 }
 
 func (f *fakeSessionService) Rename(_ context.Context, id domain.SessionID, displayName string) error {
@@ -5137,6 +5148,49 @@ func TestSessionsAPI_CleanupWithoutProjectFilter(t *testing.T) {
 	}
 	if len(svc.cleanupProjects) != 1 || svc.cleanupProjects[0] != "" {
 		t.Fatalf("cleanupProjects = %#v, want empty project filter", svc.cleanupProjects)
+	}
+}
+
+func TestSessionsAPI_SessionTempGC(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.sessionTempGCResult = sessionmanager.SessionTempGCResult{
+		Root: "/ao/tmp", Scanned: 3, DryRun: true,
+		Entries: []sessiontemp.EntryResult{{SessionID: "ao-old", Action: "would_remove", Bytes: 4096}},
+	}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/temp-gc", `{"dryRun":true,"limit":12}`)
+	if status != http.StatusOK {
+		t.Fatalf("temp-gc = %d, want 200; body=%s", status, body)
+	}
+	var got struct {
+		Root           string `json:"root"`
+		Scanned        int    `json:"scanned"`
+		ReclaimedBytes int64  `json:"reclaimedBytes"`
+		DryRun         bool   `json:"dryRun"`
+		Entries        []struct {
+			SessionID string `json:"sessionId"`
+			Action    string `json:"action"`
+			Bytes     int64  `json:"bytes"`
+		} `json:"entries"`
+	}
+	mustJSON(t, body, &got)
+	if got.Root != "/ao/tmp" || got.Scanned != 3 || got.ReclaimedBytes != 0 || !got.DryRun ||
+		len(got.Entries) != 1 || got.Entries[0].SessionID != "ao-old" || got.Entries[0].Action != "would_remove" || got.Entries[0].Bytes != 4096 {
+		t.Fatalf("temp-gc response = %+v", got)
+	}
+	if !svc.sessionTempGCDryRun || svc.sessionTempGCLimit != 12 {
+		t.Fatalf("service input dryRun=%v limit=%d", svc.sessionTempGCDryRun, svc.sessionTempGCLimit)
+	}
+}
+
+func TestSessionsAPI_SessionTempGCRejectsInvalidLimit(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/temp-gc", `{"limit":257}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_LIMIT")
+	if svc.sessionTempGCLimit != 0 {
+		t.Fatalf("invalid limit reached service: %d", svc.sessionTempGCLimit)
 	}
 }
 

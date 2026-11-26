@@ -104,6 +104,7 @@ See the [command reference](../../backend/internal/skillassets/using-ao/commands
 | `ao session rename <id> <name>`     | `PATCH /api/v1/sessions/{id}`                  |
 | `ao session cleanup`                | `POST /api/v1/sessions/cleanup`                |
 | `ao session archive-merged`          | `POST /api/v1/sessions/archive-merged/preview`, then `POST /api/v1/sessions/archive-merged/apply` with `--apply` |
+| `ao session temp-gc`                 | `POST /api/v1/sessions/temp-gc`                 |
 | `ao session delete <id>`            | `DELETE /api/v1/sessions/{id}`                 |
 | `ao session claim-pr [<id>] <pr-ref>` | `POST /api/v1/sessions/{id}/pr/claim`        |
 | `ao session fork <id> [--check]` | `POST /api/v1/sessions/{id}/fork`             |
@@ -280,6 +281,8 @@ The CLI and daemon share the same environment-driven config:
 | `AO_PORT`             | `3001`               | Loopback daemon port.                                                                          |
 | `AO_RUN_FILE`         | `~/.ao/running.json` | PID/port handshake.                                                                            |
 | `AO_DATA_DIR`         | `~/.ao/data`         | SQLite data directory.                                                                         |
+| `AO_TEMP_ROOT`        | `~/.ao/tmp`          | AO-owned per-session temp root; defaults to `<AO_DATA_DIR>/tmp` when `AO_DATA_DIR` is customized. |
+| `AO_TEMP_RETENTION`   | `168h` (7d)          | Minimum post-exit retention before session temp collection; accepts Go duration syntax.        |
 | `AO_REQUEST_TIMEOUT`  | `60s`                | REST request timeout.                                                                          |
 | `AO_SHUTDOWN_TIMEOUT` | `10s`                | Graceful shutdown cap. Also scales how long a new daemon waits for the data dir (8x + 18s, plus the installer wait). |
 | `AO_INSTALLER_SHUTDOWN_TIMEOUT` | about `285s` | How long the daemon waits at shutdown for an agent CLI install or update it started to stop and clean up. Never less than `AO_SHUTDOWN_TIMEOUT`. A new daemon on the same data directory waits for this too. Tests set it low. |
@@ -288,6 +291,17 @@ The CLI and daemon share the same environment-driven config:
 
 The primary daemon always binds `127.0.0.1`. Connect Mobile is a separate,
 opt-in authenticated listener; see [network boundaries](../architecture.md#multi-listener-architecture-loopback--lan).
+
+Session workers receive private `TMPDIR`, `TMP`, and `TEMP` paths under
+`AO_TEMP_ROOT`. Point it at a local persistent filesystem with enough space
+before starting the daemon when the home filesystem is not suitable. AO does
+not migrate or sweep existing shared `/tmp` or legacy directories, and commands
+that hardcode `/tmp` remain outside this lifecycle. A root that already exists
+must be private (mode `0700` on Unix), and the root itself cannot be a symlink. Use
+`ao session temp-gc --dry-run` to inspect bounded candidates and estimated
+space; `ao session temp-gc --yes` confirms collection. AO retains files for the
+configured interval after confirmed worker exit and preserves active, parked,
+or uncertain sessions.
 
 ## Manual smoke test
 

@@ -30,6 +30,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerkeys"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessiontemp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/termtheme"
 	"github.com/aoagents/agent-orchestrator/backend/internal/tmuxbin"
@@ -481,6 +482,7 @@ type Manager struct {
 	attachments                 *attachmentstore.Store
 	attachmentSuffix            func() (string, error)
 	dataDir                     string
+	sessionTemps                *sessiontemp.Store
 	runFilePath                 string
 	clock                       func() time.Time
 	reconcileWorkers            int
@@ -945,6 +947,11 @@ type Deps struct {
 	// DataDir owns durable attachment storage and is exported to spawned agents
 	// as AO_DATA_DIR so their hook commands can open the same store.
 	DataDir string
+	// TempRoot and TempRetention configure private per-session worker temp
+	// storage. An empty root disables it for embedders that do not load daemon
+	// configuration.
+	TempRoot      string
+	TempRetention time.Duration
 	// RunFilePath is exported to spawned agents as AO_RUN_FILE so their hook
 	// callbacks reach this daemon even when another AO daemon is also running.
 	RunFilePath string
@@ -1050,6 +1057,9 @@ func New(d Deps) *Manager {
 		},
 		logger:         d.Logger,
 		workspaceGates: make(map[domain.ProjectID]*sync.Mutex),
+	}
+	if strings.TrimSpace(d.TempRoot) != "" {
+		m.sessionTemps = sessiontemp.New(d.TempRoot, d.TempRetention)
 	}
 	if m.clock == nil {
 		// UTC so spawn-stamped CreatedAt/UpdatedAt match every other session
@@ -1808,7 +1818,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	})
 	started(err)
 	if err != nil {
-		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true, false)
+		// A failed Create does not prove that the runtime left no process behind.
+		// Preserve unknown liveness so orphan GC cannot reclaim its temp directory.
+		m.rollbackSeedSpawnWorkspaceWithExitEvidence(ctx, rec, ws, workspaceProject, true, false, false)
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrRuntimeCreate, agentlaunch.RedactError(err, project.Config.Env))
 	}
 
@@ -2561,6 +2573,11 @@ func (m *Manager) rollbackSpawnSeedRowAfterFailure(ctx context.Context, id domai
 }
 
 func (m *Manager) rollbackPreparedSpawnWorkspaceAfterFailure(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo, workspaceProject *ports.WorkspaceProjectInfo, runtimeDestroyed bool) bool {
+	if runtimeDestroyed {
+		cleanupCtx, cancel := spawnRollbackContext(ctx)
+		m.markSessionTempExited(cleanupCtx, rec.ID)
+		cancel()
+	}
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	workspaceDestroyed := m.destroySpawnWorkspace(cleanupCtx, ws, workspaceProject)
 	cancel()
@@ -2587,6 +2604,18 @@ func (m *Manager) markSpawnFailedTerminatedAfterFailure(ctx context.Context, id 
 }
 
 func (m *Manager) rollbackSeedSpawnWorkspace(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo, workspaceProject *ports.WorkspaceProjectInfo, prepared, published bool) {
+	m.rollbackSeedSpawnWorkspaceWithExitEvidence(ctx, rec, ws, workspaceProject, prepared, published, true)
+}
+
+// rollbackSeedSpawnWorkspaceWithExitEvidence handles the pre-commit rollback
+// stages. Most callers run before a worker controller can exist and pass true;
+// a failed runtime Create passes false because process-tree liveness is unknown.
+func (m *Manager) rollbackSeedSpawnWorkspaceWithExitEvidence(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo, workspaceProject *ports.WorkspaceProjectInfo, prepared, published, processExitConfirmed bool) {
+	if processExitConfirmed {
+		cleanupCtx, cancel := spawnRollbackContext(ctx)
+		m.markSessionTempExited(cleanupCtx, rec.ID)
+		cancel()
+	}
 	cleanupCtx, cancel := spawnRollbackContext(ctx)
 	workspaceDestroyed := m.destroySpawnWorkspace(cleanupCtx, ws, workspaceProject)
 	cancel()
@@ -2605,7 +2634,7 @@ func (m *Manager) rollbackSeedSpawnWorkspace(ctx context.Context, rec domain.Ses
 		return
 	}
 	cleanupCtx, cancel = spawnRollbackContext(ctx)
-	m.preserveFailedSpawnWorkspace(cleanupCtx, rec.ID, ws, true)
+	m.preserveFailedSpawnWorkspace(cleanupCtx, rec.ID, ws, processExitConfirmed)
 	cancel()
 	if published {
 		return
@@ -3671,10 +3700,7 @@ func (m *Manager) releaseTerminalRuntime(ctx context.Context, rec domain.Session
 // never terminates the AO session or releases its worktree.
 func (m *Manager) stopAgentController(ctx context.Context, rec domain.SessionRecord) error {
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		if m.chat == nil {
-			return ErrIncompleteHandle
-		}
-		return m.chat.StopChat(ctx, rec.ID)
+		return m.stopChatController(ctx, rec.ID)
 	}
 	handle := ports.RuntimeHandle{ID: strings.TrimSpace(rec.Metadata.RuntimeHandleID)}
 	if handle.ID == "" || strings.TrimSpace(rec.Metadata.RuntimeLaunchID) == "" {
@@ -7169,12 +7195,15 @@ func pinRuntimePermissionEnv(env map[string]string, mode domain.PermissionMode) 
 	env[EnvPermissionMode] = string(ports.NormalizePermissionMode(mode))
 }
 
-func (m *Manager) launchRuntimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) (map[string]string, string, error) {
-	return m.launchRuntimeEnvForHarness(id, project, issue, projectEnv, "")
+func (m *Manager) launchRuntimeEnv(ctx context.Context, id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) (map[string]string, string, error) {
+	return m.launchRuntimeEnvForHarness(ctx, id, project, issue, projectEnv, "")
 }
 
-func (m *Manager) launchRuntimeEnvForHarness(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string, harness domain.AgentHarness) (map[string]string, string, error) {
+func (m *Manager) launchRuntimeEnvForHarness(ctx context.Context, id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string, harness domain.AgentHarness) (map[string]string, string, error) {
 	env := m.runtimeEnvForHarness(id, project, issue, projectEnv, harness)
+	if err := m.applySessionTempEnv(ctx, id, env); err != nil {
+		return nil, "", fmt.Errorf("prepare session temporary directory: %w", err)
+	}
 	if m.browserCapabilities == nil {
 		return env, "", nil
 	}
@@ -7197,7 +7226,7 @@ func (m *Manager) prepareWorkerLaunchEnv(
 	rec domain.SessionRecord,
 	projectEnv map[string]string,
 ) (domain.SessionRecord, map[string]string, error) {
-	env, verifier, err := m.launchRuntimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, projectEnv, rec.Harness)
+	env, verifier, err := m.launchRuntimeEnvForHarness(ctx, rec.ID, rec.ProjectID, rec.IssueID, projectEnv, rec.Harness)
 	if err != nil {
 		return rec, nil, err
 	}
@@ -7217,7 +7246,7 @@ func (m *Manager) prepareChatControllerEnv(
 	projectEnv map[string]string,
 	expected domain.SessionControllerOwner,
 ) (domain.SessionRecord, map[string]string, error) {
-	env, verifier, err := m.launchRuntimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, projectEnv, rec.Harness)
+	env, verifier, err := m.launchRuntimeEnvForHarness(ctx, rec.ID, rec.ProjectID, rec.IssueID, projectEnv, rec.Harness)
 	if err != nil {
 		return rec, nil, err
 	}
@@ -7589,6 +7618,9 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 	} else {
 		m.logger.Warn("workspace cleanup: project env unavailable; agent cleanup using AO env only",
 			"sessionID", rec.ID, "projectID", rec.ProjectID, "error", err)
+	}
+	if err := m.applyExistingSessionTempEnv(ctx, rec.ID, env); err != nil {
+		m.logger.Warn("workspace cleanup: session temp environment unavailable", "sessionID", rec.ID, "error", err)
 	}
 	if strings.TrimSpace(workspacePath) != "" {
 		if err := cleaner.CleanupWorkspace(ctx, ports.WorkspaceHookConfig{

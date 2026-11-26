@@ -367,6 +367,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersListDirsResponse":                         "ListDirsResponse",
 	"ControllersFSEntry":                                  "FSEntry",
 	"ControllersCleanupSessionsQuery":                     "CleanupSessionsQuery",
+	"ControllersSessionTempGCRequest":                     "SessionTempGCRequest",
+	"ControllersSessionTempGCEntry":                       "SessionTempGCEntry",
+	"ControllersSessionTempGCResponse":                    "SessionTempGCResponse",
 	"ControllersListSessionsResponse":                     "ListSessionsResponse",
 	"ControllersSessionArchiveSummary":                    "SessionArchiveSummary",
 	"ControllersSpawnSessionRequest":                      "SpawnSessionRequest",
@@ -4096,6 +4099,17 @@ func sessionOperations() []operation {
 			pathParams: []any{controllers.CleanupSessionsQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.CleanupSessionsResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/temp-gc", id: "collectSessionTemp", tag: "sessions",
+			summary: "Collect safe AO-owned session temporary directories",
+			reqBody: controllers.SessionTempGCRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SessionTempGCResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},

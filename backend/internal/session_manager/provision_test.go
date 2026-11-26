@@ -135,7 +135,7 @@ func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 		executable:          func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	env, verifier, err := manager.launchRuntimeEnv("mer-1", "mer", "", nil)
+	env, verifier, err := manager.launchRuntimeEnv(context.Background(), "mer-1", "mer", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

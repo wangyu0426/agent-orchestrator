@@ -259,6 +259,9 @@ type sessionLifecycle interface {
 	// records sessions with nothing left on disk; it never deletes a worktree
 	// the user has not asked to remove.
 	ReconcileWorkspaceCleanup(ctx context.Context) error
+	// ReconcileSessionTemp collects only old, AO-owned per-session temp
+	// directories whose terminal state and process exit are confirmed.
+	ReconcileSessionTemp(ctx context.Context) error
 	RefreshStaleChats(ctx context.Context, minIdle time.Duration) error
 	RefreshStaleTerminals(ctx context.Context, minIdle time.Duration) error
 	BusyHarnessSessions(ctx context.Context, harness domain.AgentHarness) ([]domain.SessionWait, error)
@@ -384,6 +387,8 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		AgentBrowserURL:     cfg.AgentBrowserURL,
 		AgentBrowserToken:   cfg.AgentBrowserToken,
 		DataDir:             cfg.DataDir,
+		TempRoot:            cfg.TempRoot,
+		TempRetention:       cfg.TempRetention,
 		RunFilePath:         cfg.RunFilePath,
 		BackgroundContext:   ctx,
 		Logger:              log,

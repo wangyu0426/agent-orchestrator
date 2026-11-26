@@ -73,6 +73,7 @@ type recordingLauncher struct {
 	preflightErr     error
 	startErr         error
 	turnErr          error
+	stopErr          error
 	live             bool
 	beforeStart      func(ChatStart)
 	afterReady       func()
@@ -231,10 +232,10 @@ func (l *recordingLauncher) RelaySessionChatTurn(_ context.Context, _ domain.Ses
 	return "turn-relay", l.turnErr
 }
 
-func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error { //nolint:unparam
+func (l *recordingLauncher) StopChat(_ context.Context, id domain.SessionID) error {
 
 	l.stopped = append(l.stopped, id)
-	return nil
+	return l.stopErr
 }
 
 func (l *recordingLauncher) HasLiveChatController(domain.SessionID) bool {

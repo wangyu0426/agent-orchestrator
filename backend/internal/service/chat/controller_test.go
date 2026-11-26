@@ -5212,6 +5212,14 @@ func TestChatHandoffTreatsMissingControllerAsAlreadyQuiescent(t *testing.T) {
 	}
 }
 
+func TestServiceStopWithoutControllerRequiresProviderHostStop(t *testing.T) {
+	svc := chatsvc.New(chatsvc.Options{})
+	if err := svc.Stop(context.Background(), "missing-controller"); err == nil ||
+		!strings.Contains(err.Error(), "provider host stop is unavailable") {
+		t.Fatalf("Stop without controller or host stopper = %v, want unknown liveness error", err)
+	}
+}
+
 func TestServiceStopRetainsControllerUntilItsEventStreamActuallyEnds(t *testing.T) {
 	base := newFakeConversation()
 	h := newHarnessWithConversation(t, &stuckConversation{

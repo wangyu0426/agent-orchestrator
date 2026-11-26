@@ -42,6 +42,9 @@ const (
 	// DefaultShutdownTimeout is the hard cap on graceful shutdown. After this
 	// the process exits even if connections are still draining.
 	DefaultShutdownTimeout = 10 * time.Second
+	// DefaultTempRetention keeps completed-session temporary files available
+	// for troubleshooting for one week before collection.
+	DefaultTempRetention = 7 * 24 * time.Hour
 	// DefaultHarnessUpdateInterval is how often the daemon re-checks installed
 	// harnesses for updates after its startup check. A full pass probes each
 	// harness CLI, so it runs a few times a day rather than continuously.
@@ -152,6 +155,13 @@ type Config struct {
 	// DataDir is the directory holding durable SQLite state: DB and WAL files.
 	// It is created on first use by the storage layer.
 	DataDir string
+	// TempRoot is AO-owned storage for per-session worker temporary files. It is
+	// kept outside the host's shared temporary directory and may be placed on a
+	// persistent disk with AO_TEMP_ROOT.
+	TempRoot string
+	// TempRetention is the minimum age of a terminal session's temp directory
+	// before the bounded garbage collector may remove it.
+	TempRetention time.Duration
 	// StateDir is the root for non-SQLite AO state. It defaults to ~/.ao. When
 	// AO_DATA_DIR is explicitly set, that override is also the state root so an
 	// isolated daemon never leaks account state into the default home.
@@ -266,6 +276,8 @@ func (c Config) Addr() string {
 //	AO_INSTALLER_SHUTDOWN_TIMEOUT harness installer drain (Go duration > 0, default systeminstall.DefaultShutdownTimeout)
 //	AO_RUN_FILE          running.json path   (default ~/.ao/running.json)
 //	AO_DATA_DIR          durable state dir   (default ~/.ao/data)
+//	AO_TEMP_ROOT         session temporary storage (default <AO state dir>/tmp)
+//	AO_TEMP_RETENTION    terminal session temp retention (default 7d)
 //	AO_AGENT             compatibility agent id (default claude-code)
 //	AO_APP_RUN_ID        desktop-app launch id, set by the Electron supervisor
 //	                     (default: a fresh id minted per daemon boot)
@@ -292,6 +304,7 @@ func Load() (Config, error) {
 		Port:            DefaultPort,
 		RequestTimeout:  DefaultRequestTimeout,
 		ShutdownTimeout: DefaultShutdownTimeout,
+		TempRetention:   DefaultTempRetention,
 		Agent:           DefaultAgent,
 		AllowedOrigins:  DefaultAllowedOrigins,
 		Telemetry: TelemetryConfig{
@@ -585,6 +598,20 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.StateDir, cfg.DataDir, cfg.RunFilePath = stateDir, dataDir, runFile
+	if raw := strings.TrimSpace(os.Getenv("AO_TEMP_ROOT")); raw != "" {
+		cfg.TempRoot, err = absOverride("AO_TEMP_ROOT", raw)
+		if err != nil {
+			return Config{}, err
+		}
+	} else {
+		cfg.TempRoot = filepath.Join(cfg.StateDir, "tmp")
+	}
+	if raw := strings.TrimSpace(os.Getenv("AO_TEMP_RETENTION")); raw != "" {
+		cfg.TempRetention, err = parsePositiveDuration("AO_TEMP_RETENTION", raw)
+		if err != nil {
+			return Config{}, err
+		}
+	}
 
 	return cfg, nil
 }

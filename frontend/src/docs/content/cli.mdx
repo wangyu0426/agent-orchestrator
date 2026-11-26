@@ -148,6 +148,7 @@ Orchestrator chooses a project in this order: `--project`, `AO_PROJECT_ID`, the 
 | `ao session rename <id> <name>` | Change its display name. The project orchestrator cannot be renamed. |
 | `ao session cleanup` | Reclaim eligible terminated workspaces; supports `--dry-run`. Workspaces already released are not listed again. |
 | `ao session archive-merged` | Preview eligible merged workers without changing them; add `--apply` to recheck and archive eligible sessions. |
+| `ao session temp-gc` | Preview or collect bounded AO-owned per-session temporary directories after retention and confirmed process exit. Use `--dry-run` first; `--yes` skips the confirmation prompt. |
 | `ao session delete <id>` | Permanently delete a terminated session and its AO history once its worktree is cleaned up; `--cleanup` cleans it up first, never forced. Branches, PRs and agent account usage totals are kept. |
 | `ao session claim-pr [<session-id>] <pr-ref>` | Attach an existing PR; omitting the session uses `AO_SESSION_ID`. `--review` claims it to review: automatic CI and review-comment fixing and native auto-review are turned off first, and it never takes the PR from another active session. `--review=false` turns fixing back on to take it over. |
 
@@ -264,6 +265,8 @@ Lets your other devices use this machine through its authenticated remote listen
 | `AO_PORT` | `3001` | Loopback daemon port. |
 | `AO_RUN_FILE` | `~/.ao/running.json` | Daemon identity and port handshake. |
 | `AO_DATA_DIR` | `~/.ao/data` | Daemon data directory. |
+| `AO_TEMP_ROOT` | `~/.ao/tmp` | AO-owned per-session temp root; defaults to `<AO_DATA_DIR>/tmp` when `AO_DATA_DIR` is customized. |
+| `AO_TEMP_RETENTION` | `168h` (7d) | Minimum post-exit retention before session temp collection; accepts Go duration syntax. |
 | `AO_REQUEST_TIMEOUT` | `60s` | REST request timeout. |
 | `AO_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown limit. It also scales how long a starting daemon waits for a previous daemon to release the data directory (9 × this + 18 s). |
 | `AO_SESSION_ID` | unset | Current session context for preview, browser, and in-session calls. |
@@ -278,3 +281,7 @@ or Codex to help draft a report, even with the daemon down. Files go under
 `$AO_DATA_DIR/triage` when set, otherwise `~/.ao/triage`. After the agent exits,
 review the text and answer `[y/N]` before posting. Use `--no-launch` to prepare
 files only, or `--agent claude|codex` to choose an installed agent.
+
+AO sets `TMPDIR`, `TMP`, and `TEMP` only in supported worker launch environments; it does not change the daemon's or user's global shell environment. Worker commands that hardcode `/tmp` are unaffected.
+
+Set `AO_TEMP_ROOT` to a local persistent filesystem if the home filesystem is not suitable. AO creates a missing root privately; an existing root must be private (mode `0700` on Unix), writable by the AO user, and must not itself be a symlink. Existing shared `/tmp` and legacy directories are not migrated or swept.

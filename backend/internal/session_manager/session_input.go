@@ -22,6 +22,7 @@ const (
 	agentOperationRestore           agentOperationKind = "restore"
 	agentOperationRetire            agentOperationKind = "retire"
 	agentOperationReconcile         agentOperationKind = "reconcile"
+	agentOperationTempGC            agentOperationKind = "temp_gc"
 	agentOperationInterfaceRecovery agentOperationKind = "interface_recovery"
 	agentOperationProviderSwitch    agentOperationKind = "provider_switch"
 )
@@ -156,6 +157,20 @@ func (m *Manager) beginAgentOperation(ctx context.Context, id domain.SessionID, 
 			"inputLeases", leases, "oldestLeaseHeldFor", heldFor, "error", ctx.Err())
 		return ctx.Err()
 	}
+}
+
+// tryBeginAgentOperation reserves a session only when it has no existing
+// operation or admitted input. GC uses the nonblocking form because it already
+// holds the temp-root lock and must not wait for an input operation that may be
+// trying to create or look up that same session's temp directory.
+func (m *Manager) tryBeginAgentOperation(id domain.SessionID, kind agentOperationKind) bool {
+	m.agentOpMu.Lock()
+	defer m.agentOpMu.Unlock()
+	if m.agentOperationActiveLocked(id) || m.inputLeases[id] > 0 {
+		return false
+	}
+	m.agentOperations[id] = kind
+	return true
 }
 
 // Some tests build a Manager without New, so the logger may be unset.
