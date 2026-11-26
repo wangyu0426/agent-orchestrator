@@ -65,11 +65,25 @@ type chatEnvironmentPreflighter interface {
 	PreflightChatWithEnv(context.Context, domain.AgentHarness, ports.PermissionMode, map[string]string) error
 }
 
+type chatSandboxPreflighter interface {
+	PreflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error
+}
+
 func (m *Manager) preflightChat(ctx context.Context, harness domain.AgentHarness, permissions ports.PermissionMode, env map[string]string) error {
 	if preflighter, ok := m.chat.(chatEnvironmentPreflighter); ok {
 		return preflighter.PreflightChatWithEnv(ctx, harness, permissions, env)
 	}
 	return m.chat.PreflightChat(ctx, harness, permissions)
+}
+
+func (m *Manager) preflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error {
+	if m.chat == nil {
+		return nil
+	}
+	if preflighter, ok := m.chat.(chatSandboxPreflighter); ok {
+		return preflighter.PreflightChatSandbox(ctx, harness, sandbox)
+	}
+	return nil
 }
 
 type chatBackgroundTaskRunner interface {
@@ -237,7 +251,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	defer releaseCodexAdmission()
 	agentConfig := in.cfg.AgentConfig
 	if !in.cfg.AgentConfigResolved {
-		agentConfig = applySpawnAgentConfig(effectiveAgentConfig(in.cfg.Harness, in.cfg.Kind, in.project.Config), in.cfg.AgentConfig)
+		agentConfig = applySpawnAgentConfig(effectiveAgentConfigWithDefaults(in.cfg.Harness, in.cfg.Kind, in.project.Config, m.projectDefaults), in.cfg.AgentConfig)
 	}
 
 	var diffBaseSHA, diffBaseRef string
@@ -301,6 +315,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		Model:                   agentConfig.Model,
 		Effort:                  agentConfig.Effort,
 		Permissions:             agentConfig.Permissions,
+		Sandbox:                 agentConfig.Sandbox,
 		SystemPrompt:            in.systemPrompt,
 		ForkHandoffNote:         forkHandoffNote,
 		ForkFirstStart:          in.cfg.Fork != nil && in.cfg.Fork.PrepareChat != nil,
@@ -323,6 +338,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		ControllerReady: func(started ChatStarted) (ChatControllerCommit, error) {
 			metadata := domain.SessionMetadata{
 				Permissions:       in.record.Metadata.Permissions,
+				Sandbox:           in.record.Metadata.Sandbox,
 				Branch:            in.workspace.Branch,
 				WorkspacePath:     in.workspace.Path,
 				WorkspaceRepoPath: in.workspace.RepoPath,
@@ -639,6 +655,7 @@ func (m *Manager) resumeChatController(
 		Model:                   agentConfig.Model,
 		Effort:                  agentConfig.Effort,
 		Permissions:             agentConfig.Permissions,
+		Sandbox:                 agentConfig.Sandbox,
 		SystemPrompt:            systemPrompt,
 		AdditionalDirectories:   additionalDirectories,
 		MCPServers:              m.aoMCPServers(ctx, rec.Harness, env),

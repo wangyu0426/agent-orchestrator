@@ -108,7 +108,7 @@ func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
 // GetLaunchCommand builds the argv to start an interactive Agy session.
 // Shape:
 //
-//	agy --add-dir <WorkspacePath> [--mode <mode> | --dangerously-skip-permissions] [--model <Model>] [--prompt-interactive <Prompt>]
+//	agy --add-dir <WorkspacePath> [--sandbox] [--mode <mode> | --dangerously-skip-permissions] [--model <Model>] [--prompt-interactive <Prompt>]
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	binary, err := p.agyBinary(ctx)
 	if err != nil {
@@ -121,15 +121,12 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		cmd = append(cmd, "--add-dir", cfg.WorkspacePath)
 	}
 
-	switch ports.NormalizePermissionMode(cfg.Permissions) {
-	case ports.PermissionModeAcceptEdits:
-		cmd = append(cmd, "--mode", "accept-edits")
-	case ports.PermissionModeAuto:
-		cmd = append(cmd, "--mode", "auto")
-	case ports.PermissionModeBypassPermissions:
-		cmd = append(cmd, "--dangerously-skip-permissions")
-	default:
-		// default emits no approval flag and lets Agy use its own config.
+	sandbox := cfg.Sandbox
+	if sandbox == "" {
+		sandbox = cfg.Config.Sandbox
+	}
+	if err := appendPolicyFlags(&cmd, cfg.Permissions, sandbox); err != nil {
+		return nil, err
 	}
 
 	appendModelFlag(&cmd, cfg.Config)
@@ -142,7 +139,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing Agy session:
-// `agy --add-dir <WorkspacePath> [--mode <mode> | --dangerously-skip-permissions] [--model <Model>] --conversation <agentSessionId>`.
+// `agy --add-dir <WorkspacePath> [--sandbox] [--mode <mode> | --dangerously-skip-permissions] [--model <Model>] --conversation <agentSessionId>`.
 func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig) (cmd []string, ok bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -164,21 +161,45 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		cmd = append(cmd, "--add-dir", cfg.Session.WorkspacePath)
 	}
 
-	switch ports.NormalizePermissionMode(cfg.Permissions) {
-	case ports.PermissionModeAcceptEdits:
-		cmd = append(cmd, "--mode", "accept-edits")
-	case ports.PermissionModeAuto:
-		cmd = append(cmd, "--mode", "auto")
-	case ports.PermissionModeBypassPermissions:
-		cmd = append(cmd, "--dangerously-skip-permissions")
-	default:
-		// default emits no approval flag and lets Agy use its own config.
+	sandbox := cfg.Sandbox
+	if sandbox == "" {
+		sandbox = cfg.Config.Sandbox
+	}
+	if err := appendPolicyFlags(&cmd, cfg.Permissions, sandbox); err != nil {
+		return nil, false, err
 	}
 
 	appendModelFlag(&cmd, cfg.Config)
 
 	cmd = append(cmd, "--conversation", agentSessionID)
 	return cmd, true, nil
+}
+
+// appendPolicyFlags emits AGY's sandbox and approval flags independently.
+// Sandbox and approval are orthogonal: e.g. SandboxModeRestricted with
+// PermissionModeBypassPermissions emits `--sandbox --dangerously-skip-permissions`
+// for unattended execution inside AGY's terminal sandbox.
+func appendPolicyFlags(cmd *[]string, permissions ports.PermissionMode, sandbox ports.SandboxMode) error {
+	switch ports.NormalizeSandboxMode(sandbox) {
+	case ports.SandboxModeRestricted:
+		*cmd = append(*cmd, "--sandbox")
+	case ports.SandboxModeDefault, ports.SandboxModeUnrestricted:
+		// default defers to Agy's baseline; unrestricted explicitly opts out of --sandbox.
+	default:
+		return fmt.Errorf("agy: unsupported sandbox mode %q (want default, restricted, or unrestricted)", sandbox)
+	}
+
+	switch ports.NormalizePermissionMode(permissions) {
+	case ports.PermissionModeAcceptEdits:
+		*cmd = append(*cmd, "--mode", "accept-edits")
+	case ports.PermissionModeAuto:
+		*cmd = append(*cmd, "--mode", "auto")
+	case ports.PermissionModeBypassPermissions:
+		*cmd = append(*cmd, "--dangerously-skip-permissions")
+	default:
+		// default emits no approval flag and lets Agy use its own config.
+	}
+	return nil
 }
 
 // NativeConversationExists reports whether Antigravity has a persisted

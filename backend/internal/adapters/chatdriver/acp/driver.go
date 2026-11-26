@@ -45,6 +45,7 @@ type LaunchConfig struct {
 	Env             map[string]string
 	Model           string
 	Permissions     ports.PermissionMode
+	Sandbox         ports.SandboxMode
 	SystemPrompt    string
 	DisableTools    bool
 	ReadOnly        bool // a review-owned session; see Config.ReadOnly
@@ -60,6 +61,9 @@ type Config struct {
 	Harness      domain.AgentHarness
 	Capabilities ports.ChatCapabilities
 	Probe        func(context.Context) error
+	// CheckSandbox optionally validates transport-specific sandbox compatibility
+	// during preflight before any session or worktree is allocated.
+	CheckSandbox func(context.Context, ports.SandboxMode) error
 	// InstallCheck optionally reports a missing chat adapter without starting
 	// anything. See ports.ChatInstallChecker.
 	InstallCheck func(context.Context) error
@@ -409,6 +413,14 @@ func (d *Driver) checkReadOnly(cfg LaunchConfig) error {
 	return nil
 }
 
+// CheckSandboxMode implements ports.ChatSandboxModeChecker.
+func (d *Driver) CheckSandboxMode(ctx context.Context, sandbox ports.SandboxMode) error {
+	if d.cfg.CheckSandbox == nil {
+		return nil
+	}
+	return d.cfg.CheckSandbox(ctx, sandbox)
+}
+
 // Probe checks the provider binding without creating an ACP session or worktree.
 func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	if d.cfg.Probe == nil || d.cfg.Launch == nil {
@@ -465,7 +477,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		Model: cfg.Model, Permissions: cfg.Permissions, Sandbox: cfg.Sandbox, SystemPrompt: cfg.SystemPrompt,
 		DisableTools:    cfg.DisableTools,
 		ReadOnly:        cfg.ReadOnly,
 		ProviderScopeID: cfg.ProviderScopeID,
@@ -636,7 +648,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env:   cfg.Env,
-		Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		Model: cfg.Model, Permissions: cfg.Permissions, Sandbox: cfg.Sandbox, SystemPrompt: cfg.SystemPrompt,
 		ReadOnly:        cfg.ReadOnly,
 		ProviderScopeID: cfg.ProviderScopeID,
 		ReconnectOnly:   cfg.ReconnectOnly,

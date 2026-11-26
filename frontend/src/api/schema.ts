@@ -5397,6 +5397,7 @@ export interface components {
             mode?: string;
             model?: string;
             permissions?: string;
+            sandbox?: string;
         };
         AgentInfo: {
             /**

@@ -835,6 +835,7 @@ type LaunchConfig struct {
 	IssueID     string
 	Kind        domain.SessionKind
 	Permissions PermissionMode
+	Sandbox     SandboxMode
 	Prompt      string
 	SessionID   string
 	// NativeSessionID optionally asks an adapter that supports caller-assigned
@@ -885,6 +886,7 @@ type RestoreConfig struct {
 	DataDir         string
 	Kind            domain.SessionKind
 	Permissions     PermissionMode
+	Sandbox         SandboxMode
 	AllowedTools    []string
 	DisallowedTools []string
 	Session         SessionRef
@@ -951,6 +953,28 @@ func NormalizePermissionMode(mode PermissionMode) PermissionMode {
 	default:
 		return PermissionModeDefault
 	}
+}
+
+// SandboxMode controls the execution sandbox/access policy independently from
+// PermissionMode. It is a type alias for domain.SandboxMode.
+type SandboxMode = domain.SandboxMode
+
+// The sandbox modes adapters map onto their agent's native sandbox flags.
+// These re-export the domain constants so adapter code can refer to ports.SandboxMode*.
+const (
+	SandboxModeDefault      = domain.SandboxModeDefault
+	SandboxModeRestricted   = domain.SandboxModeRestricted
+	SandboxModeUnrestricted = domain.SandboxModeUnrestricted
+)
+
+// NormalizeSandboxMode collapses an empty mode to SandboxModeDefault while
+// preserving known modes unchanged. Unrecognized non-empty values are returned
+// as-is so adapters can fail closed on unsupported sandbox policies.
+func NormalizeSandboxMode(mode SandboxMode) SandboxMode {
+	if mode == "" {
+		return SandboxModeDefault
+	}
+	return mode
 }
 
 // PromptDeliveryStrategy describes how AO should deliver the initial prompt.

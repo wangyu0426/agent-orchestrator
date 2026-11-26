@@ -877,6 +877,7 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 			Model:                  cfg.Model,
 			Effort:                 cfg.Effort,
 			Permissions:            cfg.Permissions,
+			Sandbox:                cfg.Sandbox,
 			ReadOnly:               cfg.ReadOnly,
 			SystemPrompt:           providerSystemPrompt,
 			ProviderScopeID:        providerScopeID,
@@ -895,6 +896,7 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 			Model:                 cfg.Model,
 			Effort:                cfg.Effort,
 			Permissions:           cfg.Permissions,
+			Sandbox:               cfg.Sandbox,
 			ReadOnly:              cfg.ReadOnly,
 			SystemPrompt:          providerSystemPrompt,
 			ProviderScopeID:       providerScopeID,
@@ -2391,6 +2393,27 @@ func (f SnapshotPageReaderFunc) LoadConversationSnapshotPage(
 // probing the local install. Use it to decide whether Chat is even offerable.
 func (s *Service) SupportsChat(harness domain.AgentHarness) bool {
 	return s.drivers.SupportsChat(harness)
+}
+
+// PreflightChatSandbox validates transport-specific sandbox compatibility for
+// harness before any session or worktree is allocated.
+func (s *Service) PreflightChatSandbox(ctx context.Context, harness domain.AgentHarness, sandbox ports.SandboxMode) error {
+	norm := ports.NormalizeSandboxMode(sandbox)
+	if !norm.Valid() {
+		return fmt.Errorf("%w: unsupported sandbox mode %q", ports.ErrChatDriverIncompatible, sandbox)
+	}
+	driver, err := s.drivers.Driver(harness)
+	if err != nil {
+		return err
+	}
+	checker, ok := driver.(ports.ChatSandboxModeChecker)
+	if !ok {
+		if norm != ports.SandboxModeDefault {
+			return fmt.Errorf("%w: harness %q does not support explicit sandbox mode %q", ports.ErrChatDriverIncompatible, harness, sandbox)
+		}
+		return nil
+	}
+	return checker.CheckSandboxMode(ctx, sandbox)
 }
 
 // PreflightChat reports whether a harness can start in chat mode right now.

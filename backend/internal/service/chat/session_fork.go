@@ -64,7 +64,7 @@ func (s *Service) SessionForkSource(ctx context.Context, rec domain.SessionRecor
 	anyTurn := forksOlderTurns(rec.Harness)
 	plan := sessionForkPlan{
 		driver: driver, sourceProviderID: providerID, sourceWorkspace: rec.Metadata.WorkspacePath,
-		model: rec.Metadata.Model, effort: rec.Metadata.Effort, permissions: rec.Metadata.Permissions,
+		model: rec.Metadata.Model, effort: rec.Metadata.Effort, permissions: rec.Metadata.Permissions, sandbox: rec.Metadata.Sandbox,
 	}
 	contextMode := domain.ForkContextNativeCurrent
 	if mode == forkIntoHost && rec.Harness == domain.HarnessCodex {
@@ -268,6 +268,7 @@ type sessionForkPlan struct {
 	reader         SnapshotReader
 	model, effort  string
 	permissions    ports.PermissionMode
+	sandbox        ports.SandboxMode
 }
 
 // prepare makes the agent's native copy of the conversation for the fork's
@@ -278,7 +279,7 @@ func (p sessionForkPlan) prepare(ctx context.Context, target ports.ForkTarget) (
 		// the fork's own controller.
 		SessionID: domain.SessionID("fork-" + string(target.SessionID)),
 		DataDir:   target.DataDir, WorkspacePath: target.WorkspacePath, Env: target.Env,
-		Model: p.model, Effort: p.effort, Permissions: p.permissions,
+		Model: p.model, Effort: p.effort, Permissions: p.permissions, Sandbox: p.sandbox,
 	}
 	if forker, ok := p.driver.(ports.ChatWorkspaceForker); ok {
 		upTo := p.upToMessage

@@ -1236,9 +1236,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	// override) and validate the model before any durable state is created. A
 	// model the harness cannot honor should not leave a seed row behind.
 	explicitModel := cfg.AgentConfig.Model != ""
-	agentConfig := applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config), cfg.AgentConfig)
+	agentConfig := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project.Config, m.projectDefaults), cfg.AgentConfig)
 	if err := validateSpawnModel(cfg.Harness, agentConfig.Model); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %s", ErrUnsupportedModel, err.Error())
+	}
+	if err := validateSpawnSandbox(cfg.Harness, agentConfig.Sandbox); err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
 	}
 	// Resolve the controller mode here, before anything durable is created, for
 	// the same reason an unknown harness is rejected above: an explicit Chat
@@ -1252,7 +1255,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	NoteSpawnLaunch(ctx, mode, false)
 	if mode == domain.SessionModeChat && m.chat != nil && cfg.AgentConfig.Permissions == "" &&
-		effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config).Permissions == "" {
+		effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project.Config, m.projectDefaults).Permissions == "" {
 		// Auto is AO's generic default, not a provider capability. An agent
 		// with no alternate modes keeps its native approval behavior. Never
 		// select bypass implicitly for agents without an approval channel.
@@ -1284,7 +1287,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 					return domain.SessionRecord{}, 0, 0, pauseErr
 				}
 			}
-		} else if err := m.preflightChat(ctx, cfg.Harness, agentConfig.Permissions, m.chatPreflightEnv(cfg, project.Config.Env)); err != nil {
+		} else if err := func() error {
+			if err := m.preflightChat(ctx, cfg.Harness, agentConfig.Permissions, m.chatPreflightEnv(cfg, project.Config.Env)); err != nil {
+				return err
+			}
+			return m.preflightChatSandbox(ctx, cfg.Harness, agentConfig.Sandbox)
+		}(); err != nil {
 			fallbackAllowed := errors.Is(err, ports.ErrChatUnsupported) ||
 				errors.Is(err, ports.ErrChatDriverUnavailable) ||
 				errors.Is(err, ports.ErrChatDriverIncompatible) ||
@@ -1744,6 +1752,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		IssueID:          string(cfg.IssueID),
 		Config:           adapterConfig,
 		Permissions:      adapterConfig.Permissions,
+		Sandbox:          adapterConfig.Sandbox,
 		Env:              env,
 	}
 	delivery, err := agent.GetPromptDeliveryStrategy(ctx, launchCfg)
@@ -1826,6 +1835,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 
 	metadata := domain.SessionMetadata{
 		Permissions:               rec.Metadata.Permissions,
+		Sandbox:                   rec.Metadata.Sandbox,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
@@ -1949,7 +1959,7 @@ func (m *Manager) resolveAgentConfig(ctx context.Context, cfg ports.SpawnConfig,
 }
 
 func (m *Manager) resolveAgentConfigOnce(ctx context.Context, cfg ports.SpawnConfig, project domain.ProjectConfig) (ports.AgentConfig, error) {
-	base := effectiveAgentConfig(cfg.Harness, cfg.Kind, project)
+	base := effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, project, m.projectDefaults)
 	requested := cfg.AgentConfig
 	resolved := applySpawnAgentConfig(base, requested)
 	modelChangedWithoutExplicitEffort := requested.Model != "" && requested.Model != base.Model &&
@@ -2700,6 +2710,10 @@ func roleConfigName(kind domain.SessionKind) string {
 // harness means "not pinned" and always matches. Permissions is
 // harness-neutral and is always inherited.
 func effectiveAgentConfig(harness domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig) ports.AgentConfig {
+	return effectiveAgentConfigWithDefaults(harness, kind, cfg, domain.ProjectDefaults{})
+}
+
+func effectiveAgentConfigWithDefaults(harness domain.AgentHarness, kind domain.SessionKind, cfg domain.ProjectConfig, defaults domain.ProjectDefaults) ports.AgentConfig {
 	merged := cfg.AgentConfig
 	role := roleOverride(kind, cfg)
 	override := role.AgentConfig
@@ -2715,6 +2729,17 @@ func effectiveAgentConfig(harness domain.AgentHarness, kind domain.SessionKind, 
 	}
 	if override.Permissions != "" {
 		merged.Permissions = override.Permissions
+	}
+	if override.Sandbox != "" {
+		merged.Sandbox = override.Sandbox
+	}
+	if kind == domain.KindWorker {
+		if merged.Permissions == "" && defaults.WorkerPermissions != "" {
+			merged.Permissions = defaults.WorkerPermissions
+		}
+		if harness == domain.HarnessAgy && merged.Sandbox == "" && defaults.WorkerSandbox != "" {
+			merged.Sandbox = defaults.WorkerSandbox
+		}
 	}
 	// A project may carry a model from its previous worker harness. Memcode
 	// accepts only its native catalog; leave an incompatible inherited choice
@@ -2755,6 +2780,14 @@ func restoredAgentConfig(rec domain.SessionRecord, cfg domain.ProjectConfig) por
 	if rec.Metadata.Permissions != "" {
 		merged.Permissions = rec.Metadata.Permissions
 	}
+	if rec.Metadata.Sandbox != "" {
+		merged.Sandbox = rec.Metadata.Sandbox
+	} else {
+		// Pre-migration sessions had no persisted sandbox policy; resolve to
+		// default rather than inheriting a newly configured project/role
+		// sandbox that the harness may not enforce.
+		merged.Sandbox = ports.SandboxModeDefault
+	}
 	return merged
 }
 
@@ -2784,10 +2817,29 @@ func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
 	if override.Permissions != "" {
 		base.Permissions = override.Permissions
 	}
+	if override.Sandbox != "" {
+		base.Sandbox = override.Sandbox
+	}
 	if base.Permissions == "" {
 		base.Permissions = ports.PermissionModeAuto
 	}
 	return base
+}
+
+// validateSpawnSandbox fails closed when an explicit non-default SandboxMode is
+// requested for a harness that does not enforce it, rather than silently
+// launching without the requested sandbox.
+func validateSpawnSandbox(harness domain.AgentHarness, sandbox domain.SandboxMode) error {
+	if sandbox == "" || sandbox == domain.SandboxModeDefault {
+		return nil
+	}
+	if !sandbox.Valid() {
+		return fmt.Errorf("unsupported sandbox mode %q (want default, restricted, or unrestricted)", sandbox)
+	}
+	if harness != domain.HarnessAgy {
+		return fmt.Errorf("harness %q does not support explicit sandbox mode %q", harness, sandbox)
+	}
+	return nil
 }
 
 // normalizeAgentConfigForHarness returns a copy of cfg with any effective
@@ -4362,6 +4414,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 	metadata := domain.SessionMetadata{
 		ImportSource:              rec.Metadata.ImportSource,
 		Permissions:               rec.Metadata.Permissions,
+		Sandbox:                   rec.Metadata.Sandbox,
 		Branch:                    ws.Branch,
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
@@ -6404,6 +6457,7 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 
 func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, defaults domain.ProjectDefaults, now time.Time) domain.SessionRecord {
 	autoReview, _ := projectConfig.EffectiveAutoReview(defaults)
+	resolvedPolicy := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(cfg.Harness, cfg.Kind, projectConfig, defaults), cfg.AgentConfig)
 	return domain.SessionRecord{
 		ProjectID:           cfg.ProjectID,
 		IssueID:             cfg.IssueID,
@@ -6420,7 +6474,7 @@ func seedRecordWithDefaults(cfg ports.SpawnConfig, projectConfig domain.ProjectC
 		// Resolved before this point and persisted here. There is no UPDATE
 		// statement that can change it afterwards.
 		Mode:               domain.NormalizeSessionMode(cfg.RequestedMode),
-		Metadata:           domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
+		Metadata:           domain.SessionMetadata{Permissions: resolvedPolicy.Permissions, Sandbox: ports.NormalizeSandboxMode(resolvedPolicy.Sandbox)},
 		RequestedOutput:    cfg.RequestedOutput,
 		OutputType:         domain.SessionOutputNone,
 		AutoReviewEnabled:  autoReview,
@@ -7939,7 +7993,7 @@ func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, wo
 		WorkspacePath: workspacePath,
 		Metadata:      metadata,
 	}
-	cfg := ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions, Env: env}
+	cfg := ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions, Sandbox: agentConfig.Sandbox, Env: env}
 	var cmd []string
 	var ok bool
 	var err error
@@ -8022,6 +8076,7 @@ func freshLaunchArgv(ctx context.Context, agent ports.Agent, id domain.SessionID
 		SystemPromptFile: systemPromptFile,
 		Config:           agentConfig,
 		Permissions:      agentConfig.Permissions,
+		Sandbox:          agentConfig.Sandbox,
 		NativeSessionID:  nativeSessionID,
 		Env:              env,
 	}

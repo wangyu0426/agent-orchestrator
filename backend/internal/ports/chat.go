@@ -333,6 +333,9 @@ type ChatStartConfig struct {
 	// Permissions is AO's existing per-session approval policy. Drivers map it
 	// onto their provider's native approval and sandbox settings.
 	Permissions PermissionMode
+	// Sandbox is AO's per-session sandbox/access policy, independent of
+	// Permissions. ReadOnly takes precedence over Sandbox for review sessions.
+	Sandbox SandboxMode
 	// ReadOnly requires a provider-enforced sandbox that cannot modify the
 	// workspace. It is used for review-owned conversations.
 	ReadOnly bool
@@ -384,6 +387,7 @@ type ChatResumeConfig struct {
 	// Effort is optional; empty keeps the provider conversation's current effort.
 	Effort      string
 	Permissions PermissionMode
+	Sandbox     SandboxMode
 	ReadOnly    bool
 	// SystemPrompt is recomputed by the session manager on restore and reapplied
 	// to the provider process. It is not persisted in the conversation transcript.
@@ -1200,6 +1204,13 @@ type ChatInstallChecker interface {
 // some AO permission modes, so a caller can pick one it accepts before starting.
 type ChatPermissionModeChecker interface {
 	SupportsPermissionMode(mode PermissionMode) bool
+}
+
+// ChatSandboxModeChecker is optionally implemented by chat drivers that enforce
+// transport-specific sandbox compatibility during preflight (for example, AGY
+// restricted sandbox requiring native `agy acp` rather than legacy `agy_acp_server`).
+type ChatSandboxModeChecker interface {
+	CheckSandboxMode(ctx context.Context, sandbox SandboxMode) error
 }
 
 // ChatDriver opens conversations for one harness.
