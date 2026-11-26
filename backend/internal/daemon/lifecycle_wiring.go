@@ -439,6 +439,10 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		}
 	}
 	reviewerChat, _ := chat.(reviewcore.ReviewerChatController)
+	var reviewerQuotaPrimary domain.ReviewerHarness
+	if cfg.ReviewerQuota != nil && cfg.ReviewerQuota.Primary != nil {
+		reviewerQuotaPrimary = domain.ReviewerHarness(cfg.ReviewerQuota.Primary.Harness)
+	}
 	reviewEngine := reviewcore.New(reviewcore.Deps{
 		// The manager's installer gate is bound after the installer is built.
 		HarnessUse: mgr,
@@ -451,7 +455,9 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 			reviewcore.WithAgentAuth(reviewerAgentAuth{readiness: agentReadiness}),
 			reviewcore.WithReviewerChat(reviewerChat)),
 
-		ChatRecoveryDone: reviewerRecoveryDone,
+		ChatRecoveryDone:     reviewerRecoveryDone,
+		ProjectDefaults:      cfg.ProjectDefaults,
+		ReviewerQuotaPrimary: reviewerQuotaPrimary,
 	})
 	reviewOpts := []reviewsvc.Option{
 		reviewsvc.WithTelemetry(telemetry),

@@ -5517,6 +5517,56 @@ paths:
       summary: Create a cue for a project
       tags:
       - cues
+  /api/v1/projects/bootstrap:
+    post:
+      operationId: bootstrapProject
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapProjectInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapProjectResult'
+          description: OK
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapProjectResult'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Clone or reuse a clean checkout of a git repository URL, register it
+        idempotently, and return effective policy and readiness
+      tags:
+      - projects
   /api/v1/projects/clone:
     post:
       operationId: cloneProject
@@ -17218,6 +17268,69 @@ components:
       - paused
       - networkOutcome
       type: object
+    BootstrapProjectInput:
+      properties:
+        config:
+          $ref: '#/components/schemas/ProjectConfig'
+        destinationParent:
+          type: string
+        name:
+          type:
+          - "null"
+          - string
+        projectId:
+          type:
+          - "null"
+          - string
+        remoteUrl:
+          minLength: 1
+          type: string
+      required:
+      - remoteUrl
+      type: object
+    BootstrapProjectResult:
+      properties:
+        action:
+          enum:
+          - cloned_and_registered
+          - reused_checkout_and_registered
+          - reused_project
+          type: string
+        effective:
+          $ref: '#/components/schemas/EffectiveProjectPolicy'
+        project:
+          $ref: '#/components/schemas/Project'
+        readiness:
+          $ref: '#/components/schemas/BootstrapReadiness'
+      required:
+      - action
+      - project
+      - effective
+      - readiness
+      type: object
+    BootstrapReadiness:
+      properties:
+        agentOk:
+          type: boolean
+        blockers:
+          items:
+            type: string
+          type: array
+        gitOk:
+          type: boolean
+        ready:
+          type: boolean
+        scmOk:
+          type: boolean
+        trackerOk:
+          type: boolean
+      required:
+      - ready
+      - gitOk
+      - scmOk
+      - trackerOk
+      - agentOk
+      type: object
     BrowserCommandRequest:
       properties:
         action:
@@ -20714,6 +20827,80 @@ components:
       required:
       - text
       type: object
+    EffectiveProjectPolicy:
+      properties:
+        autoReview:
+          type: boolean
+        autoReviewSource:
+          type: string
+        defaultBranch:
+          type: string
+        defaultBranchSource:
+          type: string
+        orchestratorAgent:
+          type: string
+        orchestratorAgentSource:
+          type: string
+        quotaRouting:
+          $ref: '#/components/schemas/EffectiveQuotaPolicy'
+        reviewers:
+          items:
+            $ref: '#/components/schemas/DomainReviewerConfig'
+          type: array
+        reviewersSource:
+          type: string
+        trackerIntake:
+          $ref: '#/components/schemas/EffectiveTrackerIntakePolicy'
+        workerAgent:
+          type: string
+        workerAgentSource:
+          type: string
+      required:
+      - defaultBranch
+      - defaultBranchSource
+      - workerAgentSource
+      - orchestratorAgentSource
+      - reviewersSource
+      - autoReview
+      - autoReviewSource
+      - trackerIntake
+      - quotaRouting
+      type: object
+    EffectiveQuotaPolicy:
+      properties:
+        orchestratorFailover:
+          type: boolean
+        quotumConfigured:
+          type: boolean
+        reviewerFailover:
+          type: boolean
+        workerFailover:
+          type: boolean
+      required:
+      - workerFailover
+      - reviewerFailover
+      - orchestratorFailover
+      - quotumConfigured
+      type: object
+    EffectiveTrackerIntakePolicy:
+      properties:
+        assignee:
+          type: string
+        daemonGateEnabled:
+          type: boolean
+        enabled:
+          type: boolean
+        provider:
+          type: string
+        repo:
+          type: string
+        source:
+          type: string
+      required:
+      - enabled
+      - daemonGateEnabled
+      - source
+      type: object
     EndpointsResponse:
       properties:
         endpoints:
@@ -22502,6 +22689,10 @@ components:
           type: string
         autoReview:
           type: boolean
+        autoReviewOverride:
+          type:
+          - "null"
+          - boolean
         canonicalRepoURL:
           type: string
         containerReap:
@@ -26114,6 +26305,8 @@ components:
       properties:
         assignee:
           type: string
+        disabled:
+          type: boolean
         enabled:
           type: boolean
         provider:

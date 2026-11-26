@@ -86,7 +86,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 	if policy == nil {
 		return quotaSelection{}, nil
 	}
-	harness := effectiveHarness("", cfg.Kind, project.Config)
+	harness := effectiveHarnessWithDefaults("", cfg.Kind, project.Config, m.projectDefaults)
 	base := effectiveAgentConfig(harness, cfg.Kind, project.Config)
 	primary := workerquota.Target{Harness: harness, Model: base.Model, Effort: base.Effort}
 	targets := policy.Targets(primary)

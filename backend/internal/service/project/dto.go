@@ -123,3 +123,71 @@ type SetPermissionsInput struct {
 	SourceHarness domain.AgentHarness   `json:"sourceHarness,omitempty"`
 	Permissions   domain.PermissionMode `json:"permissions" enum:"default,accept-edits,auto,bypass-permissions"`
 }
+
+// BootstrapInput is the body shape for POST /api/v1/projects/bootstrap.
+// It takes a remote Git repository URL from clone (or clean checkout reuse)
+// through registration and returns a truthful preflight/readiness report.
+type BootstrapInput struct {
+	RemoteURL         string                `json:"remoteUrl" minLength:"1"`
+	DestinationParent string                `json:"destinationParent,omitempty"`
+	ProjectID         *string               `json:"projectId,omitempty"`
+	Name              *string               `json:"name,omitempty"`
+	Config            *domain.ProjectConfig `json:"config,omitempty"`
+}
+
+// EffectiveTrackerIntakePolicy reports the resolved tracker-intake settings and
+// their precedence source.
+type EffectiveTrackerIntakePolicy struct {
+	Enabled           bool                   `json:"enabled"`
+	DaemonGateEnabled bool                   `json:"daemonGateEnabled"`
+	Provider          domain.TrackerProvider `json:"provider,omitempty"`
+	Repo              string                 `json:"repo,omitempty"`
+	Assignee          string                 `json:"assignee,omitempty"`
+	Source            string                 `json:"source"`
+}
+
+// EffectiveQuotaPolicy summarizes daemon-wide quota routing without exposing
+// credentials, tokens, or account bindings.
+type EffectiveQuotaPolicy struct {
+	WorkerFailover       bool `json:"workerFailover"`
+	ReviewerFailover     bool `json:"reviewerFailover"`
+	OrchestratorFailover bool `json:"orchestratorFailover"`
+	QuotumConfigured     bool `json:"quotumConfigured"`
+}
+
+// EffectiveProjectPolicy reports the resolved settings for a bootstrapped
+// project and whether each came from project config, quota primary, global
+// daemon defaults, or fallback defaults.
+type EffectiveProjectPolicy struct {
+	DefaultBranch           string                       `json:"defaultBranch"`
+	DefaultBranchSource     string                       `json:"defaultBranchSource"`
+	WorkerAgent             domain.AgentHarness          `json:"workerAgent,omitempty"`
+	WorkerAgentSource       string                       `json:"workerAgentSource"`
+	OrchestratorAgent       domain.AgentHarness          `json:"orchestratorAgent,omitempty"`
+	OrchestratorAgentSource string                       `json:"orchestratorAgentSource"`
+	Reviewers               []domain.ReviewerConfig      `json:"reviewers,omitempty"`
+	ReviewersSource         string                       `json:"reviewersSource"`
+	AutoReview              bool                         `json:"autoReview"`
+	AutoReviewSource        string                       `json:"autoReviewSource"`
+	TrackerIntake           EffectiveTrackerIntakePolicy `json:"trackerIntake"`
+	QuotaRouting            EffectiveQuotaPolicy         `json:"quotaRouting"`
+}
+
+// BootstrapReadiness reports truthful readiness checks and actionable blockers
+// for a bootstrapped project. Never contains secrets.
+type BootstrapReadiness struct {
+	Ready     bool     `json:"ready"`
+	GitOK     bool     `json:"gitOk"`
+	SCMOK     bool     `json:"scmOk"`
+	TrackerOK bool     `json:"trackerOk"`
+	AgentOK   bool     `json:"agentOk"`
+	Blockers  []string `json:"blockers,omitempty"`
+}
+
+// BootstrapResult is the response shape for POST /api/v1/projects/bootstrap.
+type BootstrapResult struct {
+	Action    string                 `json:"action" enum:"cloned_and_registered,reused_checkout_and_registered,reused_project"`
+	Project   Project                `json:"project"`
+	Effective EffectiveProjectPolicy `json:"effective"`
+	Readiness BootstrapReadiness     `json:"readiness"`
+}

@@ -75,28 +75,30 @@ func (s SingleTrackerResolver) Resolve(provider domain.TrackerProvider) (ports.T
 
 // Config holds optional observer knobs. Zero values use production defaults.
 type Config struct {
-	Tick           time.Duration
-	FailureBackoff time.Duration
-	Clock          func() time.Time
-	Logger         *slog.Logger
+	Tick            time.Duration
+	FailureBackoff  time.Duration
+	Clock           func() time.Time
+	Logger          *slog.Logger
+	ProjectDefaults domain.ProjectDefaults
 }
 
 // Observer polls configured projects and starts sessions for eligible issues.
 type Observer struct {
-	pollMu         sync.Mutex
-	resolver       TrackerResolver
-	store          Store
-	spawner        Spawner
-	tick           time.Duration
-	failureBackoff time.Duration
-	clock          func() time.Time
-	logger         *slog.Logger
-	backoffUntil   map[string]time.Time
+	pollMu          sync.Mutex
+	resolver        TrackerResolver
+	store           Store
+	spawner         Spawner
+	tick            time.Duration
+	projectDefaults domain.ProjectDefaults
+	failureBackoff  time.Duration
+	clock           func() time.Time
+	logger          *slog.Logger
+	backoffUntil    map[string]time.Time
 }
 
 // New constructs an Observer with safe defaults.
 func New(resolver TrackerResolver, store Store, spawner Spawner, cfg Config) *Observer {
-	o := &Observer{resolver: resolver, store: store, spawner: spawner, tick: cfg.Tick, failureBackoff: cfg.FailureBackoff, clock: cfg.Clock, logger: cfg.Logger, backoffUntil: map[string]time.Time{}}
+	o := &Observer{resolver: resolver, store: store, spawner: spawner, tick: cfg.Tick, failureBackoff: cfg.FailureBackoff, clock: cfg.Clock, logger: cfg.Logger, projectDefaults: cfg.ProjectDefaults, backoffUntil: map[string]time.Time{}}
 	if o.tick <= 0 {
 		o.tick = DefaultTickInterval
 	}
@@ -140,7 +142,7 @@ func (o *Observer) Poll(ctx context.Context) error {
 	}
 	enabledProjects := make([]domain.ProjectRecord, 0, len(projects))
 	for _, project := range projects {
-		if project.Config.TrackerIntake.Enabled {
+		if eff, _ := project.Config.EffectiveTrackerIntake(o.projectDefaults); eff.Enabled {
 			enabledProjects = append(enabledProjects, project)
 		}
 	}
@@ -172,7 +174,8 @@ func (o *Observer) Poll(ctx context.Context) error {
 // pollProject returns failed=true for conditions that should be retried after a
 // backoff window rather than logged on every poll.
 func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord, seen map[domain.IssueID]bool) (failed bool) {
-	cfg := project.Config.TrackerIntake.WithDefaults()
+	eff, _ := project.Config.EffectiveTrackerIntake(o.projectDefaults)
+	cfg := eff.WithDefaults()
 	if !cfg.Enabled {
 		return false
 	}

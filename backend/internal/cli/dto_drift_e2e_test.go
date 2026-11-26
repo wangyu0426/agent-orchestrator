@@ -150,6 +150,10 @@ func (f *fakeProjectManager) Clone(_ context.Context, in projectsvc.CloneInput) 
 	return projectsvc.Project{ID: "cloned", Repo: in.RemoteURL}, nil
 }
 
+func (f *fakeProjectManager) Bootstrap(_ context.Context, in projectsvc.BootstrapInput) (projectsvc.BootstrapResult, error) {
+	return projectsvc.BootstrapResult{Action: projectsvc.BootstrapActionClonedAndRegistered, Project: projectsvc.Project{ID: "bootstrapped", Repo: in.RemoteURL}}, nil
+}
+
 func (f *fakeProjectManager) PrepareClone(_ context.Context, in projectsvc.CloneInput) (projectsvc.ClonePreparationResult, error) {
 	return projectsvc.ClonePreparationResult{Path: "/tmp/" + in.RemoteURL, RemoteURL: in.RemoteURL}, nil
 }

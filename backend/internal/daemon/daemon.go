@@ -823,6 +823,9 @@ func Run(buildVersion string) (retErr error) {
 	// servers isn't clobbered. See preview_wiring.go (issue #4500).
 	wireManagedPreviewExit(managedPreview, sessionSvc, log)
 	sessMgr.SetTerminalInputGate(termMgr)
+	if pd, ok := sessMgr.(interface{ SetProjectDefaults(domain.ProjectDefaults) }); ok {
+		pd.SetProjectDefaults(cfg.ProjectDefaults)
+	}
 	sessionImportSvc := sessionimport.New(store, cfg.DataDir, chatDrivers.SupportsChat)
 	sessMgr.SetImportArchiveRefresher(sessionImportSvc)
 	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
@@ -837,7 +840,21 @@ func Run(buildVersion string) (retErr error) {
 	if githubRepos != nil {
 		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
 	}
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{
+		Store:             store,
+		Sessions:          sessionSvc,
+		DefaultHarness:    domain.AgentHarness(cfg.Agent),
+		Telemetry:         telemetrySink,
+		Milestones:        installMilestones(cfg),
+		Logger:            log,
+		GitHubRepos:       githubRepos,
+		ProjectDefaults:   cfg.ProjectDefaults,
+		TrackerIntakeGate: cfg.TrackerIntake,
+		WorkerQuota:       cfg.WorkerQuota,
+		ReviewerQuota:     cfg.ReviewerQuota,
+		OrchestratorQuota: cfg.OrchestratorQuota,
+		Tracker:           tracker,
+	})
 	go projectSvc.WarmCanonicalRepos(ctx)
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
@@ -1143,9 +1160,10 @@ func Run(buildVersion string) (retErr error) {
 	automationSvc, automationDone := startAutomations(ctx, store, sessionSvc, telemetrySink, log)
 	lcStack.automationDone = automationDone
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{
-		Logger:        log,
-		Quota:         cfg.ReviewerQuota,
-		QuotaFailures: store.WorkerQuotaFailures,
+		Logger:          log,
+		Quota:           cfg.ReviewerQuota,
+		QuotaFailures:   store.WorkerQuotaFailures,
+		ProjectDefaults: cfg.ProjectDefaults,
 		RouteReady: func(ctx context.Context, target workerquota.Target) bool {
 			needsChat := target.Mode == domain.SessionModeChat ||
 				(target.Mode == "" && (target.Harness.ChatOnly() || (chatSvc != nil && chatSvc.SupportsChat(target.Harness))))

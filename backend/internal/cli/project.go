@@ -17,11 +17,20 @@ import (
 
 type projectAddOptions struct {
 	path              string
+	destination       string
 	id                string
 	name              string
+	branch            string
 	workerAgent       string
 	orchestratorAgent string
+	autoReview        bool
+	noAutoReview      bool
+	trackerIntake     bool
+	noTrackerIntake   bool
+	trackerAssignee   string
+	reviewers         []string
 	asWorkspace       bool
+	json              bool
 }
 
 type projectListOptions struct {
@@ -91,6 +100,7 @@ type roleOverride struct {
 // trackerIntakeConfig mirrors domain.TrackerIntakeConfig.
 type trackerIntakeConfig struct {
 	Enabled  bool   `json:"enabled,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Repo     string `json:"repo,omitempty"`
 	Assignee string `json:"assignee,omitempty"`
@@ -128,6 +138,7 @@ type projectConfig struct {
 	Orchestrator          roleOverride         `json:"orchestrator,omitempty"`
 	TrackerIntake         trackerIntakeConfig  `json:"trackerIntake,omitempty"`
 	AutoReview            bool                 `json:"autoReview,omitempty"`
+	AutoReviewOverride    *bool                `json:"autoReviewOverride,omitempty"`
 	TerminateOnPRMerge    *bool                `json:"terminateOnPrMerge,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
@@ -179,6 +190,61 @@ type projectGetResult struct {
 
 type projectResult struct {
 	Project projectDetails `json:"project"`
+}
+
+type bootstrapProjectRequest struct {
+	RemoteURL         string         `json:"remoteUrl"`
+	DestinationParent string         `json:"destinationParent,omitempty"`
+	ProjectID         *string        `json:"projectId,omitempty"`
+	Name              *string        `json:"name,omitempty"`
+	Config            *projectConfig `json:"config,omitempty"`
+}
+
+type effectiveTrackerIntakePolicy struct {
+	Enabled           bool   `json:"enabled"`
+	DaemonGateEnabled bool   `json:"daemonGateEnabled"`
+	Provider          string `json:"provider,omitempty"`
+	Repo              string `json:"repo,omitempty"`
+	Assignee          string `json:"assignee,omitempty"`
+	Source            string `json:"source"`
+}
+
+type effectiveQuotaPolicy struct {
+	WorkerFailover       bool `json:"workerFailover"`
+	ReviewerFailover     bool `json:"reviewerFailover"`
+	OrchestratorFailover bool `json:"orchestratorFailover"`
+	QuotumConfigured     bool `json:"quotumConfigured"`
+}
+
+type effectiveProjectPolicy struct {
+	DefaultBranch           string                       `json:"defaultBranch"`
+	DefaultBranchSource     string                       `json:"defaultBranchSource"`
+	WorkerAgent             string                       `json:"workerAgent,omitempty"`
+	WorkerAgentSource       string                       `json:"workerAgentSource"`
+	OrchestratorAgent       string                       `json:"orchestratorAgent,omitempty"`
+	OrchestratorAgentSource string                       `json:"orchestratorAgentSource"`
+	Reviewers               []reviewerConfig             `json:"reviewers,omitempty"`
+	ReviewersSource         string                       `json:"reviewersSource"`
+	AutoReview              bool                         `json:"autoReview"`
+	AutoReviewSource        string                       `json:"autoReviewSource"`
+	TrackerIntake           effectiveTrackerIntakePolicy `json:"trackerIntake"`
+	QuotaRouting            effectiveQuotaPolicy         `json:"quotaRouting"`
+}
+
+type bootstrapReadiness struct {
+	Ready     bool     `json:"ready"`
+	GitOK     bool     `json:"gitOk"`
+	SCMOK     bool     `json:"scmOk"`
+	TrackerOK bool     `json:"trackerOk"`
+	AgentOK   bool     `json:"agentOk"`
+	Blockers  []string `json:"blockers,omitempty"`
+}
+
+type bootstrapProjectResult struct {
+	Action    string                 `json:"action"`
+	Project   projectDetails         `json:"project"`
+	Effective effectiveProjectPolicy `json:"effective"`
+	Readiness bootstrapReadiness     `json:"readiness"`
 }
 
 type projectRemoveResult struct {
@@ -259,46 +325,194 @@ func newProjectGetCommand(ctx *commandContext) *cobra.Command {
 func newProjectAddCommand(ctx *commandContext) *cobra.Command {
 	var opts projectAddOptions
 	cmd := &cobra.Command{
-		Use:   "add",
-		Short: "Register a local git repo as a project",
-		Long: "Register a local git repo as a project so sessions can be spawned in it.\n\n" +
-			"The path must be an existing git repository on disk. With --as-workspace, " +
+		Use:   "add [repo-url]",
+		Short: "Register a local git repo or bootstrap a remote repository URL",
+		Long: "Register a local git repo (`ao project add --path /abs/path`) or bootstrap a remote repository URL (`ao project add <repo-url>`).\n\n" +
+			"With a repository URL, the daemon clones into AO_PROJECTS_ROOT (or --destination), " +
+			"reuses a clean matching checkout on retry, inherits daemon-wide defaults, and prints " +
+			"the effective policy and readiness preflight.\n\n" +
+			"With --path, the path must be an existing git repository on disk. With --as-workspace, " +
 			"the path may be a parent folder containing direct child git repositories; " +
 			"Orchestrator initializes/adopts the parent as the root repo and gitignores children.",
-		Args: noArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if opts.path == "" {
-				return usageError{fmt.Errorf("--path is required")}
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return usageError{fmt.Errorf("accepts at most 1 arg(s), received %d", len(args))}
 			}
-			req := addProjectRequest{Path: opts.path, AsWorkspace: opts.asWorkspace}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			remoteURL := ""
+			if len(args) == 1 {
+				remoteURL = strings.TrimSpace(args[0])
+			}
+			if remoteURL != "" && opts.path != "" {
+				return usageError{errors.New("cannot specify both <repo-url> and --path")}
+			}
+			if remoteURL == "" && opts.path == "" {
+				return usageError{fmt.Errorf("--path is required (or pass <repo-url>)")}
+			}
+			if opts.autoReview && opts.noAutoReview {
+				return usageError{errors.New("cannot specify both --auto-review and --no-auto-review")}
+			}
+			if opts.trackerIntake && opts.noTrackerIntake {
+				return usageError{errors.New("cannot specify both --tracker-intake and --no-tracker-intake")}
+			}
+
+			var cfg *projectConfig
+			ensureCfg := func() *projectConfig {
+				if cfg == nil {
+					cfg = &projectConfig{}
+				}
+				return cfg
+			}
+			if opts.branch != "" {
+				ensureCfg().DefaultBranch = opts.branch
+			}
+			if opts.workerAgent != "" {
+				ensureCfg().Worker.Agent = opts.workerAgent
+			}
+			if opts.orchestratorAgent != "" {
+				ensureCfg().Orchestrator.Agent = opts.orchestratorAgent
+			}
+			if opts.autoReview {
+				v := true
+				ensureCfg().AutoReview = true
+				ensureCfg().AutoReviewOverride = &v
+			} else if opts.noAutoReview {
+				v := false
+				ensureCfg().AutoReviewOverride = &v
+			}
+			if opts.trackerIntake {
+				ensureCfg().TrackerIntake.Enabled = true
+			} else if opts.noTrackerIntake {
+				ensureCfg().TrackerIntake.Disabled = true
+			}
+			if opts.trackerAssignee != "" {
+				ensureCfg().TrackerIntake.Assignee = opts.trackerAssignee
+			}
+			if len(opts.reviewers) > 0 {
+				revs := make([]reviewerConfig, 0, len(opts.reviewers))
+				for _, r := range opts.reviewers {
+					r = strings.TrimSpace(r)
+					if r != "" {
+						revs = append(revs, reviewerConfig{Harness: r})
+					}
+				}
+				if len(revs) > 0 {
+					ensureCfg().Reviewers = revs
+				}
+			}
+
+			if remoteURL != "" {
+				if opts.asWorkspace {
+					return usageError{errors.New("--as-workspace is only supported with --path")}
+				}
+				req := bootstrapProjectRequest{
+					RemoteURL:         remoteURL,
+					DestinationParent: opts.destination,
+					Config:            cfg,
+				}
+				if opts.id != "" {
+					req.ProjectID = &opts.id
+				}
+				if opts.name != "" {
+					req.Name = &opts.name
+				}
+				var res bootstrapProjectResult
+				if err := ctx.postJSON(cmd.Context(), "projects/bootstrap", req, &res); err != nil {
+					return err
+				}
+				if opts.json {
+					return writeJSON(cmd.OutOrStdout(), res)
+				}
+				return writeBootstrapResult(cmd, res)
+			}
+
+			req := addProjectRequest{Path: opts.path, AsWorkspace: opts.asWorkspace, Config: cfg}
 			if opts.id != "" {
 				req.ProjectID = &opts.id
 			}
 			if opts.name != "" {
 				req.Name = &opts.name
 			}
-			if opts.workerAgent != "" || opts.orchestratorAgent != "" {
-				req.Config = &projectConfig{
-					Worker:       roleOverride{Agent: opts.workerAgent},
-					Orchestrator: roleOverride{Agent: opts.orchestratorAgent},
-				}
-			}
 			var res projectResult
 			if err := ctx.postJSON(cmd.Context(), "projects", req, &res); err != nil {
 				return err
+			}
+			if opts.json {
+				return writeJSON(cmd.OutOrStdout(), res)
 			}
 			_, err := fmt.Fprintf(cmd.OutOrStdout(), "registered project %s at %s\n", res.Project.ID, res.Project.Path)
 			return err
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&opts.path, "path", "", "Absolute path to the local git repo (required)")
-	f.StringVar(&opts.id, "id", "", "Project id (default: derived by the daemon from the path)")
+	f.StringVar(&opts.path, "path", "", "Absolute path to an existing local git repo")
+	f.StringVar(&opts.destination, "destination", "", "Parent directory for cloning <repo-url> (default: daemon AO_PROJECTS_ROOT)")
+	f.StringVar(&opts.id, "id", "", "Project id (default: derived by the daemon)")
 	f.StringVar(&opts.name, "name", "", "Display name")
-	f.StringVar(&opts.workerAgent, "worker-agent", "", "Default worker session agent")
-	f.StringVar(&opts.orchestratorAgent, "orchestrator-agent", "", "Default orchestrator session agent")
+	f.StringVar(&opts.branch, "branch", "", "Default base branch override (default: inferred from Git remote)")
+	f.StringVar(&opts.workerAgent, "worker-agent", "", "Default worker session agent override")
+	f.StringVar(&opts.orchestratorAgent, "orchestrator-agent", "", "Default orchestrator session agent override")
+	f.BoolVar(&opts.autoReview, "auto-review", false, "Explicitly enable automatic PR review for this project")
+	f.BoolVar(&opts.noAutoReview, "no-auto-review", false, "Explicitly disable automatic PR review for this project")
+	f.BoolVar(&opts.trackerIntake, "tracker-intake", false, "Explicitly enable tracker intake for this project")
+	f.BoolVar(&opts.noTrackerIntake, "no-tracker-intake", false, "Explicitly disable tracker intake for this project")
+	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "Tracker intake assignee rule override")
+	f.StringSliceVar(&opts.reviewers, "reviewer", nil, "Reviewer harness override (repeatable)")
 	f.BoolVar(&opts.asWorkspace, "as-workspace", false, "Register a parent folder as a workspace project (root-as-repo plus direct child repos)")
+	f.BoolVar(&opts.json, "json", false, "Output result as JSON")
 	return cmd
+}
+
+func writeBootstrapResult(cmd *cobra.Command, res bootstrapProjectResult) error {
+	out := cmd.OutOrStdout()
+	if _, err := fmt.Fprintf(out, "bootstrapped project %s (%s)\n", res.Project.ID, res.Action); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  path:          %s\n", res.Project.Path); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  repo:          %s\n", res.Project.Repo); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  branch:        %s (%s)\n", res.Effective.DefaultBranch, res.Effective.DefaultBranchSource); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  worker:        %s (%s)\n", res.Effective.WorkerAgent, res.Effective.WorkerAgentSource); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  auto-review:   %v (%s)\n", res.Effective.AutoReview, res.Effective.AutoReviewSource); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  tracker:       enabled=%v daemon-gate=%v provider=%s assignee=%s (%s)\n",
+		res.Effective.TrackerIntake.Enabled,
+		res.Effective.TrackerIntake.DaemonGateEnabled,
+		res.Effective.TrackerIntake.Provider,
+		res.Effective.TrackerIntake.Assignee,
+		res.Effective.TrackerIntake.Source,
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  quota-routing: worker=%v reviewer=%v orchestrator=%v quotum=%v\n",
+		res.Effective.QuotaRouting.WorkerFailover,
+		res.Effective.QuotaRouting.ReviewerFailover,
+		res.Effective.QuotaRouting.OrchestratorFailover,
+		res.Effective.QuotaRouting.QuotumConfigured,
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  readiness:     ready=%v (git=%v scm=%v tracker=%v agent=%v)\n",
+		res.Readiness.Ready, res.Readiness.GitOK, res.Readiness.SCMOK, res.Readiness.TrackerOK, res.Readiness.AgentOK,
+	); err != nil {
+		return err
+	}
+	for _, b := range res.Readiness.Blockers {
+		if _, err := fmt.Fprintf(out, "  blocker:       %s\n", b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {

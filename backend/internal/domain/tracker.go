@@ -101,6 +101,9 @@ type ListFilter struct {
 // cannot accidentally drain an entire issue backlog.
 type TrackerIntakeConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
+	// Disabled explicitly opts this project out of tracker intake even when a
+	// daemon-wide default enables intake for new projects.
+	Disabled bool `json:"disabled,omitempty"`
 	// Provider defaults to github when Enabled is true. Supported values:
 	// "github" and "gitlab".
 	Provider TrackerProvider `json:"provider,omitempty" enum:"github,gitlab"`
@@ -152,7 +155,10 @@ func InferTrackerProvider(repoURL string) TrackerProvider {
 // Validate rejects accidental broad intake and unknown providers. An empty
 // provider is accepted here and inferred from the repo URL at use time.
 func (c TrackerIntakeConfig) Validate() error {
-	if !c.Enabled {
+	if c.Enabled && c.Disabled {
+		return fmt.Errorf("trackerIntake: cannot be both enabled and disabled")
+	}
+	if !c.Enabled || c.Disabled {
 		return nil
 	}
 	if c.Provider != "" && c.Provider != TrackerProviderGitHub && c.Provider != TrackerProviderGitLab {
