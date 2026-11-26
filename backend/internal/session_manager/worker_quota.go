@@ -103,7 +103,13 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 	var remaining []workerquota.Target
 	var blocked bool
 	var firstPauseErr error
+	compatibleTargets := make([]workerquota.Target, 0, len(targets))
 	for i, route := range targets {
+		effectiveSandbox := applySpawnAgentConfig(effectiveAgentConfigWithDefaults(route.Harness, cfg.Kind, project.Config, m.projectDefaults), cfg.AgentConfig).Sandbox
+		if validateSpawnSandbox(route.Harness, effectiveSandbox) != nil {
+			continue
+		}
+		compatibleTargets = append(compatibleTargets, route)
 		if _, ok := workerquota.Select([]workerquota.Target{route}, windows, m.clock()); !ok {
 			blocked = true
 			continue
@@ -147,7 +153,7 @@ func (m *Manager) selectWorkerQuota(ctx context.Context, cfg *ports.SpawnConfig,
 			return quotaSelection{}, firstPauseErr
 		}
 		if blocked {
-			retryAt, _ := workerquota.NextResetAt(targets, windows, m.clock())
+			retryAt, _ := workerquota.NextResetAt(compatibleTargets, windows, m.clock())
 			return quotaSelection{}, &workerquota.DeferredError{Role: role, RetryAt: retryAt}
 		}
 		return quotaSelection{}, workerquota.ErrNoReadyRoute

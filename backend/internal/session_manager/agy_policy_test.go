@@ -203,6 +203,34 @@ func TestWorkerPolicyPrecedenceAndRestore(t *testing.T) {
 		if !errors.Is(err, workerquota.ErrNoReadyRoute) {
 			t.Fatalf("err = %v, want workerquota.ErrNoReadyRoute", err)
 		}
+
+		// Implicit project primary (policy.Primary == nil) that is sandbox-incompatible
+		// must also be skipped before bypassReady so a ready compatible AGY fallback is selected.
+		implicitPolicy := &workerquota.Policy{
+			Role:      workerquota.RoleWorker,
+			Primary:   nil,
+			Fallbacks: []workerquota.Target{agyFallback},
+		}
+		m.workerQuota = implicitPolicy
+		implicitProject := domain.ProjectRecord{
+			ID: "proj-1",
+			Config: domain.ProjectConfig{
+				AgentConfig: domain.AgentConfig{Sandbox: domain.SandboxModeRestricted},
+				Worker:      domain.RoleOverride{Harness: domain.HarnessCodex},
+			},
+		}
+		implicitCfg := ports.SpawnConfig{
+			ProjectID:          "proj-1",
+			Kind:               domain.KindWorker,
+			IssueID:            "gh#54",
+			AllowQuotaFailover: true,
+		}
+		if _, err := m.selectWorkerQuota(context.Background(), &implicitCfg, &implicitProject); err != nil {
+			t.Fatalf("implicit primary selectWorkerQuota() error = %v", err)
+		}
+		if implicitCfg.Harness != agyFallback.Harness || implicitCfg.AgentConfig.Model != agyFallback.Model {
+			t.Fatalf("implicit selected = (%q, %q), want AGY fallback (%q, %q)", implicitCfg.Harness, implicitCfg.AgentConfig.Model, agyFallback.Harness, agyFallback.Model)
+		}
 	})
 }
 
