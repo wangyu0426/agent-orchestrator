@@ -123,8 +123,11 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 	if glEnv["GH_TOKEN"] != "" {
 		t.Fatalf("expected GH_TOKEN to be scrubbed for non-GitHub project in broker mode, got %q", glEnv["GH_TOKEN"])
 	}
-	if glEnv["GIT_CONFIG_KEY_3"] != "protocol.ssh.allow" || glEnv["GIT_CONFIG_VALUE_3"] != "never" {
-		t.Fatalf("expected broker git isolation to still apply for non-GitHub project, got %q=%q", glEnv["GIT_CONFIG_KEY_3"], glEnv["GIT_CONFIG_VALUE_3"])
+	if glEnv["GIT_CONFIG_KEY_0"] != "credential.https://github.com.helper" || glEnv["GIT_CONFIG_VALUE_0"] != "" {
+		t.Fatalf("expected GitHub-scoped credential helper override for non-GitHub project, got %q=%q", glEnv["GIT_CONFIG_KEY_0"], glEnv["GIT_CONFIG_VALUE_0"])
+	}
+	if glEnv["GIT_CONFIG_NOSYSTEM"] != "" {
+		t.Fatalf("expected non-GitHub project not to disable global/system git config, got %q", glEnv["GIT_CONFIG_NOSYSTEM"])
 	}
 
 	// GitHub SSH URL with explicit port is recognized and brokered.

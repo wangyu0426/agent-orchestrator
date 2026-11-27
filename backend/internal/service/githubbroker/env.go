@@ -73,11 +73,6 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		env[k] = ""
 	}
 	env["GIT_TERMINAL_PROMPT"] = "0"
-	// Isolate Git from system and global ~/.gitconfig so competing
-	// url.*.insteadOf rules (e.g. HTTPS-to-SSH), credential helpers, or
-	// http.*.extraHeader entries cannot route GitHub remotes around the broker.
-	env["GIT_CONFIG_NOSYSTEM"] = "1"
-	env["GIT_CONFIG_GLOBAL"] = os.DevNull
 	env[EnvBrokerToken] = opts.BrokerToken
 	env[EnvBrokerHost] = host
 
@@ -86,18 +81,28 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 	}
 
 	// Environment-only Git config (never mutates ~/.gitconfig or .git/config).
+	// Scope credential helper and extraHeader overrides to the configured GitHub
+	// host so non-GitHub providers (such as GitLab) remain usable.
 	helperCmd := fmt.Sprintf("!%s github-broker git-credential", shellQuoteForGit(aoBin))
 	gitConfigs := [][2]string{
-		{"credential.helper", ""},
-		{"credential.helper", helperCmd},
-		{"credential.useHttpPath", "true"},
-		{"protocol.ssh.allow", "never"},
-		{"http.extraHeader", ""},
+		{fmt.Sprintf("credential.https://%s.helper", host), ""},
+		{fmt.Sprintf("credential.https://%s.helper", host), helperCmd},
+		{fmt.Sprintf("credential.https://%s.useHttpPath", host), "true"},
 		{fmt.Sprintf("http.https://%s/.extraHeader", host), ""},
 		{fmt.Sprintf("http.https://%s.extraHeader", host), ""},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("git@%s:", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s/", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s:22/", host)},
+	}
+	if strings.TrimSpace(opts.BrokerToken) != "" {
+		// For GitHub-brokered sessions, also isolate from system/global git config
+		// and disable SSH transport globally so repo-local rules cannot bypass the broker.
+		env["GIT_CONFIG_NOSYSTEM"] = "1"
+		env["GIT_CONFIG_GLOBAL"] = os.DevNull
+		gitConfigs = append(gitConfigs,
+			[2]string{"protocol.ssh.allow", "never"},
+			[2]string{"http.extraHeader", ""},
+		)
 	}
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(gitConfigs))
 	for i, kv := range gitConfigs {
