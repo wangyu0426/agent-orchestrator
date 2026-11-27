@@ -411,4 +411,12 @@ func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 	if strings.Contains(p.String(), "PRIVATE KEY") || strings.Contains(p.GoString(), "PRIVATE KEY") {
 		t.Fatalf("String/GoString leaked private key")
 	}
+
+	// Malformed repository scope must fail closed rather than widening to installation-wide.
+	if _, err := p.TokenForRepositories(context.Background(), []string{"owner/"}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("malformed repo scope 'owner/': got %v, want ErrInvalidConfig", err)
+	}
+	if _, err := p.TokenSource(" ").Token(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("blank repo scope: got %v, want ErrInvalidConfig", err)
+	}
 }

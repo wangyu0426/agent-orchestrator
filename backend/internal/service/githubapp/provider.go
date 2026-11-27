@@ -227,7 +227,10 @@ func (p *Provider) SignJWT(now time.Time) (string, error) {
 // token scoped to repos. When repos is empty, GitHub issues a token for all
 // repositories granted to the installation.
 func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (string, error) {
-	normalized := normalizeRepositories(repos)
+	normalized, err := normalizeRepositories(repos)
+	if err != nil {
+		return "", err
+	}
 	scopeKey := strings.Join(normalized, ",")
 
 	now := p.clock()
@@ -288,7 +291,11 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 
 // InvalidateRepositories drops the cached token for the given repository scope.
 func (p *Provider) InvalidateRepositories(repos []string) {
-	scopeKey := strings.Join(normalizeRepositories(repos), ",")
+	normalized, err := normalizeRepositories(repos)
+	if err != nil {
+		return
+	}
+	scopeKey := strings.Join(normalized, ",")
 	p.mu.Lock()
 	delete(p.cache, scopeKey)
 	p.mu.Unlock()
@@ -304,7 +311,7 @@ func (p *Provider) InvalidateAll() {
 // TokenSource returns a TokenSource bound to a fixed repository list.
 // When repos is empty, the token uses the installation's default repository scope.
 func (p *Provider) TokenSource(repos ...string) *ScopedTokenSource {
-	fixed := normalizeRepositories(repos)
+	fixed := append([]string(nil), repos...)
 	return &ScopedTokenSource{
 		provider: p,
 		repos:    fixed,
@@ -498,24 +505,26 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 
 // normalizeRepositories converts repository entries ("repo" or "owner/repo")
 // into a sorted, deduplicated slice of repository names for GitHub's
-// installation access_tokens API.
-func normalizeRepositories(repos []string) []string {
+// installation access_tokens API. When repos is non-empty, malformed entries
+// (such as "owner/" or blank strings) are rejected so a typo cannot silently
+// widen the token scope to all installation repositories.
+func normalizeRepositories(repos []string) ([]string, error) {
 	if len(repos) == 0 {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{}, len(repos))
 	out := make([]string, 0, len(repos))
-	for _, r := range repos {
-		r = strings.TrimSpace(r)
+	for _, raw := range repos {
+		r := strings.TrimSpace(raw)
 		if r == "" {
-			continue
+			return nil, fmt.Errorf("%w: empty repository entry in scope", ErrInvalidConfig)
 		}
 		if idx := strings.LastIndex(r, "/"); idx >= 0 {
 			r = strings.TrimSpace(r[idx+1:])
 		}
 		r = strings.TrimSuffix(r, ".git")
 		if r == "" {
-			continue
+			return nil, fmt.Errorf("%w: malformed repository scope %q", ErrInvalidConfig, raw)
 		}
 		if _, ok := seen[r]; ok {
 			continue
@@ -524,7 +533,7 @@ func normalizeRepositories(repos []string) []string {
 		out = append(out, r)
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 func extractGitHubMessage(body []byte) string {
