@@ -437,7 +437,7 @@ func (t *Tracker) roundTrip(ctx context.Context, method, path string, body any, 
 		return respBody, etag, nextPath, false, nil
 	}
 	classified := classifyError(resp, respBody)
-	if resp.StatusCode == http.StatusUnauthorized {
+	if errors.Is(classified, ErrAuthFailed) {
 		type tokenInvalidator interface {
 			InvalidateToken()
 		}

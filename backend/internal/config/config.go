@@ -558,6 +558,9 @@ func Load() (Config, error) {
 					cfg.GitHubApp.Repositories = append(cfg.GitHubApp.Repositories, r)
 				}
 			}
+			if len(cfg.GitHubApp.Repositories) == 0 {
+				return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_REPOSITORIES %q: must contain at least one repository", rawRepos)
+			}
 		}
 	}
 
