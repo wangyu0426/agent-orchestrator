@@ -2924,7 +2924,7 @@ func sessionPrefix(project domain.ProjectRecord) string {
 // row when nothing observable has landed yet (seed state) via rollbackSpawn or
 // rollbackSpawnSeedRow.
 func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) {
-	_ = m.lcm.MarkTerminated(ctx, id)
+	_ = m.markTerminated(ctx, id)
 	m.cleanupSystemPromptDir(id)
 }
 
@@ -3051,7 +3051,7 @@ func (m *Manager) recordTermination(ctx context.Context, id domain.SessionID, dr
 	if dropRestoreMarker {
 		markerErr = m.store.DeleteSessionWorktrees(ctx, id)
 	}
-	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+	if err := m.markTerminated(ctx, id); err != nil {
 		return fmt.Errorf("kill %s: %w", id, errors.Join(err, markerErr))
 	}
 	m.cleanupSystemPromptDir(id)
@@ -3385,7 +3385,7 @@ func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID)
 				return fmt.Errorf("retire replacement %s: runtime: %w", id, err)
 			}
 		}
-		if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+		if err := m.markTerminated(ctx, id); err != nil {
 			return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
 		}
 		return nil
@@ -4471,7 +4471,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			// must not be ended here.
 			if !switching {
 				cleanupCtx, cancel := spawnRollbackContext(ctx)
-				_ = m.lcm.MarkTerminated(cleanupCtx, rec.ID)
+				_ = m.markTerminated(cleanupCtx, rec.ID)
 				cancel()
 			}
 			m.cleanupSystemPromptDir(rec.ID)
@@ -4634,7 +4634,7 @@ func (m *Manager) saveAndTeardownOne(ctx context.Context, rec domain.SessionReco
 	}
 
 	// 4. Mark terminal via the LCM (same path Kill uses).
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+	if err := m.markTerminated(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: mark terminated: %w", rec.ID, err)
 	}
 
@@ -4715,7 +4715,7 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	// are durable and must be relaunched after the daemon restarts.
 	legacyScratch := projectKind == domain.ProjectKindScratch && rec.ProjectID != ""
 	if legacyScratch && !isChat {
-		return m.lcm.MarkTerminated(ctx, rec.ID)
+		return m.markTerminated(ctx, rec.ID)
 	}
 	var ws ports.WorkspaceInfo
 	var restoreErr error
@@ -5474,7 +5474,7 @@ func (m *Manager) saveAndTeardownWorkspaceProject(ctx context.Context, rec domai
 	if err := m.teardownReviewerTerminal(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: teardown reviewer: %w", rec.ID, err)
 	}
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+	if err := m.markTerminated(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: mark terminated: %w", rec.ID, err)
 	}
 	handle := runtimeHandle(rec.Metadata)
@@ -7346,6 +7346,14 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 	for k, v := range brokerEnv {
 		setProtectedEnv(env, k, v, envKeysCaseInsensitive)
 	}
+	return nil
+}
+
+func (m *Manager) markTerminated(ctx context.Context, id domain.SessionID) error {
+	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+		return err
+	}
+	m.revokeGitHubBrokerSession(id)
 	return nil
 }
 
