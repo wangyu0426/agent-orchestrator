@@ -633,6 +633,16 @@ func Run(buildVersion string) (retErr error) {
 		}
 		return err
 	}
+	if ghAuth.workerBroker != nil {
+		ghAuth.workerBroker.SetSessionActiveChecker(func(checkCtx context.Context, id domain.SessionID) (bool, error) {
+			rec, found, getErr := store.GetSession(checkCtx, id)
+			if getErr != nil {
+				return false, getErr
+			}
+			return found && !rec.IsTerminated, nil
+		})
+		ghAuth.workerBroker.ReconcileSessions(ctx)
+	}
 	tracker := newMultiTrackerWithAuth(ghAuth, cfg.GitLab, log)
 	codexPlugin := codexagent.New()
 	codexHome, err := codexPlugin.NativeSessionConfigDir(ctx, nil)

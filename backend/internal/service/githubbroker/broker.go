@@ -96,11 +96,12 @@ type sessionGrant struct {
 type Broker struct {
 	provider TokenMinter
 	// allowedRepos maps normalized lowercase "owner/repo" -> repo name (without owner).
-	allowedRepos map[string]string
-	githubHost   string
-	permissions  map[string]string
-	grantsPath   string
-	logger       *slog.Logger
+	allowedRepos  map[string]string
+	githubHost    string
+	permissions   map[string]string
+	grantsPath    string
+	logger        *slog.Logger
+	sessionActive func(ctx context.Context, id domain.SessionID) (bool, error)
 
 	mu     sync.RWMutex
 	grants map[domain.SessionID]*sessionGrant
@@ -194,6 +195,44 @@ func (b *Broker) GitHubHost() string {
 	return b.githubHost
 }
 
+// SetSessionActiveChecker installs a durable session-liveness check used both
+// to reconcile persisted grants on startup and to fail closed on IssueToken
+// when a session has been terminated out-of-band (for example by tracker facts).
+func (b *Broker) SetSessionActiveChecker(fn func(ctx context.Context, id domain.SessionID) (bool, error)) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.sessionActive = fn
+	b.mu.Unlock()
+}
+
+// ReconcileSessions prunes any persisted grants whose sessions are missing or
+// terminated according to the configured session-active checker.
+func (b *Broker) ReconcileSessions(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	b.mu.RLock()
+	checker := b.sessionActive
+	if checker == nil {
+		b.mu.RUnlock()
+		return
+	}
+	ids := make([]domain.SessionID, 0, len(b.grants))
+	for id := range b.grants {
+		ids = append(ids, id)
+	}
+	b.mu.RUnlock()
+
+	for _, id := range ids {
+		active, err := checker(ctx, id)
+		if err != nil || !active {
+			b.RevokeSession(id)
+		}
+	}
+}
+
 // RegisterSession binds a fresh unguessable broker capability token to
 // sessionID and its registered repository identities ("owner/repo").
 func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.ProjectID, registeredRepos []string) (string, error) {
@@ -280,6 +319,16 @@ func (b *Broker) IssueToken(ctx context.Context, req IssueRequest) (IssueRespons
 	fullRepo, repoName, err := b.authorize(req)
 	if err != nil {
 		return IssueResponse{}, err
+	}
+	b.mu.RLock()
+	checker := b.sessionActive
+	b.mu.RUnlock()
+	if checker != nil {
+		active, checkErr := checker(ctx, req.SessionID)
+		if checkErr != nil || !active {
+			b.RevokeSession(req.SessionID)
+			return IssueResponse{}, ErrUnauthorized
+		}
 	}
 
 	mintReq := githubapp.ScopedTokenRequest{

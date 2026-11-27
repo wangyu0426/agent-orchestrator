@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
 )
 
@@ -357,5 +358,22 @@ func TestBroker_PersistsGrantVerifiersAcrossDaemonRestart(t *testing.T) {
 		Repository:  "wangyu0426/agent-orchestrator",
 	}); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected revoked session to stay unauthorized after restart, got %v", err)
+	}
+
+	// Out-of-band termination (e.g. tracker-closed session) is pruned on reconcile
+	// and rejected fail-closed on IssueToken.
+	tok2, err := broker3.RegisterSession("sess-tracker-closed", "proj-1", []string{"wangyu0426/agent-orchestrator"})
+	if err != nil {
+		t.Fatalf("RegisterSession tracker-closed: %v", err)
+	}
+	broker3.SetSessionActiveChecker(func(_ context.Context, id domain.SessionID) (bool, error) {
+		return id != "sess-tracker-closed", nil
+	})
+	if _, err := broker3.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-tracker-closed",
+		BrokerToken: tok2,
+		Repository:  "wangyu0426/agent-orchestrator",
+	}); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized for out-of-band terminated session, got %v", err)
 	}
 }
