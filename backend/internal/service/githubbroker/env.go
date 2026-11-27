@@ -31,6 +31,7 @@ var InheritedCredentialEnvKeys = []string{
 	"SSH_AUTH_SOCK",
 	"GIT_SSH",
 	"GIT_SSH_COMMAND",
+	"GIT_CONFIG_PARAMETERS",
 }
 
 // WorkerEnvOptions configures the worker environment overlays for broker mode.
