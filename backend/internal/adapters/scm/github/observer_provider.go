@@ -406,11 +406,14 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 }
 
 // FetchConversationComments fetches top-level PR conversation comments using
-// paginated GraphQL retrieval so explicit operator feedback commands beyond the
-// 50-comment view-only window are never silently lost. If pagination stops
-// before the final page (unusable cursor or page cap), Partial is set to true.
+// backward-paginated GraphQL retrieval (newest page first, up to
+// githubConversationCommentMaxPages pages) so recent explicit operator
+// feedback commands are always inside the fetched window even on PRs with more
+// than 1,000 comments. Results are returned in chronological order. If
+// pagination stops before the oldest page (unusable cursor or page cap),
+// Partial is set to true.
 func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
-	var out []ports.SCMConversationCommentObservation
+	var pages [][]ports.SCMConversationCommentObservation
 	cursor := ""
 	partial := false
 	for page := 1; page <= githubConversationCommentMaxPages; page++ {
@@ -425,13 +428,14 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 			return ports.SCMConversationCommentsResult{}, fmt.Errorf("%w: pull request %s#%d not found in conversation comments response", ErrNotFound, repoFullName(ref.Repo), ref.Number)
 		}
 		conn, _ := pr["comments"].(map[string]any)
+		var pageNodes []ports.SCMConversationCommentObservation
 		for _, n := range nodes(conn["nodes"]) {
 			id := str(n["id"])
 			if id == "" {
 				continue
 			}
 			authorMap, _ := n["author"].(map[string]any)
-			out = append(out, ports.SCMConversationCommentObservation{
+			pageNodes = append(pageNodes, ports.SCMConversationCommentObservation{
 				ID:        id,
 				Author:    authorLogin(n["author"]),
 				IsBot:     isBotAuthor(authorMap),
@@ -441,39 +445,50 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 				UpdatedAt: parseGitHubTime(str(n["updatedAt"])),
 			})
 		}
-		if !pageInfoHasMore(conn) {
+		pages = append(pages, pageNodes)
+		pi, _ := conn["pageInfo"].(map[string]any)
+		if !boolv(pi["hasPreviousPage"]) {
 			break
 		}
-		nextCursor := pageInfoEndCursor(conn)
-		if nextCursor == "" || nextCursor == cursor {
+		prevCursor := str(pi["startCursor"])
+		if prevCursor == "" || prevCursor == cursor {
 			p.logger.Warn("github scm: conversation comments page is partial with unusable cursor",
 				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
 			partial = true
 			break
 		}
-		cursor = nextCursor
+		cursor = prevCursor
 		if page == githubConversationCommentMaxPages {
 			p.logger.Warn("github scm: conversation comments page limit reached",
 				"repo", repoFullName(ref.Repo), "pr", ref.Number, "max_pages", githubConversationCommentMaxPages)
 			partial = true
 		}
 	}
+	// Pages were collected newest-first; flatten in chronological (oldest-first) order.
+	total := 0
+	for _, pg := range pages {
+		total += len(pg)
+	}
+	out := make([]ports.SCMConversationCommentObservation, 0, total)
+	for i := len(pages) - 1; i >= 0; i-- {
+		out = append(out, pages[i]...)
+	}
 	return ports.SCMConversationCommentsResult{Comments: out, Partial: partial}, nil
 }
 
-func buildConversationCommentsQuery(ref ports.SCMPRRef, cursor string) string {
-	afterClause := ""
-	if cursor != "" {
-		afterClause = fmt.Sprintf(", after:%s", graphQLString(cursor))
+func buildConversationCommentsQuery(ref ports.SCMPRRef, beforeCursor string) string {
+	beforeClause := ""
+	if beforeCursor != "" {
+		beforeClause = fmt.Sprintf(", before:%s", graphQLString(beforeCursor))
 	}
 	return fmt.Sprintf(`query{
 repo: repository(owner:%s,name:%s){ pullRequest(number:%d){
-  comments(first:%d%s){
+  comments(last:%d%s){
     nodes{ id body url createdAt updatedAt author{ login __typename } }
-    pageInfo{ hasNextPage endCursor }
+    pageInfo{ hasPreviousPage startCursor }
   }
 } }
-}`, graphQLString(ref.Repo.Owner), graphQLString(ref.Repo.Name), ref.Number, githubConversationCommentPageSize, afterClause)
+}`, graphQLString(ref.Repo.Owner), graphQLString(ref.Repo.Name), ref.Number, githubConversationCommentPageSize, beforeClause)
 }
 
 type restListPull struct {

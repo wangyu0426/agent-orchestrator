@@ -114,16 +114,16 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 			pages := m.commentPages
 			m.mu.Unlock()
 
-			// Paginated conversation comments query.
-			if strings.Contains(payload.Query, "comments(first:") {
-				pageIdx := 0
-				if strings.Contains(payload.Query, `after:"cursor-page-1"`) {
-					pageIdx = 1
+			// Backward-paginated conversation comments query (newest page first).
+			if strings.Contains(payload.Query, "comments(last:") {
+				pageIdx := len(pages) - 1
+				if strings.Contains(payload.Query, `before:"cursor-page-1"`) {
+					pageIdx = 0
 				}
 				var nodes []map[string]any
-				hasNext := false
-				endCursor := ""
-				if pageIdx < len(pages) {
+				hasPrev := false
+				startCursor := ""
+				if pageIdx >= 0 && pageIdx < len(pages) {
 					for _, c := range pages[pageIdx] {
 						typ := c.TypeName
 						if typ == "" {
@@ -141,9 +141,9 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 							},
 						})
 					}
-					if pageIdx+1 < len(pages) {
-						hasNext = true
-						endCursor = fmt.Sprintf("cursor-page-%d", pageIdx+1)
+					if pageIdx > 0 {
+						hasPrev = true
+						startCursor = fmt.Sprintf("cursor-page-%d", pageIdx)
 					}
 				}
 				resp := map[string]any{
@@ -153,8 +153,8 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 								"comments": map[string]any{
 									"nodes": nodes,
 									"pageInfo": map[string]any{
-										"hasNextPage": hasNext,
-										"endCursor":   endCursor,
+										"hasPreviousPage": hasPrev,
+										"startCursor":     startCursor,
 									},
 								},
 							},

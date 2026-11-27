@@ -75,29 +75,30 @@ func (o *Observer) refreshConversationFeedback(
 		if !found || !proj.Config.PRCommentFeedback.Enabled {
 			continue
 		}
+		var hasActive bool
 		if o.inRateLimitCooldown(now, s.repo.Provider) {
-			continue
-		}
-
-		started := time.Now()
-		comments, err := ccProvider.FetchConversationComments(ctx, ports.SCMPRRef{
-			Repo:   s.repo,
-			Number: s.known.Number,
-			URL:    prURL,
-		})
-		if errors.Is(err, ports.ErrSCMUnsupported) {
-			continue
-		}
-		o.logProviderRequest("fetch_conversation_comments", repoFullName(s.repo), started, err)
-		if err != nil {
-			o.logger.Warn("scm observer: conversation comments refresh failed", "pr", prURL, "err", err)
-			continue
-		}
-
-		hasActive, err := o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
-		if err != nil {
-			o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
-			continue
+			hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+		} else {
+			started := time.Now()
+			comments, err := ccProvider.FetchConversationComments(ctx, ports.SCMPRRef{
+				Repo:   s.repo,
+				Number: s.known.Number,
+				URL:    prURL,
+			})
+			if errors.Is(err, ports.ErrSCMUnsupported) {
+				continue
+			}
+			o.logProviderRequest("fetch_conversation_comments", repoFullName(s.repo), started, err)
+			if err != nil {
+				o.logger.Warn("scm observer: conversation comments refresh failed; preserving persisted active rows for retry", "pr", prURL, "err", err)
+				hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+			} else {
+				hasActive, err = o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
+				if err != nil {
+					o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
+					hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+				}
+			}
 		}
 		if !hasActive {
 			continue
@@ -118,6 +119,20 @@ func (o *Observer) refreshConversationFeedback(
 	}
 
 	return activePRKeys
+}
+
+func (o *Observer) hasPersistedActiveConversationFeedback(ctx context.Context, fbStore conversationFeedbackStore, prURL string) bool {
+	rows, err := fbStore.ListPRConversationFeedback(ctx, prURL)
+	if err != nil {
+		o.logger.Warn("scm observer: check persisted active conversation feedback failed", "pr", prURL, "err", err)
+		return false
+	}
+	for _, r := range rows {
+		if r.State == domain.PRConversationFeedbackActive {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Observer) reconcileConversationFeedback(
