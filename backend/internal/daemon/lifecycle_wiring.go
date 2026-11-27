@@ -406,10 +406,11 @@ func startSession(ctx context.Context, cfg config.Config, ghAuth githubAuthWirin
 		githubIdentity = scmProvider
 	}
 	deps := sessionsvc.Deps{
-		Manager:           mgr,
-		Store:             store,
-		PRClaimer:         store,
-		SCM:               scmProvider,
+		Manager:             mgr,
+		Store:               store,
+		PRClaimer:           store,
+		SCM:                 scmProvider,
+		AttributionIdentity: ghAuth.attributionResolver(scmProvider),
 		DataDir:           cfg.DataDir,
 		Tracker:           tracker,
 		Telemetry:         telemetry,

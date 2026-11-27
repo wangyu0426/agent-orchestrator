@@ -371,4 +371,107 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 	if hitTracker.Load() != 1 || hitSCM.Load() != 1 {
 		t.Fatalf("expected custom APIBaseURL to be hit by both tracker (%d) and scm (%d)", hitTracker.Load(), hitSCM.Load())
 	}
+
+	// Operator attribution identity is kept separate from AuthenticatedIdentity:
+	// scmProv.AuthenticatedIdentity stays Human=false, while attributionResolver
+	// supplies the configured operator login for PR discovery and branch claiming.
+	authWithOp, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          111,
+		InstallationID: 888,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+		Repositories:   []string{"repo"},
+		OperatorLogin:  "@wangyu0426",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring with OperatorLogin: %v", err)
+	}
+	scmOp, err := newGitHubSCMProviderWithAuth(authWithOp, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubSCMProviderWithAuth: %v", err)
+	}
+	appIdent, err := scmOp.AuthenticatedIdentity(context.Background())
+	if err != nil || appIdent.Human {
+		t.Fatalf("AuthenticatedIdentity = (%+v, %v), want Human=false", appIdent, err)
+	}
+	attrIdent, err := authWithOp.attributionResolver(nil).AuthenticatedIdentityForProvider(context.Background(), "github", "")
+	if err != nil || !attrIdent.Human || attrIdent.Login != "wangyu0426" {
+		t.Fatalf("attributionResolver = (%+v, %v), want {Login:wangyu0426 Human:true}", attrIdent, err)
+	}
+}
+
+func TestGitHubApp_SCM403PreservesTokenAnd401Refreshes(t *testing.T) {
+	keyPath := writeTempAppKey(t)
+	var exchanges atomic.Int32
+	var status atomic.Int32
+	status.Store(http.StatusForbidden)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/999/access_tokens":
+			n := exchanges.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      fmt.Sprintf("ghs_cache_test_token_%d", n),
+				"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/1/comments":
+			code := int(status.Load())
+			w.WriteHeader(code)
+			if code == http.StatusCreated {
+				_, _ = w.Write([]byte(`{"node_id":"IC_1","body":"ok","html_url":"https://example.com/1","created_at":"2026-11-27T06:00:00Z","user":{"login":"ao[bot]","type":"Bot"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          111,
+		InstallationID: 999,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+		Repositories:   []string{"repo"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring: %v", err)
+	}
+	scmProv, err := newGitHubSCMProviderWithAuth(auth, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubSCMProviderWithAuth: %v", err)
+	}
+
+	req := ports.SCMCommentRequest{
+		PR:   ports.SCMPRRef{Repo: ports.SCMRepo{Provider: "github", Owner: "org", Name: "repo"}, Number: 1},
+		Body: "ok",
+	}
+
+	// Permission-only 403 must not evict the cached installation token.
+	if _, err := scmProv.PostComment(context.Background(), req); err == nil {
+		t.Fatal("expected error on 403")
+	}
+	if _, err := scmProv.PostComment(context.Background(), req); err == nil {
+		t.Fatal("expected error on second 403")
+	}
+	if got := exchanges.Load(); got != 1 {
+		t.Fatalf("exchanges after two 403s = %d, want 1 (token must not be evicted on 403)", got)
+	}
+
+	// Confirmed 401 must evict the cached token so the next request re-mints.
+	status.Store(http.StatusUnauthorized)
+	if _, err := scmProv.PostComment(context.Background(), req); err == nil {
+		t.Fatal("expected error on 401")
+	}
+	status.Store(http.StatusCreated)
+	if _, err := scmProv.PostComment(context.Background(), req); err != nil {
+		t.Fatalf("expected recovery after 401 refresh, got %v", err)
+	}
+	if got := exchanges.Load(); got != 2 {
+		t.Fatalf("exchanges after 401 refresh = %d, want 2", got)
+	}
 }
