@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workerquota"
 )
 
 func TestAutoReviewStateDrivenBackoffAndRestartRecovery(t *testing.T) {
@@ -198,4 +199,84 @@ func TestAutoReviewBackoffUsesCompletedAtInsteadOfCreatedAt(t *testing.T) {
 	if res.Triggered || res.Reason != "auto_review_retry_backoff" || !res.RetryAt.Equal(wantRetryAt) || trig.calls != 0 {
 		t.Fatalf("expected backoff from CompletedAt (%v), got res=%+v calls=%d", wantRetryAt, res, trig.calls)
 	}
+}
+
+func TestQuotaRoutedAutoReviewPreservesBackoffPermanentAndFallbackDecisions(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	policy := &workerquota.Policy{
+		Role:      workerquota.RoleReviewer,
+		Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
+		Source: quotaTestSource{
+			{Harness: domain.HarnessCodex}: {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: false}},
+			{Harness: domain.HarnessAgy}:   {{ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Exhausted: false}},
+		},
+	}
+
+	t.Run("all routes in backoff surfaces earliest retryAt and attempt count", func(t *testing.T) {
+		codexCompleted := now.Add(-10 * time.Second)
+		agyCompleted := now.Add(-30 * time.Second)
+		st := &fakeStore{
+			session: domain.SessionRecord{
+				ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				AutoReviewEnabled: true,
+				Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+			},
+			project: domain.ProjectRecord{ID: "p1", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}}},
+			prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
+			runs: []domain.ReviewRun{
+				{ID: "c1", PRURL: "pr1", TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "codex timeout", CreatedAt: codexCompleted, CompletedAt: &codexCompleted},
+				{ID: "a1", PRURL: "pr1", TargetSHA: "sha1", Harness: domain.ReviewerAgy, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "agy timeout", CreatedAt: agyCompleted, CompletedAt: &agyCompleted},
+			},
+		}
+		trig := &recordingOptionsTrigger{}
+		coord := New(st, trig, Config{Clock: func() time.Time { return now }, Quota: policy})
+		res, err := coord.EvaluateSession(context.Background(), "s1")
+		wantRetryAt := agyCompleted.Add(domain.AutoReviewRetryBaseDelay)
+		if err != nil || res.Triggered || res.Reason != "auto_review_retry_backoff" || !res.RetryAt.Equal(wantRetryAt) || res.AttemptCount != 1 || res.Detail != "agy timeout" || len(trig.calls) != 0 {
+			t.Fatalf("all routes in backoff = %+v err=%v calls=%d, want earliest backoff %v", res, err, len(trig.calls), wantRetryAt)
+		}
+	})
+
+	t.Run("all routes permanently blocked surfaces permanent_review_failure and detail", func(t *testing.T) {
+		st := &fakeStore{
+			session: domain.SessionRecord{
+				ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				AutoReviewEnabled: true,
+				Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+			},
+			project: domain.ProjectRecord{ID: "p1", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}}},
+			prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
+			runs: []domain.ReviewRun{
+				{ID: "c1", PRURL: "pr1", TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: domain.ReviewRunAuthRequiredBody, CreatedAt: now.Add(-time.Hour)},
+				{ID: "a1", PRURL: "pr1", TargetSHA: "sha1", Harness: domain.ReviewerAgy, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: domain.ReviewRunProviderKeyMissingBody, CreatedAt: now.Add(-time.Hour)},
+			},
+		}
+		trig := &recordingOptionsTrigger{}
+		coord := New(st, trig, Config{Clock: func() time.Time { return now }, Quota: policy})
+		res, err := coord.EvaluateSession(context.Background(), "s1")
+		if err != nil || res.Triggered || res.Reason != "permanent_review_failure" || res.AttemptCount != 1 || res.Detail != domain.ReviewRunAuthRequiredBody || len(trig.calls) != 0 {
+			t.Fatalf("all routes permanent = %+v err=%v calls=%d", res, err, len(trig.calls))
+		}
+	})
+
+	t.Run("mixed fallback recovers when primary is permanently blocked", func(t *testing.T) {
+		st := &fakeStore{
+			session: domain.SessionRecord{
+				ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				AutoReviewEnabled: true,
+				Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+			},
+			project: domain.ProjectRecord{ID: "p1", Config: domain.ProjectConfig{Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}}}},
+			prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
+			runs: []domain.ReviewRun{
+				{ID: "c1", PRURL: "pr1", TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: domain.ReviewRunAuthRequiredBody, CreatedAt: now.Add(-time.Hour)},
+			},
+		}
+		trig := &recordingOptionsTrigger{}
+		coord := New(st, trig, Config{Clock: func() time.Time { return now }, Quota: policy})
+		res, err := coord.EvaluateSession(context.Background(), "s1")
+		if err != nil || !res.Triggered || len(trig.calls) != 1 || trig.calls[0].Harness != domain.ReviewerAgy {
+			t.Fatalf("mixed fallback = %+v err=%v calls=%+v, want fallback agy triggered", res, err, trig.calls)
+		}
+	})
 }

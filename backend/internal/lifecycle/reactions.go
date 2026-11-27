@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -56,18 +57,20 @@ type reactionState struct {
 	// next re-arm would see nothing armed, take the early return, and never
 	// retry the store — leaving the stale "conflicting" signature on disk to
 	// suppress the nudge after a restart. Cleared once the write lands.
-	pendingRearm map[string]bool
+	pendingRearm        map[string]bool
+	pendingRetryPersist map[string]bool
 }
 
 func newReactionState() reactionState {
 	return reactionState{
-		seen:           map[string]string{},
-		attempts:       map[string]int{},
-		failedAttempts: map[string]int{},
-		nextRetryAt:    map[string]time.Time{},
-		lastReason:     map[string]string{},
-		loaded:         map[string]bool{},
-		pendingRearm:   map[string]bool{},
+		seen:                map[string]string{},
+		attempts:            map[string]int{},
+		failedAttempts:      map[string]int{},
+		nextRetryAt:         map[string]time.Time{},
+		lastReason:          map[string]string{},
+		loaded:              map[string]bool{},
+		pendingRearm:        map[string]bool{},
+		pendingRetryPersist: map[string]bool{},
 	}
 }
 
@@ -1180,6 +1183,12 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 	}
 	now := m.clock()
 	if retryAt := m.react.nextRetryAt[key]; !retryAt.IsZero() && now.Before(retryAt) {
+		if prURL != "" && m.react.pendingRetryPersist[prURL] {
+			if persistErr := m.persistPRSignaturesLocked(ctx, prURL); persistErr != nil {
+				return sendOnceSuppressed, fmt.Errorf("persist feedback retry state: %w", persistErr)
+			}
+			delete(m.react.pendingRetryPersist, prURL)
+		}
 		return sendOnceSuppressed, nil
 	}
 	attempts := m.react.attempts[key]
@@ -1223,7 +1232,17 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 			"failed_attempts", failed,
 			"retry_at", retryAt)
 		if prURL != "" {
-			_ = m.persistPRSignaturesLocked(ctx, prURL)
+			if persistErr := m.persistPRSignaturesLocked(ctx, prURL); persistErr != nil {
+				m.react.pendingRetryPersist[prURL] = true
+				slog.Default().Warn("lifecycle: persist feedback retry state failed",
+					"session_id", id,
+					"pr_url", prURL,
+					"key", key,
+					"err", persistErr)
+				err = errors.Join(err, fmt.Errorf("persist feedback retry state: %w", persistErr))
+			} else {
+				delete(m.react.pendingRetryPersist, prURL)
+			}
 		}
 		if outcome != sessionguard.Sent {
 			return sendOnceSuppressed, err
@@ -1248,6 +1267,7 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 		if err := m.persistPRSignaturesLocked(ctx, prURL); err != nil {
 			return sendOnceAccounted, err
 		}
+		delete(m.react.pendingRetryPersist, prURL)
 	}
 	return sendOnceAccounted, nil
 }

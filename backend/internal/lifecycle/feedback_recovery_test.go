@@ -169,3 +169,62 @@ func TestPolicySuppressionDoesNotTriggerBackoff(t *testing.T) {
 		t.Fatalf("expected immediate delivery once workable, got %d", len(msg.msgs))
 	}
 }
+
+func TestFeedbackRetryStatePersistFailureRetriesAndSurvivesRestartBeforeDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	m, st, msg := newManager()
+	m.clock = func() time.Time { return now }
+	st.sessions["mer-1"] = working("mer-1")
+	st.comments["pr1"] = []domain.PullRequestComment{{
+		ID:               "c1",
+		ThreadID:         "T1",
+		Author:           "alice",
+		File:             "foo.go",
+		Line:             10,
+		Body:             "please fix this",
+		AutoInjectReview: true,
+	}}
+	obs := ports.PRObservation{Fetched: true, URL: "pr1", Review: domain.ReviewChangesRequest}
+
+	// Both delivery and retry-state persistence fail on attempt 1.
+	deliveryErr := errors.New("pane write failed")
+	persistErr := errors.New("sqlite busy")
+	msg.err = deliveryErr
+	st.signatureWriteErr = persistErr
+
+	err := m.ApplyPRObservation(context.Background(), "mer-1", obs)
+	if !errors.Is(err, deliveryErr) || !errors.Is(err, persistErr) {
+		t.Fatalf("expected joined delivery and persist errors, got %v", err)
+	}
+
+	// Persistence recovers; a poll before the 30s deadline flushes the dirty retry state without re-sending.
+	st.signatureWriteErr = nil
+	msg.err = nil
+	now = now.Add(10 * time.Second)
+	if err := m.ApplyPRObservation(context.Background(), "mer-1", obs); err != nil {
+		t.Fatalf("flush dirty retry state: %v", err)
+	}
+	if len(msg.msgs) != 0 {
+		t.Fatalf("must not deliver before backoff deadline, got %d", len(msg.msgs))
+	}
+
+	// Simulate daemon restart BEFORE the 30s deadline: persisted NextRetryAt must still defer.
+	restarted := New(st, msg)
+	restarted.clock = func() time.Time { return now }
+	now = now.Add(10 * time.Second) // t+20s < t+30s
+	if err := restarted.ApplyPRObservation(context.Background(), "mer-1", obs); err != nil {
+		t.Fatalf("restarted poll before deadline: %v", err)
+	}
+	if len(msg.msgs) != 0 {
+		t.Fatalf("restarted manager must honor persisted backoff before deadline, got %d", len(msg.msgs))
+	}
+
+	// Advance to deadline (t+30s): restarted manager delivers once.
+	now = now.Add(10 * time.Second)
+	if err := restarted.ApplyPRObservation(context.Background(), "mer-1", obs); err != nil {
+		t.Fatalf("restarted poll at deadline: %v", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("expected 1 delivery at deadline after restart, got %d", len(msg.msgs))
+	}
+}

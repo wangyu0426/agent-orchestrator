@@ -179,7 +179,20 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 					"unknown_during_deferral_routes", decision.unknownDuringDeferralRoutes)
 				return Result{Reason: "reviewer_quota_deferred", RetryAt: deferredRetryAt}, nil
 			}
-			return Result{Reason: decision.reason}, nil
+			if decision.reason == "auto_review_retry_backoff" || decision.reason == "permanent_review_failure" {
+				c.logger.Info("auto-review: all ready reviewer routes deferred or blocked",
+					"session_id", id,
+					"reason", decision.reason,
+					"retry_at", decision.retryAt,
+					"attempt_count", decision.attemptCount,
+					"detail", decision.detail)
+			}
+			return Result{
+				Reason:       decision.reason,
+				RetryAt:      decision.retryAt,
+				AttemptCount: decision.attemptCount,
+				Detail:       decision.detail,
+			}, nil
 		}
 		if hasActiveDeferral && !decision.freshPositive {
 			// Retain persisted deferral when no fresh positive quota evidence
@@ -365,6 +378,8 @@ type routeDecision struct {
 	retryAt                     time.Time
 	retryAtSource               string
 	reason                      string
+	attemptCount                int
+	detail                      string
 	freshPositive               bool
 	totalRoutes                 int
 	exhaustedRoutes             int
@@ -532,6 +547,8 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.
 			"decision", outcome)
 	}
 	blocked := false
+	var bestBackoff domain.AutoReviewHeadDecision
+	var bestPermanent domain.AutoReviewHeadDecision
 	for _, route := range targets {
 		routeWindows := windows[route]
 		summary := summarizeRouteWindows(routeWindows, now)
@@ -550,8 +567,15 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.
 		// If this route's harness is permanently blocked or currently in retry
 		// backoff on every pending PR, yield to the next eligible fallback route
 		// instead of stranding the pending HEAD.
-		if allPendingPRsBlockedForRoute(prs, runs, domain.ReviewerHarness(route.Harness), now) {
+		if routeBlocked, headDec := allPendingPRsBlockedForRoute(prs, runs, domain.ReviewerHarness(route.Harness), now); routeBlocked {
 			decision.retryCappedRoutes++
+			if headDec.Reason == "auto_review_retry_backoff" {
+				if bestBackoff.Reason == "" || (!headDec.RetryAt.IsZero() && (bestBackoff.RetryAt.IsZero() || headDec.RetryAt.Before(bestBackoff.RetryAt))) {
+					bestBackoff = headDec
+				}
+			} else if headDec.Reason == "permanent_review_failure" && bestPermanent.Reason == "" {
+				bestPermanent = headDec
+			}
 			logRoute(route, summary, freshPositive, "route_retry_deferred")
 			continue
 		}
@@ -580,13 +604,30 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.
 		decision.reason = "reviewer_quota_deferred"
 		return decision
 	}
+	if decision.unreadyRoutes == 0 && decision.unknownDuringDeferralRoutes == 0 && decision.retryCappedRoutes > 0 {
+		if bestBackoff.Reason == "auto_review_retry_backoff" {
+			decision.reason = bestBackoff.Reason
+			decision.retryAt = bestBackoff.RetryAt
+			decision.attemptCount = bestBackoff.AttemptCount
+			decision.detail = bestBackoff.Detail
+			return decision
+		}
+		if bestPermanent.Reason == "permanent_review_failure" {
+			decision.reason = bestPermanent.Reason
+			decision.attemptCount = bestPermanent.AttemptCount
+			decision.detail = bestPermanent.Detail
+			return decision
+		}
+	}
 	decision.reason = "reviewer_quota_no_ready_route"
 	return decision
 }
 
-func allPendingPRsBlockedForRoute(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness, now time.Time) bool {
+func allPendingPRsBlockedForRoute(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness, now time.Time) (bool, domain.AutoReviewHeadDecision) {
 	pending := 0
 	blocked := 0
+	var earliestBackoff domain.AutoReviewHeadDecision
+	var firstPermanent domain.AutoReviewHeadDecision
 	for _, pr := range prs {
 		if pr.URL == "" || pr.HeadSHA == "" || pr.Draft || pr.Merged || pr.Closed {
 			continue
@@ -602,11 +643,26 @@ func allPendingPRsBlockedForRoute(prs []domain.PullRequest, runs []domain.Review
 			}
 		}
 		dec := existingHeadDecision(harnessRuns, pr.URL, pr.HeadSHA, now, true)
-		if dec.Reason == "permanent_review_failure" || dec.Reason == "auto_review_retry_backoff" {
+		switch dec.Reason {
+		case "auto_review_retry_backoff":
 			blocked++
+			if earliestBackoff.Reason == "" || (!dec.RetryAt.IsZero() && (earliestBackoff.RetryAt.IsZero() || dec.RetryAt.Before(earliestBackoff.RetryAt))) {
+				earliestBackoff = dec
+			}
+		case "permanent_review_failure":
+			blocked++
+			if firstPermanent.Reason == "" {
+				firstPermanent = dec
+			}
 		}
 	}
-	return pending > 0 && blocked == pending
+	if pending == 0 || blocked != pending {
+		return false, domain.AutoReviewHeadDecision{}
+	}
+	if earliestBackoff.Reason != "" {
+		return true, earliestBackoff
+	}
+	return true, firstPermanent
 }
 
 func hasFreshPositiveWindow(windows []workerquota.Window, now time.Time) bool {
