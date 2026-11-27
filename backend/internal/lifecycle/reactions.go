@@ -1205,13 +1205,13 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 		}
 	}
 	outcome, err := nudge(ctx, id, msg)
-	if err != nil || outcome != sessionguard.Sent {
+	if err != nil {
 		failed := m.react.failedAttempts[key] + 1
 		m.react.failedAttempts[key] = failed
 		retryAt := now.Add(feedbackRetryBackoff(failed))
 		m.react.nextRetryAt[key] = retryAt
 		reason := outcome.String()
-		if err != nil && outcome == sessionguard.Sent {
+		if outcome == sessionguard.Sent {
 			reason = "delivery_error"
 		}
 		m.react.lastReason[key] = reason
@@ -1225,12 +1225,12 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 		if prURL != "" {
 			_ = m.persistPRSignaturesLocked(ctx, prURL)
 		}
-		if err != nil {
-			if outcome != sessionguard.Sent {
-				return sendOnceSuppressed, err
-			}
-			return sendOnceAccounted, err
+		if outcome != sessionguard.Sent {
+			return sendOnceSuppressed, err
 		}
+		return sendOnceAccounted, err
+	}
+	if outcome != sessionguard.Sent {
 		return sendOnceSuppressed, nil
 	}
 	// Order: Send → in-memory mutation → durable persist. Sending first means a

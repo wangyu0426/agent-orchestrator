@@ -132,3 +132,40 @@ func TestRearmMergeConflictClearsSuppressedRetryState(t *testing.T) {
 		t.Fatalf("expected immediate nudge after conflict re-arm, got %d", len(msg.msgs))
 	}
 }
+
+func TestPolicySuppressionDoesNotTriggerBackoff(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	m, st, msg := newManager()
+	m.clock = func() time.Time { return now }
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID:       "mer-1",
+		Activity: domain.Activity{State: domain.ActivityWaitingInput},
+	}
+	st.comments["pr1"] = []domain.PullRequestComment{{
+		ID:               "c1",
+		ThreadID:         "T1",
+		Author:           "alice",
+		File:             "foo.go",
+		Line:             10,
+		Body:             "please fix this",
+		AutoInjectReview: true,
+	}}
+	obs := ports.PRObservation{Fetched: true, URL: "pr1", Review: domain.ReviewChangesRequest}
+
+	// Multiple policy-suppressed polls (waiting_input) must not arm retry backoff.
+	for range 3 {
+		outcome, err := m.sendOnce(context.Background(), "mer-1", "pr1", "comment:pr1:c1", "T1\x00c1", "fix", false)
+		if err != nil || outcome != sendOnceSuppressed {
+			t.Fatalf("expected policy suppression, got outcome=%v err=%v", outcome, err)
+		}
+	}
+
+	// As soon as the session becomes workable, delivery must happen immediately without waiting for backoff.
+	st.sessions["mer-1"] = working("mer-1")
+	if err := m.ApplyPRObservation(context.Background(), "mer-1", obs); err != nil {
+		t.Fatalf("ApplyPRObservation once workable: %v", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("expected immediate delivery once workable, got %d", len(msg.msgs))
+	}
+}
