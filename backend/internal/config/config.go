@@ -120,6 +120,7 @@ type GitHubAppConfig struct {
 	PrivateKeyPath string
 	APIBaseURL     string
 	Repositories   []string
+	OperatorLogin  string
 }
 
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
@@ -552,6 +553,7 @@ func Load() (Config, error) {
 		cfg.GitHubApp.PrivateKeyPath = absKeyPath
 
 		cfg.GitHubApp.APIBaseURL = strings.TrimSpace(os.Getenv("AO_GITHUB_APP_API_BASE_URL"))
+		cfg.GitHubApp.OperatorLogin = strings.TrimSpace(strings.TrimPrefix(os.Getenv("AO_GITHUB_APP_OPERATOR_LOGIN"), "@"))
 		if rawRepos := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_REPOSITORIES")); rawRepos != "" {
 			for _, r := range strings.Split(rawRepos, ",") {
 				if r = strings.TrimSpace(r); r != "" {
@@ -711,6 +713,7 @@ var githubAppEnvKeys = []string{
 	"AO_GITHUB_APP_PRIVATE_KEY_PATH",
 	"AO_GITHUB_APP_API_BASE_URL",
 	"AO_GITHUB_APP_REPOSITORIES",
+	"AO_GITHUB_APP_OPERATOR_LOGIN",
 }
 
 // ScrubGitHubAppEnv removes GitHub App configuration variables from the daemon

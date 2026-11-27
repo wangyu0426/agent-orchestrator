@@ -29,6 +29,7 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 		InstallationID: cfg.InstallationID,
 		PrivateKeyPath: cfg.PrivateKeyPath,
 		BaseURL:        baseURL,
+		OperatorLogin:  cfg.OperatorLogin,
 		Logger:         logger,
 	})
 	if err != nil {

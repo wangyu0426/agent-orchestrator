@@ -285,4 +285,29 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 	if hitTracker.Load() != 1 || hitSCM.Load() != 1 {
 		t.Fatalf("expected custom APIBaseURL to be hit by both tracker (%d) and scm (%d)", hitTracker.Load(), hitSCM.Load())
 	}
+
+	// OperatorLogin preserves PR claim / automatic PR-to-session attribution
+	// identity while still using App installation tokens for GitHub API calls.
+	authWithOp, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          111,
+		InstallationID: 888,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+		OperatorLogin:  "@wangyu0426",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring with OperatorLogin: %v", err)
+	}
+	scmOp, err := newGitHubSCMProviderWithAuth(authWithOp, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubSCMProviderWithAuth with OperatorLogin: %v", err)
+	}
+	ident, err := scmOp.AuthenticatedIdentity(context.Background())
+	if err != nil {
+		t.Fatalf("AuthenticatedIdentity with OperatorLogin: %v", err)
+	}
+	if !ident.Human || ident.Login != "wangyu0426" {
+		t.Fatalf("identity = %+v, want {Login:wangyu0426 Human:true}", ident)
+	}
 }
