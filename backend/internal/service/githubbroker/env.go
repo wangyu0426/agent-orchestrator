@@ -95,6 +95,11 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("git@%s:", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s/", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s:22/", host)},
+		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("http://%s/", host)},
+		{fmt.Sprintf("credential.http://%s.helper", host), ""},
+		{fmt.Sprintf("credential.http://%s.helper", host), helperCmd},
+		{fmt.Sprintf("http.http://%s/.extraHeader", host), ""},
+		{fmt.Sprintf("http.http://%s.extraHeader", host), ""},
 	}
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(gitConfigs))
 	for i, kv := range gitConfigs {
