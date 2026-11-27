@@ -117,10 +117,17 @@ func newMultiTrackerWithAuth(ghAuth githubAuthWiring, gitlabCfg config.GitLabCon
 	var named []trackermulti.NamedTracker
 
 	if ghAuth.appEnabled {
-		if t, err := newGitHubTrackerWithAuth(ghAuth); err != nil {
-			logTrackerDisabled(logger, "github", err)
+		if ghAuth.appTokens == nil {
+			logTrackerDisabled(logger, "github", errors.New("github app auth enabled but token source unavailable"))
 		} else {
-			named = append(named, trackermulti.NamedTracker{Key: "github", Tracker: t})
+			named = append(named, trackermulti.NamedTracker{
+				Key: "github",
+				Tracker: &lazyTracker{
+					name:   "github",
+					logger: logger,
+					build:  func() (ports.Tracker, error) { return newGitHubTrackerWithAuth(ghAuth) },
+				},
+			})
 		}
 	} else {
 		// Probing the environment is a cheap read — no subprocess. Only when no
