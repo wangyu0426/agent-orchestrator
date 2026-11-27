@@ -76,6 +76,9 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 	if got := extractGHRepoFlag([]string{"api", "--repo=owner/repo2"}); got != "owner/repo2" {
 		t.Fatalf("extractGHRepoFlag(--repo=) = %q, want owner/repo2", got)
 	}
+	if got := parseOwnerRepoFromRemoteURL("ssh://git@github.com:22/wangyu0426/agent-orchestrator.git", "github.com"); got != "wangyu0426/agent-orchestrator" {
+		t.Fatalf("parseOwnerRepoFromRemoteURL(ssh:22) = %q, want wangyu0426/agent-orchestrator", got)
+	}
 
 	// Verify buildBrokerGHEnv scrubs personal tokens/GH_HOST and injects GH_ENTERPRISE_TOKEN for GHES hosts and GH_TOKEN for github.com.
 	env := buildBrokerGHEnv([]string{"GITHUB_TOKEN=ghp_personal_1234567890", "GH_TOKEN=ghp_old_1234567890", "GH_HOST=evil.example.com", "PATH=/usr/bin"}, "ghs_fresh_1234567890", "ghe.internal.example", "/tmp/iso-gh")

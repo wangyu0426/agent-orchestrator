@@ -179,6 +179,15 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for workspace project with unlisted child GitHub repo, got %v", err)
 	}
 
+	// GitHub SSH URL with unsupported non-22 port fails closed.
+	store.projects["proj-ssh-2222"] = domain.ProjectRecord{
+		ID:            "proj-ssh-2222",
+		RepoOriginURL: "ssh://git@github.com:2222/wangyu0426/agent-orchestrator.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-ssh-2222", "proj-ssh-2222", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for unsupported SSH port 2222, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",

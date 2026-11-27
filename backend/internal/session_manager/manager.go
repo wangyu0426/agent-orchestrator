@@ -7405,8 +7405,15 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		parsedHost = strings.ToLower(strings.TrimSpace(u.Hostname()))
 		pathPart = u.Path
 		scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
-		if parsedHost == h && (scheme == "http" || scheme == "https") && u.User != nil {
-			return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
+		if parsedHost == h {
+			if (scheme == "http" || scheme == "https") && u.User != nil {
+				return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
+			}
+			if scheme == "ssh" {
+				if port := strings.TrimSpace(u.Port()); port != "" && port != "22" {
+					return "", true, fmt.Errorf("%w: unsupported SSH port %q in GitHub origin URL %q", githubbroker.ErrForbiddenRepo, port, originURL)
+				}
+			}
 		}
 	} else if atIdx := strings.Index(raw, "@"); atIdx >= 0 {
 		rest := raw[atIdx+1:]

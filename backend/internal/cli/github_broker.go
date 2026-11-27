@@ -92,6 +92,9 @@ func newGitHubBrokerGHCommand(ctx *commandContext) *cobra.Command {
 			}
 			repo := extractGHRepoFlag(args)
 			host := strings.TrimSpace(os.Getenv(githubbroker.EnvBrokerHost))
+			if repo == "" {
+				repo = detectGitOriginRepo(cmd.Context(), host)
+			}
 			resp, err := ctx.fetchGitHubBrokerToken(cmd.Context(), host, repo)
 			if err != nil {
 				return err
@@ -277,6 +280,41 @@ func extractGHRepoFlag(args []string) string {
 		}
 		if v, ok := strings.CutPrefix(arg, "-R="); ok {
 			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func detectGitOriginRepo(ctx context.Context, host string) string {
+	out, err := process.CommandContext(ctx, "git", "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return parseOwnerRepoFromRemoteURL(strings.TrimSpace(string(out)), host)
+}
+
+func parseOwnerRepoFromRemoteURL(raw, host string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		h = githubbroker.DefaultGitHubHost
+	}
+	lower := strings.ToLower(raw)
+	for _, prefix := range []string{
+		"https://" + h + "/",
+		"http://" + h + "/",
+		"git@" + h + ":",
+		"ssh://git@" + h + "/",
+		"ssh://git@" + h + ":22/",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := strings.TrimSuffix(strings.Trim(raw[len(prefix):], "/"), ".git")
+			if strings.Count(rest, "/") == 1 {
+				return rest
+			}
 		}
 	}
 	return ""
