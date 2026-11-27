@@ -297,6 +297,71 @@ func TestProvider_ConcurrentRefreshDeduplication(t *testing.T) {
 	}
 }
 
+func TestProvider_ConcurrentRefreshLeaderCancellationDoesNotFailWaiters(t *testing.T) {
+	_, pkcs1, _ := generateTestRSAKey(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_waiter_survived_token",
+			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+		})
+	}))
+	defer srv.Close()
+
+	p, err := NewProvider(Config{
+		AppID:          10,
+		InstallationID: 20,
+		PrivateKeyPEM:  pkcs1,
+		BaseURL:        srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := p.TokenForRepositories(leaderCtx, []string{"repo-shared"})
+		leaderErr <- err
+	}()
+
+	<-started
+
+	waiterRes := make(chan string, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		tok, err := p.TokenForRepositories(context.Background(), []string{"repo-shared"})
+		if err != nil {
+			waiterErr <- err
+			return
+		}
+		waiterRes <- tok
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancelLeader()
+	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader err = %v, want context.Canceled", err)
+	}
+
+	close(release)
+	select {
+	case err := <-waiterErr:
+		t.Fatalf("waiter failed after leader cancellation: %v", err)
+	case tok := <-waiterRes:
+		if tok != "ghs_waiter_survived_token" {
+			t.Fatalf("waiter token = %q, want ghs_waiter_survived_token", tok)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for waiter")
+	}
+}
+
 func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 	_, pkcs1, _ := generateTestRSAKey(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

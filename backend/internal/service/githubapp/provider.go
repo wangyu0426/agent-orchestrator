@@ -246,22 +246,39 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 	p.inflight[scopeKey] = call
 	p.mu.Unlock()
 
-	token, expiresAt, err := p.exchangeToken(ctx, normalized)
-
-	p.mu.Lock()
-	if err == nil {
-		p.cache[scopeKey] = cachedToken{
-			token:     token,
-			expiresAt: expiresAt,
+	// Run the shared token exchange with a provider-owned bounded context so
+	// cancellation of the leading caller cannot fail unrelated concurrent
+	// waiters whose contexts are still live.
+	go func() {
+		timeout := defaultHTTPTimeout
+		if p.httpClient != nil && p.httpClient.Timeout > 0 {
+			timeout = p.httpClient.Timeout
 		}
-	}
-	delete(p.inflight, scopeKey)
-	call.token = token
-	call.err = err
-	close(call.done)
-	p.mu.Unlock()
+		exchangeCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-	return token, err
+		token, expiresAt, err := p.exchangeToken(exchangeCtx, normalized)
+
+		p.mu.Lock()
+		if err == nil {
+			p.cache[scopeKey] = cachedToken{
+				token:     token,
+				expiresAt: expiresAt,
+			}
+		}
+		delete(p.inflight, scopeKey)
+		call.token = token
+		call.err = err
+		close(call.done)
+		p.mu.Unlock()
+	}()
+
+	select {
+	case <-call.done:
+		return call.token, call.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 // InvalidateRepositories drops the cached token for the given repository scope.
