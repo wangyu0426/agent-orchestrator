@@ -378,16 +378,9 @@ func (s *ScopedTokenSource) PreflightPath() string {
 	return "/installation/repositories?per_page=1"
 }
 
-// SCMIdentity reports the operator identity for attribution checks (PR claiming
-// and automatic PR-to-session discovery) when OperatorLogin is configured, or
-// a non-human installation identity otherwise, avoiding GET /user calls.
+// SCMIdentity reports that this token belongs to a GitHub App installation
+// rather than a human user account, avoiding GET /user calls.
 func (s *ScopedTokenSource) SCMIdentity() (ports.SCMIdentity, bool) {
-	if s != nil && s.provider != nil && s.provider.operatorLogin != "" {
-		return ports.SCMIdentity{
-			Login: s.provider.operatorLogin,
-			Human: true,
-		}, true
-	}
 	return ports.SCMIdentity{Human: false}, true
 }
 
@@ -460,14 +453,15 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 		return "", time.Time{}, fmt.Errorf("%w: empty token in response", ErrTokenExchange)
 	}
 
-	var expiresAt time.Time
-	if parsed.ExpiresAt != "" {
-		expiresAt, err = time.Parse(time.RFC3339, parsed.ExpiresAt)
-		if err != nil {
-			return "", time.Time{}, fmt.Errorf("%w: invalid expires_at: %w", ErrTokenExchange, err)
-		}
-	} else {
-		expiresAt = now.Add(time.Hour)
+	if strings.TrimSpace(parsed.ExpiresAt) == "" {
+		return "", time.Time{}, fmt.Errorf("%w: missing expires_at in response", ErrTokenExchange)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, parsed.ExpiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%w: invalid expires_at: %w", ErrTokenExchange, err)
+	}
+	if !expiresAt.After(p.clock()) {
+		return "", time.Time{}, fmt.Errorf("%w: token expires_at %s is not in the future", ErrTokenExchange, parsed.ExpiresAt)
 	}
 
 	return token, expiresAt, nil
@@ -517,14 +511,20 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	return rsaKey, nil
 }
 
-// normalizeRepositories validates and normalizes repository names into a
-// sorted, deduplicated slice for GitHub's installation access_tokens API.
-// GitHub's access_tokens endpoint accepts repository names only (scoped to
-// the installation's account), so owner-qualified or slash-containing entries
-// are rejected rather than silently dropping the owner.
+// ValidateRepositories validates a non-empty list of repository names for
+// GitHub's installation access_tokens API.
+func ValidateRepositories(repos []string) ([]string, error) {
+	return normalizeRepositories(repos)
+}
+
+// normalizeRepositories validates and normalizes a non-empty list of repository
+// names into a sorted, deduplicated slice for GitHub's installation
+// access_tokens API. Empty scopes and owner-qualified or slash-containing
+// entries are rejected so App mode fails closed and never mints an
+// installation-wide token.
 func normalizeRepositories(repos []string) ([]string, error) {
 	if len(repos) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: at least one repository scope is required", ErrInvalidConfig)
 	}
 	seen := make(map[string]struct{}, len(repos))
 	out := make([]string, 0, len(repos))

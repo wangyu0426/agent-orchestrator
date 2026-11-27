@@ -554,15 +554,17 @@ func Load() (Config, error) {
 
 		cfg.GitHubApp.APIBaseURL = strings.TrimSpace(os.Getenv("AO_GITHUB_APP_API_BASE_URL"))
 		cfg.GitHubApp.OperatorLogin = strings.TrimSpace(strings.TrimPrefix(os.Getenv("AO_GITHUB_APP_OPERATOR_LOGIN"), "@"))
-		if rawRepos, ok := os.LookupEnv("AO_GITHUB_APP_REPOSITORIES"); ok {
-			for _, r := range strings.Split(rawRepos, ",") {
-				if r = strings.TrimSpace(r); r != "" {
-					cfg.GitHubApp.Repositories = append(cfg.GitHubApp.Repositories, r)
-				}
+		rawRepos, ok := os.LookupEnv("AO_GITHUB_APP_REPOSITORIES")
+		if !ok {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_REPOSITORIES is required when AO_GITHUB_APP_ENABLED is on")
+		}
+		for _, r := range strings.Split(rawRepos, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				cfg.GitHubApp.Repositories = append(cfg.GitHubApp.Repositories, r)
 			}
-			if len(cfg.GitHubApp.Repositories) == 0 {
-				return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_REPOSITORIES %q: must contain at least one repository when set", rawRepos)
-			}
+		}
+		if len(cfg.GitHubApp.Repositories) == 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_REPOSITORIES %q: must contain at least one repository when AO_GITHUB_APP_ENABLED is on", rawRepos)
 		}
 	}
 

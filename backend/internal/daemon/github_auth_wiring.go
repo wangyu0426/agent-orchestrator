@@ -23,6 +23,10 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	if !cfg.Enabled {
 		return githubAuthWiring{}, nil
 	}
+	repos, err := githubapp.ValidateRepositories(cfg.Repositories)
+	if err != nil {
+		return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app auth: %w", err)
+	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
 	provider, err := githubapp.NewProvider(githubapp.Config{
 		AppID:          cfg.AppID,
@@ -37,7 +41,7 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	}
 	return githubAuthWiring{
 		appEnabled: true,
-		appTokens:  provider.TokenSource(cfg.Repositories...),
+		appTokens:  provider.TokenSource(repos...),
 		apiBaseURL: baseURL,
 		graphqlURL: deriveGitHubGraphQLURL(baseURL),
 	}, nil

@@ -326,12 +326,24 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Enabled with missing repository scope must fail closed even with a valid key.
+	if _, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          111,
+		InstallationID: 888,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("expected error when Repositories is omitted in App mode, got nil")
+	}
+
 	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
 		Enabled:        true,
 		AppID:          111,
 		InstallationID: 888,
 		PrivateKeyPath: keyPath,
 		APIBaseURL:     srv.URL,
+		Repositories:   []string{"repo"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("newGitHubAuthWiring: %v", err)
@@ -360,14 +372,15 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 		t.Fatalf("expected custom APIBaseURL to be hit by both tracker (%d) and scm (%d)", hitTracker.Load(), hitSCM.Load())
 	}
 
-	// OperatorLogin preserves PR claim / automatic PR-to-session attribution
-	// identity while still using App installation tokens for GitHub API calls.
+	// Even when OperatorLogin is set, SCMIdentity keeps Human=false because
+	// the authenticated principal is a GitHub App installation, not a human.
 	authWithOp, err := newGitHubAuthWiring(config.GitHubAppConfig{
 		Enabled:        true,
 		AppID:          111,
 		InstallationID: 888,
 		PrivateKeyPath: keyPath,
 		APIBaseURL:     srv.URL,
+		Repositories:   []string{"repo"},
 		OperatorLogin:  "@wangyu0426",
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -381,7 +394,7 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuthenticatedIdentity with OperatorLogin: %v", err)
 	}
-	if !ident.Human || ident.Login != "wangyu0426" {
-		t.Fatalf("identity = %+v, want {Login:wangyu0426 Human:true}", ident)
+	if ident.Human {
+		t.Fatalf("expected Human=false for GitHub App installation principal, got %+v", ident)
 	}
 }

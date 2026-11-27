@@ -397,7 +397,7 @@ func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 		t.Fatalf("NewProvider: %v", err)
 	}
 
-	_, err = p.TokenSource().Token(context.Background())
+	_, err = p.TokenSource("repo-a").Token(context.Background())
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("expected ErrAuthFailed, got %v", err)
 	}
@@ -412,10 +412,55 @@ func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 		t.Fatalf("String/GoString leaked private key")
 	}
 
-	// Malformed or owner-qualified repository scopes must fail closed.
+	// Empty, malformed, or owner-qualified repository scopes must fail closed.
+	if _, err := p.TokenForRepositories(context.Background(), nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty repo scope: got %v, want ErrInvalidConfig", err)
+	}
 	for _, bad := range []string{"owner/repo", "owner/", "/repo", "owner/repo/extra", " "} {
 		if _, err := p.TokenForRepositories(context.Background(), []string{bad}); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("malformed repo scope %q: got %v, want ErrInvalidConfig", bad, err)
 		}
+	}
+}
+
+func TestProvider_RejectsMissingMalformedAndExpiredExpiresAt(t *testing.T) {
+	_, pkcs1, _ := generateTestRSAKey(t)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name      string
+		expiresAt string
+	}{
+		{name: "missing", expiresAt: ""},
+		{name: "malformed", expiresAt: "not-a-timestamp"},
+		{name: "already-expired", expiresAt: now.Add(-time.Minute).Format(time.RFC3339)},
+		{name: "equal-to-now", expiresAt: now.Format(time.RFC3339)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token":      "ghs_invalid_expiry_token_1234",
+					"expires_at": tc.expiresAt,
+				})
+			}))
+			defer srv.Close()
+
+			p, err := NewProvider(Config{
+				AppID:          11,
+				InstallationID: 22,
+				PrivateKeyPEM:  pkcs1,
+				BaseURL:        srv.URL,
+				Clock:          func() time.Time { return now },
+			})
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+			if _, err := p.TokenForRepositories(context.Background(), []string{"repo-a"}); !errors.Is(err, ErrTokenExchange) {
+				t.Fatalf("expected ErrTokenExchange for %s expires_at, got %v", tc.name, err)
+			}
+		})
 	}
 }
