@@ -133,7 +133,7 @@ func NewProvider(cfg Config) (*Provider, error) {
 
 	key, err := parseRSAPrivateKey(pemBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
@@ -225,45 +225,43 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 	normalized := normalizeRepositories(repos)
 	scopeKey := strings.Join(normalized, ",")
 
-	for {
-		now := p.clock()
-		p.mu.Lock()
-		if entry, ok := p.cache[scopeKey]; ok && p.isFresh(entry, now) {
-			tok := entry.token
-			p.mu.Unlock()
-			return tok, nil
-		}
-		if call, ok := p.inflight[scopeKey]; ok {
-			p.mu.Unlock()
-			select {
-			case <-call.done:
-				return call.token, call.err
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		}
-
-		call := &inflightRefresh{done: make(chan struct{})}
-		p.inflight[scopeKey] = call
+	now := p.clock()
+	p.mu.Lock()
+	if entry, ok := p.cache[scopeKey]; ok && p.isFresh(entry, now) {
+		tok := entry.token
 		p.mu.Unlock()
-
-		token, expiresAt, err := p.exchangeToken(ctx, normalized)
-
-		p.mu.Lock()
-		if err == nil {
-			p.cache[scopeKey] = cachedToken{
-				token:     token,
-				expiresAt: expiresAt,
-			}
-		}
-		delete(p.inflight, scopeKey)
-		call.token = token
-		call.err = err
-		close(call.done)
-		p.mu.Unlock()
-
-		return token, err
+		return tok, nil
 	}
+	if call, ok := p.inflight[scopeKey]; ok {
+		p.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.token, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	call := &inflightRefresh{done: make(chan struct{})}
+	p.inflight[scopeKey] = call
+	p.mu.Unlock()
+
+	token, expiresAt, err := p.exchangeToken(ctx, normalized)
+
+	p.mu.Lock()
+	if err == nil {
+		p.cache[scopeKey] = cachedToken{
+			token:     token,
+			expiresAt: expiresAt,
+		}
+	}
+	delete(p.inflight, scopeKey)
+	call.token = token
+	call.err = err
+	close(call.done)
+	p.mu.Unlock()
+
+	return token, err
 }
 
 // InvalidateRepositories drops the cached token for the given repository scope.
@@ -370,7 +368,7 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 			Repositories []string `json:"repositories"`
 		}{Repositories: repos})
 		if err != nil {
-			return "", time.Time{}, fmt.Errorf("%w: encode scope payload: %v", ErrTokenExchange, err)
+			return "", time.Time{}, fmt.Errorf("%w: encode scope payload: %w", ErrTokenExchange, err)
 		}
 		reqBody = bytes.NewReader(payload)
 	}
@@ -423,7 +421,7 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 	if parsed.ExpiresAt != "" {
 		expiresAt, err = time.Parse(time.RFC3339, parsed.ExpiresAt)
 		if err != nil {
-			return "", time.Time{}, fmt.Errorf("%w: invalid expires_at: %v", ErrTokenExchange, err)
+			return "", time.Time{}, fmt.Errorf("%w: invalid expires_at: %w", ErrTokenExchange, err)
 		}
 	} else {
 		expiresAt = now.Add(time.Hour)

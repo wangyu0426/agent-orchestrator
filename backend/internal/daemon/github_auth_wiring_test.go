@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -112,7 +113,7 @@ func TestGitHubApp_SCMAndTrackerIntegration(t *testing.T) {
 			n := tokenExchanges.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"token":      "ghs_app_integration_token_" + string(rune('0'+n)),
+				"token":      fmt.Sprintf("ghs_app_integration_token_%d", n),
 				"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/user":
