@@ -21,6 +21,7 @@ const PRCommentFeedbackSourceType = "pr_conversation_comment"
 // conversation feedback command.
 type PRConversationFeedbackState string
 
+// Lifecycle states for persisted PR conversation feedback rows.
 const (
 	PRConversationFeedbackActive     PRConversationFeedbackState = "active"
 	PRConversationFeedbackBaseline   PRConversationFeedbackState = "baseline"
