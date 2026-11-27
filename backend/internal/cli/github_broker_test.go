@@ -1,0 +1,87 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
+)
+
+func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
+	var invalidated bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer cap-secret-123" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/internal/github/broker/token":
+			var req brokerTokenRequestDTO
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.SessionID != "sess-42" || req.Repository != "wangyu0426/agent-orchestrator.git" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(brokerTokenResponseDTO{
+				Token:      "ghs_cli_helper_token_1234567890",
+				ExpiresAt:  time.Now().Add(1 * time.Hour),
+				Username:   githubbroker.GitUsername,
+				Host:       "github.com",
+				Repository: "wangyu0426/agent-orchestrator",
+			})
+		case "/internal/github/broker/invalidate":
+			invalidated = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("AO_SESSION_ID", "sess-42")
+	t.Setenv(githubbroker.EnvBrokerToken, "cap-secret-123")
+
+	resp, err := callGitHubBrokerToken(t.Context(), srv.URL, srv.Client(), "github.com", "wangyu0426/agent-orchestrator.git")
+	if err != nil {
+		t.Fatalf("callGitHubBrokerToken: %v", err)
+	}
+	if resp.Token != "ghs_cli_helper_token_1234567890" || resp.Username != "x-access-token" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	if err := callGitHubBrokerInvalidate(t.Context(), srv.URL, srv.Client(), "github.com", "wangyu0426/agent-orchestrator.git"); err != nil {
+		t.Fatalf("callGitHubBrokerInvalidate: %v", err)
+	}
+	if !invalidated {
+		t.Fatalf("expected invalidate endpoint to be called")
+	}
+
+	// Verify git credential stdin parsing.
+	attrs := parseGitCredentialInput(bytes.NewBufferString("protocol=https\nhost=github.com\npath=wangyu0426/agent-orchestrator.git\n\n"))
+	if attrs["protocol"] != "https" || attrs["host"] != "github.com" || attrs["path"] != "wangyu0426/agent-orchestrator.git" {
+		t.Fatalf("unexpected parsed git credential attrs: %+v", attrs)
+	}
+
+	// Verify gh repo flag extraction.
+	if got := extractGHRepoFlag([]string{"pr", "view", "-R", "owner/repo"}); got != "owner/repo" {
+		t.Fatalf("extractGHRepoFlag(-R) = %q, want owner/repo", got)
+	}
+	if got := extractGHRepoFlag([]string{"api", "--repo=owner/repo2"}); got != "owner/repo2" {
+		t.Fatalf("extractGHRepoFlag(--repo=) = %q, want owner/repo2", got)
+	}
+
+	// Verify buildBrokerGHEnv scrubs personal tokens and injects fresh GH_TOKEN + isolated GH_CONFIG_DIR.
+	env := buildBrokerGHEnv([]string{"GITHUB_TOKEN=ghp_personal_1234567890", "GH_TOKEN=ghp_old_1234567890", "PATH=/usr/bin"}, "ghs_fresh_1234567890", "/tmp/iso-gh")
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "ghp_personal") || strings.Contains(joined, "ghp_old") {
+		t.Fatalf("personal tokens leaked into gh child env: %s", joined)
+	}
+	if !strings.Contains(joined, "GH_TOKEN=ghs_fresh_1234567890") || !strings.Contains(joined, "GH_CONFIG_DIR=/tmp/iso-gh") {
+		t.Fatalf("missing broker GH_TOKEN or GH_CONFIG_DIR in child env: %s", joined)
+	}
+}

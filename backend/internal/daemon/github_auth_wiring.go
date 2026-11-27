@@ -9,6 +9,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 )
 
 // githubAuthWiring carries the daemon's resolved GitHub authentication mode.
@@ -16,7 +17,9 @@ import (
 // use appTokens exclusively and fail closed (never falling back to PAT/env/gh).
 type githubAuthWiring struct {
 	appEnabled    bool
+	appProvider   *githubapp.Provider
 	appTokens     *githubapp.ScopedTokenSource
+	workerBroker  *githubbroker.Broker
 	apiBaseURL    string
 	graphqlURL    string
 	operatorLogin string
@@ -41,9 +44,25 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	if err != nil {
 		return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app auth: %w", err)
 	}
+	var broker *githubbroker.Broker
+	if cfg.WorkerBrokerEnabled {
+		broker, err = githubbroker.New(githubbroker.Config{
+			Provider:       provider,
+			AllowedRepos:   repos,
+			GitHubHost:     cfg.GitHubHost,
+			PrivateKeyPath: cfg.PrivateKeyPath,
+			IsolationMode:  cfg.WorkerIsolationMode,
+			Logger:         logger,
+		})
+		if err != nil {
+			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app worker broker: %w", err)
+		}
+	}
 	return githubAuthWiring{
 		appEnabled:    true,
+		appProvider:   provider,
 		appTokens:     provider.TokenSource(repos...),
+		workerBroker:  broker,
 		apiBaseURL:    baseURL,
 		graphqlURL:    deriveGitHubGraphQLURL(baseURL),
 		operatorLogin: strings.TrimSpace(strings.TrimPrefix(cfg.OperatorLogin, "@")),

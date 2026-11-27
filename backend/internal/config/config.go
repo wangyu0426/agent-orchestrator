@@ -114,13 +114,16 @@ type TelemetryConfig struct {
 // preserves its legacy PAT/env/gh credential chain. When Enabled is true, App
 // mode fails closed and never falls back to personal credentials.
 type GitHubAppConfig struct {
-	Enabled        bool
-	AppID          int64
-	InstallationID int64
-	PrivateKeyPath string
-	APIBaseURL     string
-	Repositories   []string
-	OperatorLogin  string
+	Enabled             bool
+	AppID               int64
+	InstallationID      int64
+	PrivateKeyPath      string
+	APIBaseURL          string
+	GitHubHost          string
+	Repositories        []string
+	OperatorLogin       string
+	WorkerBrokerEnabled bool
+	WorkerIsolationMode string
 }
 
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
@@ -566,6 +569,32 @@ func Load() (Config, error) {
 		if len(cfg.GitHubApp.Repositories) == 0 {
 			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_REPOSITORIES %q: must contain at least one repository when AO_GITHUB_APP_ENABLED is on", rawRepos)
 		}
+		cfg.GitHubApp.GitHubHost = strings.TrimSpace(os.Getenv("AO_GITHUB_APP_HOST"))
+		if cfg.GitHubApp.GitHubHost == "" {
+			cfg.GitHubApp.GitHubHost = "github.com"
+		}
+	}
+
+	if raw, ok := os.LookupEnv("AO_GITHUB_APP_WORKER_BROKER_ENABLED"); ok && strings.TrimSpace(raw) != "" {
+		v, err := parseToggleEnv("AO_GITHUB_APP_WORKER_BROKER_ENABLED", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.GitHubApp.WorkerBrokerEnabled = v
+	}
+	if cfg.GitHubApp.WorkerBrokerEnabled {
+		if !cfg.GitHubApp.Enabled {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_BROKER_ENABLED requires AO_GITHUB_APP_ENABLED=on")
+		}
+		isoMode := strings.ToLower(strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_ISOLATION")))
+		switch isoMode {
+		case "", "strict":
+			cfg.GitHubApp.WorkerIsolationMode = "strict"
+		case "external-sandbox", "unsafe-same-uid":
+			cfg.GitHubApp.WorkerIsolationMode = isoMode
+		default:
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_WORKER_ISOLATION %q: must be strict, external-sandbox, or unsafe-same-uid", isoMode)
+		}
 	}
 
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
@@ -714,8 +743,11 @@ var githubAppEnvKeys = []string{
 	"AO_GITHUB_APP_INSTALLATION_ID",
 	"AO_GITHUB_APP_PRIVATE_KEY_PATH",
 	"AO_GITHUB_APP_API_BASE_URL",
+	"AO_GITHUB_APP_HOST",
 	"AO_GITHUB_APP_REPOSITORIES",
 	"AO_GITHUB_APP_OPERATOR_LOGIN",
+	"AO_GITHUB_APP_WORKER_BROKER_ENABLED",
+	"AO_GITHUB_APP_WORKER_ISOLATION",
 }
 
 // ScrubGitHubAppEnv removes GitHub App configuration variables from the daemon

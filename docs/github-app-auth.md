@@ -1,6 +1,6 @@
 # GitHub App Authentication for AO Daemon
 
-The AO daemon supports an opt-in **GitHub App installation** authentication mode for its SCM and Tracker adapters. This gives the daemon an independent bot identity (`<app-slug>[bot]`) separate from the operator's personal GitHub account, without changing worker `git` or `gh` credentials.
+The AO daemon supports an opt-in **GitHub App installation** authentication mode for its SCM and Tracker adapters. This gives the daemon an independent bot identity (`<app-slug>[bot]`) separate from the operator's personal GitHub account. For routing worker `git` and `gh` operations through the GitHub App as well, see [Repo-Scoped GitHub App Credential Broker for Workers](github-app-credential-broker.md).
 
 ## Configuration
 

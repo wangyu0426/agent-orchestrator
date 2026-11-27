@@ -1373,6 +1373,7 @@ func Run(buildVersion string) (retErr error) {
 		Cues:               cuesvc.New(cuesvc.Deps{Store: store, Sessions: sessionSvc, Terminals: shellTermSvc}),
 		AgentAuth:          agentAuthSvc,
 		GitHub:             newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
+		GitHubBroker:       ghAuth.workerBroker,
 		Conversations:      chatSvc,
 		ConversationSearch: store,
 		Settings:           settingsSvc,

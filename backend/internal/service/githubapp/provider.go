@@ -87,9 +87,35 @@ type cachedToken struct {
 }
 
 type inflightRefresh struct {
-	done  chan struct{}
-	token string
-	err   error
+	done      chan struct{}
+	token     string
+	expiresAt time.Time
+	err       error
+}
+
+// ScopedTokenRequest describes a repo-scoped, optionally permission-restricted
+// installation access token request.
+type ScopedTokenRequest struct {
+	Repositories []string
+	Permissions  map[string]string
+}
+
+// ScopedToken is a minted installation access token with its expiry metadata.
+type ScopedToken struct {
+	Token        string
+	ExpiresAt    time.Time
+	Repositories []string
+	Permissions  map[string]string
+}
+
+// String implements fmt.Stringer without exposing the token value.
+func (t ScopedToken) String() string {
+	return fmt.Sprintf("githubapp.ScopedToken(repos=%v, expires_at=%s, token=[REDACTED])", t.Repositories, t.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+// GoString implements fmt.GoStringer without exposing the token value.
+func (t ScopedToken) GoString() string {
+	return t.String()
 }
 
 // Provider manages RS256 JWT signing and scoped installation access token
@@ -224,19 +250,38 @@ func (p *Provider) SignJWT(now time.Time) (string, error) {
 }
 
 // TokenForRepositories returns a cached or freshly exchanged installation access
-// token scoped to repos. When repos is empty, GitHub issues a token for all
-// repositories granted to the installation.
+// token scoped to repos. Empty scopes are rejected so App mode fails closed.
 func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (string, error) {
-	normalized, err := normalizeRepositories(repos)
+	scoped, err := p.MintScopedToken(ctx, ScopedTokenRequest{Repositories: repos})
 	if err != nil {
 		return "", err
 	}
-	scopeKey := strings.Join(normalized, ",")
+	return scoped.Token, nil
+}
+
+// MintScopedToken returns a cached or freshly exchanged installation access
+// token scoped to req.Repositories and optional req.Permissions, along with its
+// expiry timestamp.
+func (p *Provider) MintScopedToken(ctx context.Context, req ScopedTokenRequest) (ScopedToken, error) {
+	normalized, err := normalizeRepositories(req.Repositories)
+	if err != nil {
+		return ScopedToken{}, err
+	}
+	perms, err := normalizePermissions(req.Permissions)
+	if err != nil {
+		return ScopedToken{}, err
+	}
+	scopeKey := buildScopeKey(normalized, perms)
 
 	now := p.clock()
 	p.mu.Lock()
 	if entry, ok := p.cache[scopeKey]; ok && p.isFresh(entry, now) {
-		tok := entry.token
+		tok := ScopedToken{
+			Token:        entry.token,
+			ExpiresAt:    entry.expiresAt,
+			Repositories: append([]string(nil), normalized...),
+			Permissions:  clonePermissions(perms),
+		}
 		p.mu.Unlock()
 		return tok, nil
 	}
@@ -244,9 +289,17 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 		p.mu.Unlock()
 		select {
 		case <-call.done:
-			return call.token, call.err
+			if call.err != nil {
+				return ScopedToken{}, call.err
+			}
+			return ScopedToken{
+				Token:        call.token,
+				ExpiresAt:    call.expiresAt,
+				Repositories: append([]string(nil), normalized...),
+				Permissions:  clonePermissions(perms),
+			}, nil
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return ScopedToken{}, ctx.Err()
 		}
 	}
 
@@ -265,7 +318,7 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 		exchangeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 
-		token, expiresAt, err := p.exchangeToken(exchangeCtx, normalized)
+		token, expiresAt, err := p.exchangeToken(exchangeCtx, normalized, perms)
 
 		p.mu.Lock()
 		if err == nil {
@@ -276,6 +329,7 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 		}
 		delete(p.inflight, scopeKey)
 		call.token = token
+		call.expiresAt = expiresAt
 		call.err = err
 		close(call.done)
 		p.mu.Unlock()
@@ -283,19 +337,37 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 
 	select {
 	case <-call.done:
-		return call.token, call.err
+		if call.err != nil {
+			return ScopedToken{}, call.err
+		}
+		return ScopedToken{
+			Token:        call.token,
+			ExpiresAt:    call.expiresAt,
+			Repositories: append([]string(nil), normalized...),
+			Permissions:  clonePermissions(perms),
+		}, nil
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return ScopedToken{}, ctx.Err()
 	}
 }
 
 // InvalidateRepositories drops the cached token for the given repository scope.
 func (p *Provider) InvalidateRepositories(repos []string) {
-	normalized, err := normalizeRepositories(repos)
+	p.InvalidateScopedToken(ScopedTokenRequest{Repositories: repos})
+}
+
+// InvalidateScopedToken drops the cached token for the given repository and
+// permission scope.
+func (p *Provider) InvalidateScopedToken(req ScopedTokenRequest) {
+	normalized, err := normalizeRepositories(req.Repositories)
 	if err != nil {
 		return
 	}
-	scopeKey := strings.Join(normalized, ",")
+	perms, err := normalizePermissions(req.Permissions)
+	if err != nil {
+		return
+	}
+	scopeKey := buildScopeKey(normalized, perms)
 	p.mu.Lock()
 	delete(p.cache, scopeKey)
 	p.mu.Unlock()
@@ -384,7 +456,7 @@ func (p *Provider) isFresh(entry cachedToken, now time.Time) bool {
 	return now.Add(p.refreshSkew).Before(entry.expiresAt)
 }
 
-func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, time.Time, error) {
+func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[string]string) (string, time.Time, error) {
 	now := p.clock()
 	jwt, err := p.SignJWT(now)
 	if err != nil {
@@ -392,10 +464,14 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 	}
 
 	var reqBody io.Reader = http.NoBody
-	if len(repos) > 0 {
+	if len(repos) > 0 || len(perms) > 0 {
 		payload, err := json.Marshal(struct {
-			Repositories []string `json:"repositories"`
-		}{Repositories: repos})
+			Repositories []string          `json:"repositories,omitempty"`
+			Permissions  map[string]string `json:"permissions,omitempty"`
+		}{
+			Repositories: repos,
+			Permissions:  perms,
+		})
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("%w: encode scope payload: %w", ErrTokenExchange, err)
 		}
@@ -411,7 +487,7 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", p.userAgent)
-	if len(repos) > 0 {
+	if len(repos) > 0 || len(perms) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
@@ -541,6 +617,50 @@ func normalizeRepositories(repos []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func normalizePermissions(perms map[string]string) (map[string]string, error) {
+	if len(perms) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(perms))
+	for k, v := range perms {
+		key := strings.TrimSpace(k)
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			return nil, fmt.Errorf("%w: permission key and level must be non-empty", ErrInvalidConfig)
+		}
+		out[key] = val
+	}
+	return out, nil
+}
+
+func buildScopeKey(repos []string, perms map[string]string) string {
+	base := strings.Join(repos, ",")
+	if len(perms) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(perms))
+	for k := range perms {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+perms[k])
+	}
+	return base + "|" + strings.Join(parts, ",")
+}
+
+func clonePermissions(perms map[string]string) map[string]string {
+	if len(perms) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(perms))
+	for k, v := range perms {
+		out[k] = v
+	}
+	return out
 }
 
 func extractGitHubMessage(body []byte) string {
