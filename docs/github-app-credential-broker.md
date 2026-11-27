@@ -43,7 +43,7 @@ Same-UID `chmod 600` alone is **insufficient**: if the AO daemon and worker proc
 
 ## Inventory: Remotes, Inherited Credentials, Helper Bypasses & Launch Paths
 
-When broker mode is active, `githubbroker.WorkerEnv` enforces the following across all worker launch paths (tmux/ConPTY terminal sessions, Codex, AGY, Claude Code, and scoped `shellterm` shells):
+When broker mode is active, `githubbroker.WorkerEnv` enforces the following across all agent worker launch paths (tmux/ConPTY terminal sessions, Codex, AGY, and Claude Code; user-opened interactive `shellterm` shells retain the operator's own environment and clear `AO_GITHUB_BROKER_TOKEN`):
 
 | Vector | Mitigation |
 | --- | --- |

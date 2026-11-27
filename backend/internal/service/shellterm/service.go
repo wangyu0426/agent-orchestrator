@@ -22,7 +22,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
-	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 )
 
 // ShellRuntime is the slice of the runtime adapter a shell terminal needs:
@@ -113,14 +112,7 @@ type Service struct {
 	// hasn't run yet.
 	onSessionGateWait func(domain.SessionID)
 
-	trackers     []TerminalTracker // set once at boot
-	githubBroker *githubbroker.Broker
-}
-
-// SetGitHubBroker configures the optional GitHub App credential broker so
-// shell terminals scrub personal GitHub credentials and enforce broker isolation.
-func (s *Service) SetGitHubBroker(broker *githubbroker.Broker) {
-	s.githubBroker = broker
+	trackers []TerminalTracker // set once at boot
 }
 
 // TerminalTracker follows user shells as they open and close: the agent
@@ -426,36 +418,7 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
 	// from an unusual daemon launch environment.
 	env["AO_BROWSER_CAPABILITY"] = ""
 	env["AO_PREVIEW_CAPABILITY"] = ""
-	if s.githubBroker != nil {
-		aoBin := "ao"
-		if exe, exeErr := os.Executable(); exeErr == nil && strings.TrimSpace(exe) != "" {
-			aoBin = exe
-		}
-		var ghShimDir, ghConfigDir string
-		if s.dataDir != "" {
-			scopeID := "shell-global"
-			if in.SessionID != "" {
-				scopeID = string(in.SessionID)
-			}
-			ghShimDir = filepath.Join(s.dataDir, "runtime", "github-broker-bin", scopeID)
-			if _, shimErr := githubbroker.EnsureGHShim(ghShimDir, aoBin); shimErr != nil {
-				return ShellTerminal{}, fmt.Errorf("open shell terminal: github broker gh shim: %w", shimErr)
-			}
-			ghConfigDir = filepath.Join(s.dataDir, "runtime", "github-broker-gh", scopeID)
-			if mkErr := os.MkdirAll(ghConfigDir, 0o700); mkErr != nil {
-				return ShellTerminal{}, fmt.Errorf("open shell terminal: github broker gh config dir: %w", mkErr)
-			}
-		}
-		for k, v := range githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
-			GitHubHost:  s.githubBroker.GitHubHost(),
-			AOBinary:    aoBin,
-			GHConfigDir: ghConfigDir,
-			GHShimDir:   ghShimDir,
-			CurrentPATH: env["PATH"],
-		}) {
-			env[k] = v
-		}
-	}
+	env["AO_GITHUB_BROKER_TOKEN"] = ""
 	// What the user types here is theirs, not the agent's turn's (see cli caller header).
 	env[caller.ShellTerminalEnv] = "1"
 	var verifier string
