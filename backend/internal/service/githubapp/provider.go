@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -140,6 +142,9 @@ func NewProvider(cfg Config) (*Provider, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
+	if err := validateBaseURL(baseURL); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
@@ -254,7 +259,7 @@ func (p *Provider) TokenForRepositories(ctx context.Context, repos []string) (st
 		if p.httpClient != nil && p.httpClient.Timeout > 0 {
 			timeout = p.httpClient.Timeout
 		}
-		exchangeCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		exchangeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 
 		token, expiresAt, err := p.exchangeToken(exchangeCtx, normalized)
@@ -445,6 +450,31 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string) (string, t
 	}
 
 	return token, expiresAt, nil
+}
+
+func validateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid base_url: %w", err)
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return errors.New("base_url must include a host")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return errors.New("base_url must use https for non-loopback hosts")
+	default:
+		return fmt.Errorf("base_url has unsupported scheme %q", u.Scheme)
+	}
 }
 
 func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {

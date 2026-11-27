@@ -59,6 +59,21 @@ func TestNewProvider_Validation(t *testing.T) {
 	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: []byte("not-a-pem")}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("bad pem: got %v, want ErrInvalidConfig", err)
 	}
+	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: pkcs1, BaseURL: "http://api.github.com"}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("remote http base_url: got %v, want ErrInvalidConfig", err)
+	}
+	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: pkcs1, BaseURL: "ftp://api.github.com"}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unsupported scheme base_url: got %v, want ErrInvalidConfig", err)
+	}
+	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: pkcs1, BaseURL: "http://127.0.0.1:8080"}); err != nil {
+		t.Fatalf("loopback http base_url rejected: %v", err)
+	}
+	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: pkcs1, BaseURL: "http://localhost:8080"}); err != nil {
+		t.Fatalf("localhost http base_url rejected: %v", err)
+	}
+	if _, err := NewProvider(Config{AppID: 1, InstallationID: 2, PrivateKeyPEM: pkcs1, BaseURL: "https://github.example.com/api/v3"}); err != nil {
+		t.Fatalf("https base_url rejected: %v", err)
+	}
 
 	// Both PKCS#1 and PKCS#8 keys must be accepted.
 	if _, err := NewProvider(Config{AppID: 123, InstallationID: 456, PrivateKeyPEM: pkcs1}); err != nil {
