@@ -151,6 +151,34 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for GitHub origin with embedded credentials, got %v", err)
 	}
 
+	// Workspace project with empty parent origin binds child GitHub repos.
+	store.projects["proj-ws"] = domain.ProjectRecord{
+		ID:   "proj-ws",
+		Kind: domain.ProjectKindWorkspace,
+	}
+	store.workspaceRepo["proj-ws"] = []domain.WorkspaceRepoRecord{
+		{ProjectID: "proj-ws", Name: "agent-orchestrator", RepoOriginURL: "https://github.com/wangyu0426/agent-orchestrator.git"},
+	}
+	wsEnv, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-ws", "proj-ws", "", nil, domain.AgentHarness("codex"))
+	if err != nil {
+		t.Fatalf("expected workspace project with allowlisted child GitHub repo to succeed, got %v", err)
+	}
+	if wsEnv[githubbroker.EnvBrokerToken] == "" {
+		t.Fatalf("expected broker token for workspace project with child GitHub repo")
+	}
+
+	// Workspace project with an unlisted child GitHub repo fails closed.
+	store.projects["proj-ws-unlisted"] = domain.ProjectRecord{
+		ID:   "proj-ws-unlisted",
+		Kind: domain.ProjectKindWorkspace,
+	}
+	store.workspaceRepo["proj-ws-unlisted"] = []domain.WorkspaceRepoRecord{
+		{ProjectID: "proj-ws-unlisted", Name: "secret", RepoOriginURL: "https://github.com/other-org/secret.git"},
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-ws-unlisted", "proj-ws-unlisted", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for workspace project with unlisted child GitHub repo, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",

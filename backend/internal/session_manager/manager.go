@@ -7301,6 +7301,21 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 			if isGitHub {
 				repos = append(repos, ownerRepo)
 			}
+			if proj.Kind == domain.ProjectKindWorkspace {
+				wsRepos, listErr := m.store.ListWorkspaceRepos(ctx, proj.ID)
+				if listErr != nil {
+					return fmt.Errorf("list workspace repos for project %s: %w", project, listErr)
+				}
+				for _, child := range wsRepos {
+					childRepo, childIsGitHub, childErr := extractOwnerRepoFromOriginURL(child.RepoOriginURL, m.githubBroker.GitHubHost())
+					if childErr != nil {
+						return childErr
+					}
+					if childIsGitHub {
+						repos = append(repos, childRepo)
+					}
+				}
+			}
 		}
 	}
 	if len(repos) == 0 {
