@@ -7389,6 +7389,10 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		}
 		parsedHost = strings.ToLower(strings.TrimSpace(u.Hostname()))
 		pathPart = u.Path
+		scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+		if parsedHost == h && (scheme == "http" || scheme == "https") && u.User != nil {
+			return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
+		}
 	} else if atIdx := strings.Index(raw, "@"); atIdx >= 0 {
 		rest := raw[atIdx+1:]
 		if colonIdx := strings.Index(rest, ":"); colonIdx > 0 {

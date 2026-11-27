@@ -142,6 +142,15 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for malformed GitHub origin, got %v", err)
 	}
 
+	// GitHub HTTPS origin with embedded userinfo fails closed.
+	store.projects["proj-userinfo-gh"] = domain.ProjectRecord{
+		ID:            "proj-userinfo-gh",
+		RepoOriginURL: "https://x-access-token:ghp_secret123@github.com/wangyu0426/agent-orchestrator.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-userinfo-gh", "proj-userinfo-gh", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for GitHub origin with embedded credentials, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",

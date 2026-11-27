@@ -86,6 +86,9 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		{"credential.helper", ""},
 		{"credential.helper", helperCmd},
 		{"credential.useHttpPath", "true"},
+		{"http.extraHeader", ""},
+		{fmt.Sprintf("http.https://%s/.extraHeader", host), ""},
+		{fmt.Sprintf("http.https://%s.extraHeader", host), ""},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("git@%s:", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s/", host)},
 	}

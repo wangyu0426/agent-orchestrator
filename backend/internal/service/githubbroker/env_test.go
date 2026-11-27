@@ -43,8 +43,14 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	if env["GIT_CONFIG_KEY_2"] != "credential.useHttpPath" || env["GIT_CONFIG_VALUE_2"] != "true" {
 		t.Fatalf("expected credential.useHttpPath=true, got %q=%q", env["GIT_CONFIG_KEY_2"], env["GIT_CONFIG_VALUE_2"])
 	}
-	if env["GIT_CONFIG_KEY_3"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_3"] != "git@github.com:" {
-		t.Fatalf("expected SSH rewrite for git@github.com:, got %q=%q", env["GIT_CONFIG_KEY_3"], env["GIT_CONFIG_VALUE_3"])
+	if env["GIT_CONFIG_KEY_3"] != "http.extraHeader" || env["GIT_CONFIG_VALUE_3"] != "" {
+		t.Fatalf("expected http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_3"], env["GIT_CONFIG_VALUE_3"])
+	}
+	if env["GIT_CONFIG_KEY_4"] != "http.https://github.com/.extraHeader" || env["GIT_CONFIG_VALUE_4"] != "" {
+		t.Fatalf("expected host http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_4"], env["GIT_CONFIG_VALUE_4"])
+	}
+	if env["GIT_CONFIG_KEY_6"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_6"] != "git@github.com:" {
+		t.Fatalf("expected SSH rewrite for git@github.com:, got %q=%q", env["GIT_CONFIG_KEY_6"], env["GIT_CONFIG_VALUE_6"])
 	}
 }
 
