@@ -77,11 +77,6 @@ type Config struct {
 	RefreshSkew time.Duration
 	// UserAgent overrides the User-Agent header.
 	UserAgent string
-	// OperatorLogin is an optional GitHub username preserved for identity-only
-	// attribution checks (such as PR claiming and automatic PR-to-session
-	// discovery) while all GitHub API requests still use the App installation
-	// token exclusively.
-	OperatorLogin string
 	// Logger is optional; defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -108,7 +103,6 @@ type Provider struct {
 	clock          func() time.Time
 	refreshSkew    time.Duration
 	userAgent      string
-	operatorLogin  string
 	logger         *slog.Logger
 
 	mu       sync.Mutex
@@ -181,7 +175,6 @@ func NewProvider(cfg Config) (*Provider, error) {
 		clock:          clock,
 		refreshSkew:    refreshSkew,
 		userAgent:      userAgent,
-		operatorLogin:  strings.TrimSpace(strings.TrimPrefix(cfg.OperatorLogin, "@")),
 		logger:         logger,
 		cache:          make(map[string]cachedToken),
 		inflight:       make(map[string]*inflightRefresh),

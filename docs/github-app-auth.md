@@ -16,7 +16,6 @@ To enable App mode, set the following environment variables when starting the da
 | `AO_GITHUB_APP_PRIVATE_KEY_PATH` | Yes (when enabled) | Path to the PEM-encoded RSA private key file (PKCS#1 or PKCS#8). |
 | `AO_GITHUB_APP_REPOSITORIES` | Yes (when enabled) | Comma-separated list of repository names (without owner) to scope issued installation tokens. Required in App mode; omitting or leaving this empty fails closed and never mints an installation-wide token. |
 | `AO_GITHUB_APP_API_BASE_URL` | No | Override GitHub REST API base URL (defaults to `https://api.github.com`). |
-| `AO_GITHUB_APP_OPERATOR_LOGIN` | No | Optional GitHub username preserved for identity-only PR claim and automatic PR-to-session attribution checks while all GitHub API requests still use the App installation token. |
 
 ## Fail-Closed Behavior
 

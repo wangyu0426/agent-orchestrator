@@ -371,30 +371,4 @@ func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
 	if hitTracker.Load() != 1 || hitSCM.Load() != 1 {
 		t.Fatalf("expected custom APIBaseURL to be hit by both tracker (%d) and scm (%d)", hitTracker.Load(), hitSCM.Load())
 	}
-
-	// Even when OperatorLogin is set, SCMIdentity keeps Human=false because
-	// the authenticated principal is a GitHub App installation, not a human.
-	authWithOp, err := newGitHubAuthWiring(config.GitHubAppConfig{
-		Enabled:        true,
-		AppID:          111,
-		InstallationID: 888,
-		PrivateKeyPath: keyPath,
-		APIBaseURL:     srv.URL,
-		Repositories:   []string{"repo"},
-		OperatorLogin:  "@wangyu0426",
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("newGitHubAuthWiring with OperatorLogin: %v", err)
-	}
-	scmOp, err := newGitHubSCMProviderWithAuth(authWithOp, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("newGitHubSCMProviderWithAuth with OperatorLogin: %v", err)
-	}
-	ident, err := scmOp.AuthenticatedIdentity(context.Background())
-	if err != nil {
-		t.Fatalf("AuthenticatedIdentity with OperatorLogin: %v", err)
-	}
-	if ident.Human {
-		t.Fatalf("expected Human=false for GitHub App installation principal, got %+v", ident)
-	}
 }
