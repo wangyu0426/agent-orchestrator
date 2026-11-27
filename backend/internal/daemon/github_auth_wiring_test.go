@@ -15,16 +15,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	scmgithub "github.com/aoagents/agent-orchestrator/backend/internal/adapters/scm/github"
+	scmmulti "github.com/aoagents/agent-orchestrator/backend/internal/adapters/scm/multi"
 	trackergithub "github.com/aoagents/agent-orchestrator/backend/internal/adapters/tracker/github"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
+	scmobserve "github.com/aoagents/agent-orchestrator/backend/internal/observe/scm"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
 func writeTempAppKey(t *testing.T) string {
@@ -424,6 +429,25 @@ func TestGitHubApp_SCM403PreservesTokenAnd401Refreshes(t *testing.T) {
 			} else {
 				_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
 			}
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/pulls":
+			code := int(status.Load())
+			w.WriteHeader(code)
+			if code == http.StatusOK {
+				_, _ = w.Write([]byte(`[]`))
+			} else {
+				_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/pulls/1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"number":1,"state":"open","draft":false,"merged":false,"html_url":"https://github.com/org/repo/pull/1","head":{"ref":"feat/x","sha":"abc"},"base":{"ref":"main"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			code := int(status.Load())
+			w.WriteHeader(code)
+			if code == http.StatusOK {
+				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"reviewDecision":"APPROVED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"state":"OPEN","commits":{"nodes":[]},"reviewThreads":{"nodes":[]}}}}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -451,15 +475,19 @@ func TestGitHubApp_SCM403PreservesTokenAnd401Refreshes(t *testing.T) {
 		Body: "ok",
 	}
 
-	// Permission-only 403 must not evict the cached installation token.
+	// Permission-only 403 across REST, ETag (ListPRsByRepo), and GraphQL (Observe)
+	// must not evict the cached installation token.
 	if _, err := scmProv.PostComment(context.Background(), req); err == nil {
-		t.Fatal("expected error on 403")
+		t.Fatal("expected error on REST 403")
 	}
-	if _, err := scmProv.PostComment(context.Background(), req); err == nil {
-		t.Fatal("expected error on second 403")
+	if _, err := scmProv.ListPRsByRepo(context.Background(), ports.SCMRepo{Provider: "github", Owner: "org", Name: "repo"}, time.Time{}); err == nil {
+		t.Fatal("expected error on ETag 403")
+	}
+	if _, err := scmProv.Observe(context.Background(), "https://github.com/org/repo/pull/1"); err == nil {
+		t.Fatal("expected error on GraphQL 403")
 	}
 	if got := exchanges.Load(); got != 1 {
-		t.Fatalf("exchanges after two 403s = %d, want 1 (token must not be evicted on 403)", got)
+		t.Fatalf("exchanges after REST+ETag+GraphQL 403s = %d, want 1 (token must not be evicted on 403)", got)
 	}
 
 	// Confirmed 401 must evict the cached token so the next request re-mints.
@@ -473,5 +501,183 @@ func TestGitHubApp_SCM403PreservesTokenAnd401Refreshes(t *testing.T) {
 	}
 	if got := exchanges.Load(); got != 2 {
 		t.Fatalf("exchanges after 401 refresh = %d, want 2", got)
+	}
+}
+
+type appFeedbackMessenger struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (m *appFeedbackMessenger) Send(_ context.Context, _ domain.SessionID, msg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, msg)
+	return nil
+}
+
+func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment(t *testing.T) {
+	keyPath := writeTempAppKey(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/777/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      "ghs_observer_e2e_token_1234",
+				"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/wangyu0426/agent-orchestrator/pulls":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			prNode := `{
+				"number": 8,
+				"title": "Test PR",
+				"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8",
+				"state": "OPEN",
+				"isDraft": false,
+				"mergeable": "MERGEABLE",
+				"mergeStateStatus": "CLEAN",
+				"reviewDecision": "CHANGES_REQUESTED",
+				"baseRefName": "main",
+				"headRefName": "feat/test",
+				"headRefOid": "abc123",
+				"author": {"__typename": "User", "login": "wangyu0426"},
+				"comments": {
+					"nodes": [{
+						"id": "IC_bot_status",
+						"body": "AO status update",
+						"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8#issuecomment-1",
+						"createdAt": "2026-11-27T06:00:00Z",
+						"author": {"__typename": "Bot", "login": "ao-daemon[bot]"}
+					}]
+				},
+				"reviewSummaries": {
+					"nodes": [{
+						"id": "PRR_human",
+						"state": "CHANGES_REQUESTED",
+						"body": "Please fix this",
+						"submittedAt": "2026-11-27T06:01:00Z",
+						"commit": {"oid": "abc123"},
+						"author": {"__typename": "User", "login": "wangyu0426"}
+					}]
+				},
+				"reviewThreads": {
+					"nodes": [{
+						"id": "T_human",
+						"isResolved": false,
+						"path": "main.go",
+						"line": 10,
+						"comments": {
+							"nodes": [{
+								"id": "C_human",
+								"body": "Please fix this before merge",
+								"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8#discussion_r1",
+								"createdAt": "2026-11-27T06:01:00Z",
+								"author": {"__typename": "User", "login": "wangyu0426"}
+							}]
+						}
+					}]
+				},
+				"commits": {"nodes": [{"commit": {"oid": "abc123", "statusCheckRollup": null}}]}
+			}`
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, `{"data":{"pr0":{"pullRequest":%s},"repo":{"pullRequest":%s}}}`, prNode, prNode)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC()
+	if err := store.UpsertProject(context.Background(), domain.ProjectRecord{
+		ID:            "proj-1",
+		Path:          t.TempDir(),
+		RepoOriginURL: "https://github.com/wangyu0426/agent-orchestrator.git",
+		RegisteredAt:  now,
+	}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	rec, err := store.CreateSession(context.Background(), domain.SessionRecord{
+		ProjectID:        "proj-1",
+		Kind:             domain.KindWorker,
+		Metadata:         domain.SessionMetadata{Branch: "feat/test"},
+		Activity:         domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		AutoInjectReview: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := store.ClaimPR(context.Background(), domain.PullRequest{
+		URL:       "https://github.com/wangyu0426/agent-orchestrator/pull/8",
+		SessionID: rec.ID,
+		Number:    8,
+		Provider:  "github",
+		Host:      "github.com",
+		Repo:      "wangyu0426/agent-orchestrator",
+		UpdatedAt: now,
+	}, nil, nil, nil, nil, ports.ReviewWriteReplace, true); err != nil {
+		t.Fatalf("ClaimPR: %v", err)
+	}
+
+	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          555,
+		InstallationID: 777,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+		Repositories:   []string{"agent-orchestrator"},
+		OperatorLogin:  "wangyu0426",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring: %v", err)
+	}
+	scmProv, err := newGitHubSCMProviderWithAuth(auth, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubSCMProviderWithAuth: %v", err)
+	}
+
+	messenger := &appFeedbackMessenger{}
+	lcm := lifecycle.New(store, messenger)
+	multi := scmmulti.New(scmmulti.NamedProvider{Key: "github", Provider: scmProv})
+	obs := scmobserve.New(multi, store, lcm, scmobserve.Config{
+		Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ScopedIdentityResolver: auth.attributionResolver(multi),
+	})
+
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatalf("obs.Poll: %v", err)
+	}
+
+	prURL := "https://github.com/wangyu0426/agent-orchestrator/pull/8"
+	reviews, err := store.ListPRReviews(context.Background(), prURL)
+	if err != nil {
+		t.Fatalf("ListPRReviews: %v", err)
+	}
+	if len(reviews) != 1 || reviews[0].Author != "wangyu0426" || reviews[0].State != domain.ReviewChangesRequest || reviews[0].IsBot {
+		t.Fatalf("persisted reviews = %+v, want 1 human CHANGES_REQUESTED review", reviews)
+	}
+
+	comments, err := store.ListPRComments(context.Background(), prURL)
+	if err != nil {
+		t.Fatalf("ListPRComments: %v", err)
+	}
+	if len(comments) != 1 || comments[0].Author != "wangyu0426" || comments[0].IsBot {
+		t.Fatalf("persisted comments = %+v, want only the 1 human review comment (own bot status comment must not be persisted as review feedback)", comments)
+	}
+
+	messenger.mu.Lock()
+	msgs := append([]string(nil), messenger.messages...)
+	messenger.mu.Unlock()
+	for _, msg := range msgs {
+		if strings.Contains(msg, "AO status update") {
+			t.Fatalf("own bot status comment must not be routed as feedback: %q", msg)
+		}
 	}
 }
