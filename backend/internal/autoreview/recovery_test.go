@@ -160,3 +160,42 @@ func TestAutoReviewPermanentFailureBlocksWithActionableDetail(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoReviewBackoffUsesCompletedAtInsteadOfCreatedAt(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 10, 0, 0, time.UTC)
+	completedAt := now.Add(-10 * time.Second)
+	store := &fakeStore{
+		session: domain.SessionRecord{
+			ID:                "s1",
+			ProjectID:         "p1",
+			Kind:              domain.KindWorker,
+			Harness:           domain.HarnessCodex,
+			AutoReviewEnabled: true,
+			Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+		},
+		project: domain.ProjectRecord{ID: "p1"},
+		prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
+		runs: []domain.ReviewRun{{
+			ID:            "long-run-1",
+			PRURL:         "pr1",
+			TargetSHA:     "sha1",
+			Harness:       domain.ReviewerCodex,
+			TriggerSource: domain.ReviewTriggerAuto,
+			Status:        domain.ReviewRunFailed,
+			Body:          "transient timeout",
+			CreatedAt:     now.Add(-10 * time.Minute),
+			CompletedAt:   &completedAt,
+		}},
+	}
+	trig := &fakeTrigger{}
+	coord := New(store, trig, Config{Clock: func() time.Time { return now }})
+
+	res, err := coord.EvaluateSession(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRetryAt := completedAt.Add(domain.AutoReviewRetryBaseDelay)
+	if res.Triggered || res.Reason != "auto_review_retry_backoff" || !res.RetryAt.Equal(wantRetryAt) || trig.calls != 0 {
+		t.Fatalf("expected backoff from CompletedAt (%v), got res=%+v calls=%d", wantRetryAt, res, trig.calls)
+	}
+}

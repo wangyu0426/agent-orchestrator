@@ -94,6 +94,7 @@ type ReviewRun struct {
 	// worker so the worker knows exactly which review to address and reply to.
 	GithubReviewID string     `json:"githubReviewId"`
 	CreatedAt      time.Time  `json:"createdAt"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
 	// AutoInjectReview snapshots the session policy when this result is first
 	// recorded. Later toggle changes must not rewrite or deliver this run.
@@ -144,6 +145,7 @@ type CurrentHeadReviewRun struct {
 	PRURL     string
 	Status    ReviewRunStatus
 	Verdict   ReviewVerdict
+	Body      string
 	ID        string
 	CreatedAt time.Time
 	// FailedAutoRuns counts every failed auto review pass on this PR head.
@@ -273,6 +275,7 @@ func EvaluateAutoReviewHead(
 ) AutoReviewHeadDecision {
 	failedAutoRuns := 0
 	var latestFailed ReviewRun
+	var latestFailedAt time.Time
 	hasLatestFailed := false
 
 	for _, run := range runs {
@@ -299,9 +302,14 @@ func EvaluateAutoReviewHead(
 				continue
 			}
 			failedAutoRuns++
-			if !hasLatestFailed || run.CreatedAt.After(latestFailed.CreatedAt) ||
-				(run.CreatedAt.Equal(latestFailed.CreatedAt) && run.CreatedAt.IsZero()) {
+			failedAt := run.CreatedAt
+			if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+				failedAt = *run.CompletedAt
+			}
+			if !hasLatestFailed || failedAt.After(latestFailedAt) ||
+				(failedAt.Equal(latestFailedAt) && failedAt.IsZero()) {
 				latestFailed = run
+				latestFailedAt = failedAt
 				hasLatestFailed = true
 			}
 		}
@@ -322,8 +330,8 @@ func EvaluateAutoReviewHead(
 		}
 	}
 
-	if !latestFailed.CreatedAt.IsZero() {
-		retryAt := latestFailed.CreatedAt.Add(AutoReviewRetryBackoff(failedAutoRuns))
+	if !latestFailedAt.IsZero() {
+		retryAt := latestFailedAt.Add(AutoReviewRetryBackoff(failedAutoRuns))
 		if now.Before(retryAt) {
 			return AutoReviewHeadDecision{
 				Blocked:      true,

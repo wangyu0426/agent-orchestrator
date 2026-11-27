@@ -494,7 +494,10 @@ func (m *Manager) rearmMergeConflict(ctx context.Context, prURL string) error {
 	key := mergeConflictKey(prURL)
 	_, seen := m.react.seen[key]
 	_, attempted := m.react.attempts[key]
-	if !seen && !attempted && !m.react.pendingRearm[prURL] {
+	_, failed := m.react.failedAttempts[key]
+	_, hasRetry := m.react.nextRetryAt[key]
+	_, hasReason := m.react.lastReason[key]
+	if !seen && !attempted && !failed && !hasRetry && !hasReason && !m.react.pendingRearm[prURL] {
 		// Nothing is armed and no earlier re-arm is still owed a durable write,
 		// so skip the store write: a steadily mergeable PR must not re-persist
 		// an unchanged payload on every poll.

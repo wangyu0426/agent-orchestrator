@@ -172,6 +172,15 @@ func TestSessionListDerivesDisplayStatus(t *testing.T) {
 			want: contract.DisplayReviewFailed,
 		},
 		{
+			name:   "a permanent auth failure has failed",
+			record: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", AutoReviewEnabled: true},
+			pr:     &domain.PRFacts{URL: "pr1", HeadSHA: "head1"},
+			runs: []domain.CurrentHeadReviewRun{{
+				PRURL: "pr1", Status: domain.ReviewRunFailed, Body: domain.ReviewRunAuthRequiredBody,
+			}},
+			want: contract.DisplayReviewFailed,
+		},
+		{
 			name: "failing checks on the current head are being fixed",
 			record: domain.SessionRecord{
 				ID: "mer-1", ProjectID: "mer", AutoInjectCI: true,

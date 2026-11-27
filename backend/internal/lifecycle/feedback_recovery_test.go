@@ -101,3 +101,34 @@ func TestFeedbackRedeliveryStopsOnResolvedOrTerminalPR(t *testing.T) {
 		t.Fatalf("resolved feedback must not be delivered, got %d", len(msg.msgs))
 	}
 }
+
+func TestRearmMergeConflictClearsSuppressedRetryState(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	m, st, msg := newManager()
+	m.clock = func() time.Time { return now }
+	st.sessions["mer-1"] = working("mer-1")
+	st.prs["mer-1"] = []domain.PullRequest{{URL: "pr1", AutoInjectCI: true}}
+
+	// First conflicting observation fails delivery, arming retry backoff without setting seen/attempts.
+	msg.err = errors.New("temporary failure")
+	conflictObs := ports.PRObservation{Fetched: true, URL: "pr1", Mergeability: domain.MergeConflicting}
+	if err := m.ApplyPRObservation(context.Background(), "mer-1", conflictObs); err == nil {
+		t.Fatal("expected delivery error")
+	}
+
+	// Conflict clears: rearmMergeConflict must clear the persisted retry backoff state.
+	msg.err = nil
+	clearObs := ports.PRObservation{Fetched: true, URL: "pr1", Mergeability: domain.MergeMergeable}
+	if err := m.ApplyPRObservation(context.Background(), "mer-1", clearObs); err != nil {
+		t.Fatalf("clear observation: %v", err)
+	}
+
+	// Conflict returns immediately (before the old 30s backoff deadline): must nudge right away.
+	now = now.Add(5 * time.Second)
+	if err := m.ApplyPRObservation(context.Background(), "mer-1", conflictObs); err != nil {
+		t.Fatalf("returning conflict observation: %v", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("expected immediate nudge after conflict re-arm, got %d", len(msg.msgs))
+	}
+}
