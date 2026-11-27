@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -7293,7 +7294,11 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 			return fmt.Errorf("read project %s for github broker: %w", project, err)
 		}
 		if found {
-			if ownerRepo := extractOwnerRepoFromOriginURL(proj.RepoOriginURL, m.githubBroker.GitHubHost()); ownerRepo != "" {
+			ownerRepo, isGitHub, parseErr := extractOwnerRepoFromOriginURL(proj.RepoOriginURL, m.githubBroker.GitHubHost())
+			if parseErr != nil {
+				return parseErr
+			}
+			if isGitHub {
 				repos = append(repos, ownerRepo)
 			}
 		}
@@ -7355,30 +7360,51 @@ func (m *Manager) revokeGitHubBrokerSession(id domain.SessionID) {
 	}
 }
 
-func extractOwnerRepoFromOriginURL(originURL, host string) string {
+func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, isGitHubHost bool, err error) {
 	raw := strings.TrimSpace(originURL)
 	if raw == "" {
-		return ""
+		return "", false, nil
 	}
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
 		h = githubbroker.DefaultGitHubHost
 	}
-	lower := strings.ToLower(raw)
-	for _, prefix := range []string{
-		"https://" + h + "/",
-		"http://" + h + "/",
-		"git@" + h + ":",
-		"ssh://git@" + h + "/",
-	} {
-		if strings.HasPrefix(lower, prefix) {
-			rest := strings.TrimSuffix(strings.Trim(raw[len(prefix):], "/"), ".git")
-			if strings.Count(rest, "/") == 1 {
-				return rest
+
+	var parsedHost, pathPart string
+	if strings.Contains(raw, "://") {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			if strings.Contains(strings.ToLower(raw), h) {
+				return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
 			}
+			return "", false, nil
+		}
+		parsedHost = strings.ToLower(strings.TrimSpace(u.Hostname()))
+		pathPart = u.Path
+	} else if atIdx := strings.Index(raw, "@"); atIdx >= 0 {
+		rest := raw[atIdx+1:]
+		if colonIdx := strings.Index(rest, ":"); colonIdx > 0 {
+			parsedHost = strings.ToLower(strings.TrimSpace(rest[:colonIdx]))
+			pathPart = rest[colonIdx+1:]
 		}
 	}
-	return ""
+
+	if parsedHost == "" {
+		if strings.Contains(strings.ToLower(raw), h) {
+			return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+		}
+		return "", false, nil
+	}
+	if parsedHost != h {
+		return "", false, nil
+	}
+
+	clean := strings.TrimSuffix(strings.Trim(pathPart, "/"), ".git")
+	parts := strings.Split(clean, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+	}
+	return parts[0] + "/" + parts[1], true, nil
 }
 
 // prepareWorkerLaunchEnv couples capability issuance with durable verifier

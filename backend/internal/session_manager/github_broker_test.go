@@ -120,6 +120,28 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected no broker token for non-GitHub project, got %q", glEnv[githubbroker.EnvBrokerToken])
 	}
 
+	// GitHub SSH URL with explicit port is recognized and brokered.
+	store.projects["proj-ssh-port"] = domain.ProjectRecord{
+		ID:            "proj-ssh-port",
+		RepoOriginURL: "ssh://git@github.com:22/wangyu0426/agent-orchestrator.git",
+	}
+	sshEnv, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-ssh-port", "proj-ssh-port", "", nil, domain.AgentHarness("codex"))
+	if err != nil {
+		t.Fatalf("expected ssh://git@github.com:22 origin to be brokered, got %v", err)
+	}
+	if sshEnv[githubbroker.EnvBrokerToken] == "" {
+		t.Fatalf("expected broker token for ssh://git@github.com:22 origin")
+	}
+
+	// Malformed GitHub origin fails closed instead of falling back to legacy credentials.
+	store.projects["proj-bad-gh"] = domain.ProjectRecord{
+		ID:            "proj-bad-gh",
+		RepoOriginURL: "https://github.com/only-one-segment",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-bad-gh", "proj-bad-gh", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for malformed GitHub origin, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",
