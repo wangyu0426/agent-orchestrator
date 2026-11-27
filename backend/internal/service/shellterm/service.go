@@ -431,9 +431,26 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
 		if exe, exeErr := os.Executable(); exeErr == nil && strings.TrimSpace(exe) != "" {
 			aoBin = exe
 		}
+		var ghShimDir, ghConfigDir string
+		if s.dataDir != "" {
+			scopeID := "shell-global"
+			if in.SessionID != "" {
+				scopeID = string(in.SessionID)
+			}
+			ghShimDir = filepath.Join(s.dataDir, "runtime", "github-broker-bin", scopeID)
+			if _, shimErr := githubbroker.EnsureGHShim(ghShimDir, aoBin); shimErr != nil {
+				return ShellTerminal{}, fmt.Errorf("open shell terminal: github broker gh shim: %w", shimErr)
+			}
+			ghConfigDir = filepath.Join(s.dataDir, "runtime", "github-broker-gh", scopeID)
+			if mkErr := os.MkdirAll(ghConfigDir, 0o700); mkErr != nil {
+				return ShellTerminal{}, fmt.Errorf("open shell terminal: github broker gh config dir: %w", mkErr)
+			}
+		}
 		for k, v := range githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
 			GitHubHost:  s.githubBroker.GitHubHost(),
 			AOBinary:    aoBin,
+			GHConfigDir: ghConfigDir,
+			GHShimDir:   ghShimDir,
 			CurrentPATH: env["PATH"],
 		}) {
 			env[k] = v
