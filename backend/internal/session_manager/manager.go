@@ -7406,7 +7406,10 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		pathPart = u.Path
 		scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
 		if parsedHost == h {
-			if (scheme == "http" || scheme == "https") && u.User != nil {
+			if scheme == "http" {
+				return "", true, fmt.Errorf("%w: plaintext http GitHub origin URL %q is not supported; use https", githubbroker.ErrForbiddenRepo, originURL)
+			}
+			if scheme == "https" && u.User != nil {
 				return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
 			}
 			if scheme == "ssh" {

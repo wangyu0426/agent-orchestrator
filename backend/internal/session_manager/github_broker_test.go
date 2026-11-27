@@ -197,6 +197,15 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for noncanonical uppercase SSH host, got %v", err)
 	}
 
+	// Plaintext http:// GitHub origin fails closed.
+	store.projects["proj-http-gh"] = domain.ProjectRecord{
+		ID:            "proj-http-gh",
+		RepoOriginURL: "http://github.com/wangyu0426/agent-orchestrator.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-http-gh", "proj-http-gh", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for plaintext http GitHub origin, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",
