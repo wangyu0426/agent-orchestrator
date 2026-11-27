@@ -545,7 +545,11 @@ func Load() (Config, error) {
 		if keyPath == "" {
 			return Config{}, fmt.Errorf("AO_GITHUB_APP_PRIVATE_KEY_PATH is required when AO_GITHUB_APP_ENABLED is on")
 		}
-		cfg.GitHubApp.PrivateKeyPath = keyPath
+		absKeyPath, err := filepath.Abs(keyPath)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve AO_GITHUB_APP_PRIVATE_KEY_PATH: %w", err)
+		}
+		cfg.GitHubApp.PrivateKeyPath = absKeyPath
 
 		cfg.GitHubApp.APIBaseURL = strings.TrimSpace(os.Getenv("AO_GITHUB_APP_API_BASE_URL"))
 		if rawRepos := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_REPOSITORIES")); rawRepos != "" {

@@ -83,6 +83,9 @@ func TestConfig_ScrubGitHubAppEnv(t *testing.T) {
 	if !cfg.GitHubApp.Enabled || cfg.GitHubApp.AppID != 12345 || cfg.GitHubApp.InstallationID != 67890 {
 		t.Fatalf("unexpected GitHubApp config: %+v", cfg.GitHubApp)
 	}
+	if !filepath.IsAbs(cfg.GitHubApp.PrivateKeyPath) {
+		t.Fatalf("expected absolute PrivateKeyPath, got %q", cfg.GitHubApp.PrivateKeyPath)
+	}
 	if len(cfg.GitHubApp.Repositories) != 2 {
 		t.Fatalf("unexpected repositories: %v", cfg.GitHubApp.Repositories)
 	}
