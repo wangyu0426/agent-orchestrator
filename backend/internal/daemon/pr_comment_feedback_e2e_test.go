@@ -150,6 +150,8 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 					"data": map[string]any{
 						"repo": map[string]any{
 							"pullRequest": map[string]any{
+								"merged": merged,
+								"closed": closed,
 								"comments": map[string]any{
 									"nodes": nodes,
 									"pageInfo": map[string]any{

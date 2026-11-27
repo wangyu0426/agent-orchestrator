@@ -387,6 +387,8 @@ type SCMConversationCommentObservation struct {
 type SCMConversationCommentsResult struct {
 	Comments []SCMConversationCommentObservation
 	Partial  bool
+	PRMerged bool
+	PRClosed bool
 }
 
 // SCMMergeabilityObservation is the normalized mergeability verdict.

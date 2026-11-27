@@ -416,6 +416,8 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 	var pages [][]ports.SCMConversationCommentObservation
 	cursor := ""
 	partial := false
+	prMerged := false
+	prClosed := false
 	for page := 1; page <= githubConversationCommentMaxPages; page++ {
 		query := buildConversationCommentsQuery(ref, cursor)
 		data, err := p.client.doGraphQL(ctx, query, nil)
@@ -426,6 +428,10 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 		pr, _ := repoData["pullRequest"].(map[string]any)
 		if pr == nil {
 			return ports.SCMConversationCommentsResult{}, fmt.Errorf("%w: pull request %s#%d not found in conversation comments response", ErrNotFound, repoFullName(ref.Repo), ref.Number)
+		}
+		if page == 1 {
+			prMerged = boolv(pr["merged"])
+			prClosed = boolv(pr["closed"]) && !prMerged
 		}
 		conn, _ := pr["comments"].(map[string]any)
 		var pageNodes []ports.SCMConversationCommentObservation
@@ -473,7 +479,7 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 	for i := len(pages) - 1; i >= 0; i-- {
 		out = append(out, pages[i]...)
 	}
-	return ports.SCMConversationCommentsResult{Comments: out, Partial: partial}, nil
+	return ports.SCMConversationCommentsResult{Comments: out, Partial: partial, PRMerged: prMerged, PRClosed: prClosed}, nil
 }
 
 func buildConversationCommentsQuery(ref ports.SCMPRRef, beforeCursor string) string {
@@ -483,6 +489,7 @@ func buildConversationCommentsQuery(ref ports.SCMPRRef, beforeCursor string) str
 	}
 	return fmt.Sprintf(`query{
 repo: repository(owner:%s,name:%s){ pullRequest(number:%d){
+  merged closed
   comments(last:%d%s){
     nodes{ id body url createdAt updatedAt author{ login __typename } }
     pageInfo{ hasPreviousPage startCursor }

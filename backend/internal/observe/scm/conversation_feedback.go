@@ -92,6 +92,8 @@ func (o *Observer) refreshConversationFeedback(
 			if err != nil {
 				o.logger.Warn("scm observer: conversation comments refresh failed; preserving persisted active rows for retry", "pr", prURL, "err", err)
 				hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+			} else if comments.PRMerged || comments.PRClosed {
+				continue
 			} else {
 				hasActive, err = o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
 				if err != nil {
