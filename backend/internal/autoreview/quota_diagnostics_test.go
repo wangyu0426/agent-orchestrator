@@ -461,7 +461,7 @@ func TestReviewerQuotaDiagnosticsDistinguishExhaustionStaleUnreadyAndRetryCap(t 
 			t.Fatalf("EvaluateSession = %+v, err=%v", res, err)
 		}
 		logs := logBuf.String()
-		for _, want := range []string{"decision=retry_capped", "retry_capped_routes=1", "all_routes_exhausted=false"} {
+		for _, want := range []string{"decision=route_retry_deferred", "retry_capped_routes=1", "all_routes_exhausted=false"} {
 			if !strings.Contains(logs, want) {
 				t.Errorf("expected log to contain %q, got:\n%s", want, logs)
 			}

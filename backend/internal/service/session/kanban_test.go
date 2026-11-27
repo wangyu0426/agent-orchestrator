@@ -163,11 +163,20 @@ func TestSessionListDerivesDisplayStatus(t *testing.T) {
 			want:   contract.DisplayRetryingReview,
 		},
 		{
-			name:   "a failed pass at the retry limit has failed",
+			name:   "a failed pass with auto retry blocked has failed",
 			record: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", AutoReviewEnabled: true},
 			pr:     &domain.PRFacts{URL: "pr1", HeadSHA: "head1"},
 			runs: []domain.CurrentHeadReviewRun{{
-				PRURL: "pr1", Status: domain.ReviewRunFailed, FailedAutoRuns: domain.AutoReviewFailedRetryLimit,
+				PRURL: "pr1", Status: domain.ReviewRunFailed, AutoRetryBlocked: true,
+			}},
+			want: contract.DisplayReviewFailed,
+		},
+		{
+			name:   "a permanent auto auth failure has failed",
+			record: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", AutoReviewEnabled: true},
+			pr:     &domain.PRFacts{URL: "pr1", HeadSHA: "head1"},
+			runs: []domain.CurrentHeadReviewRun{{
+				PRURL: "pr1", Status: domain.ReviewRunFailed, LatestFailedAutoBody: domain.ReviewRunAuthRequiredBody,
 			}},
 			want: contract.DisplayReviewFailed,
 		},
@@ -413,15 +422,15 @@ func TestSessionGetCountsFailedAutoReviewPassesOnTheCurrentHead(t *testing.T) {
 		t.Fatalf("after one failure = %q/%q, want %q/%q", got.KanbanColumn, got.DisplayStatus, domain.KanbanValidating, contract.DisplayRetryingReview)
 	}
 
-	for i := 2; i <= domain.AutoReviewFailedRetryLimit; i++ {
+	for i := 2; i <= 4; i++ {
 		failAuto(i)
 	}
 	got, err = svc.Get(ctx, rec.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.KanbanColumn != domain.KanbanValidating || got.DisplayStatus != contract.DisplayReviewFailed {
-		t.Fatalf("at the retry limit = %q/%q, want %q/%q", got.KanbanColumn, got.DisplayStatus, domain.KanbanValidating, contract.DisplayReviewFailed)
+	if got.KanbanColumn != domain.KanbanValidating || got.DisplayStatus != contract.DisplayRetryingReview {
+		t.Fatalf("after 4 recoverable failures = %q/%q, want %q/%q", got.KanbanColumn, got.DisplayStatus, domain.KanbanValidating, contract.DisplayRetryingReview)
 	}
 }
 

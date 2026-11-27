@@ -23448,6 +23448,11 @@ components:
           type: string
         body:
           type: string
+        completedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         createdAt:
           format: date-time
           type: string

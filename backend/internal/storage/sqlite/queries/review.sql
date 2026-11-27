@@ -88,39 +88,39 @@ INSERT INTO review_run (id, review_id, session_id, batch_id, harness, trigger_so
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateReviewRunResult :execrows
-UPDATE review_run SET status = ?, verdict = ?, body = ?, github_review_id = ?, auto_inject_review = ? WHERE id = ? AND status = 'running';
+UPDATE review_run SET status = ?, verdict = ?, body = ?, github_review_id = ?, auto_inject_review = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running';
 
 -- name: SupersedeStaleRunningReviewRuns :execrows
-UPDATE review_run SET status = 'failed', body = ? WHERE session_id = ? AND pr_url = ? AND target_sha != ? AND status = 'running' AND verdict = '';
+UPDATE review_run SET status = 'failed', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND pr_url = ? AND target_sha != ? AND status = 'running' AND verdict = '';
 
 -- name: CancelRunningReviewRunsBySession :execrows
-UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND status = 'running' AND verdict = '';
+UPDATE review_run SET status = 'cancelled', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND status = 'running' AND verdict = '';
 
 -- name: CancelRunningReviewRunsBySessionAndHarness :execrows
-UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND harness = ? AND status = 'running' AND verdict = '';
+UPDATE review_run SET status = 'cancelled', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND harness = ? AND status = 'running' AND verdict = '';
 
 -- name: GetReviewRun :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE id = ?;
 
 -- name: GetReviewRunBySessionPRAndSHA :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: GetReviewRunBySessionPRSHAAndHarness :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? AND harness = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: ListReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? ORDER BY created_at DESC;
 
 -- name: ListRunningReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND status = 'running' AND verdict = '' ORDER BY created_at DESC;
 
 -- name: ListReviewRunsByBatch :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, id ASC;
 
 -- name: ListCurrentHeadReviewRunsBySession :many
@@ -132,7 +132,20 @@ FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, i
 -- review compares against its retry limit. auto_retry_blocked mirrors the other
 -- reasons auto review will not run this head again for this harness: any
 -- cancelled pass, or any pass with a verdict, even if a later pass superseded it.
-SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.created_at,
+SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -178,7 +191,20 @@ WITH wanted_session AS (
     SELECT CAST(j.value AS TEXT) AS session_id
     FROM json_each(?) AS j
 )
-SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.created_at,
+SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -219,11 +245,20 @@ WHERE pr.head_sha != ''
 -- name: FailUnsubmittedReviewBatchForChatTurn :exec
 UPDATE review_run SET
   status = 'failed',
+  completed_at = CURRENT_TIMESTAMP,
   body = CASE
     WHEN EXISTS (
       SELECT 1 FROM conversation_turns AS t
       WHERE t.id = sqlc.arg(turn_id) AND t.failure_code = 'quota_exhausted'
     ) THEN 'reviewer Chat turn failed: quota_exhausted'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = sqlc.arg(turn_id) AND t.failure_code = 'auth_required'
+    ) THEN 'reviewer Chat turn failed: auth_required'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = sqlc.arg(turn_id) AND t.failure_code = 'provider_key_missing'
+    ) THEN 'reviewer Chat turn failed: provider_key_missing'
     ELSE 'reviewer Chat turn ended without submitting a result'
   END
 WHERE status = 'running' AND verdict = '' AND batch_id != ''

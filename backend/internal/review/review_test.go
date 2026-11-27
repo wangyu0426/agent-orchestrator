@@ -2615,24 +2615,39 @@ func TestAutoTriggerWaitsForNewCommitAfterCancelledRun(t *testing.T) {
 	}
 }
 
-func TestAutoTriggerStopsRetryingAfterThreeFailedRunsOnSameHead(t *testing.T) {
+func TestAutoTriggerDefersDuringBackoffAndRecoversAfterThreeFailedRuns(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, ReviewerHandleID: "review-mer-1", AgentSessionID: "native-reviewer-1"},
 		runs: []domain.ReviewRun{
-			{ID: "run-failed-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed},
-			{ID: "run-failed-2", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed},
-			{ID: "run-failed-3", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed},
+			{ID: "run-failed-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, CreatedAt: now.Add(-10 * time.Minute)},
+			{ID: "run-failed-2", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, CreatedAt: now.Add(-5 * time.Minute)},
+			{ID: "run-failed-3", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, CreatedAt: now.Add(-1 * time.Minute)},
 		},
 	}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
-	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	worker := liveWorker()
+	worker.Activity.LastActivityAt = now.Add(-5 * time.Minute)
+	eng := newEngineForTest(store, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+	eng.clock = func() time.Time { return now }
 
+	// Within 4m backoff for 3rd failure: must defer.
 	res, err := triggerWithSource(context.Background(), eng, "mer-1", domain.ReviewerClaudeCode, domain.AgentConfig{}, domain.ReviewTriggerAuto)
 	if err != nil {
 		t.Fatalf("TriggerWithSource: %v", err)
 	}
 	if res.Created || len(store.runs) != 3 || launcher.spawned || launcher.notified {
-		t.Fatalf("auto-review retried past the per-head failure cap: result=%+v launcher=%+v runs=%+v", res, launcher, store.runs)
+		t.Fatalf("auto-review retried during backoff: result=%+v launcher=%+v runs=%+v", res, launcher, store.runs)
+	}
+
+	// Advance clock past 4m backoff: must recover and start 4th attempt.
+	now = now.Add(3 * time.Minute)
+	res, err = triggerWithSource(context.Background(), eng, "mer-1", domain.ReviewerClaudeCode, domain.AgentConfig{}, domain.ReviewTriggerAuto)
+	if err != nil {
+		t.Fatalf("TriggerWithSource after backoff: %v", err)
+	}
+	if !res.Created || len(store.runs) != 4 || !launcher.spawned {
+		t.Fatalf("auto-review did not recover after backoff: result=%+v launcher=%+v runs=%+v", res, launcher, store.runs)
 	}
 }
 
@@ -2653,60 +2668,71 @@ func TestAutoReviewHeadBlockedCapsFailedAutoRetriesPerHeadAndHarness(t *testing.
 			want: false,
 		},
 		{
-			name: "three failed auto runs block",
+			name: "three failed auto runs within backoff block",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 50, 0, 0, time.UTC)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 55, 0, 0, time.UTC)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 59, 0, 0, time.UTC)},
 			},
 			want: true,
 		},
 		{
-			name: "other harness does not count toward the cap",
+			name: "four failed auto runs after backoff do not block",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 0, 0, 0, time.UTC)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 5, 0, 0, time.UTC)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 15, 0, 0, time.UTC)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 30, 0, 0, time.UTC)},
 			},
 			want: false,
 		},
 		{
-			name: "other head sha does not count toward the cap",
+			name: "permanent failure blocks even after backoff",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "old-sha", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "old-sha", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "old-sha", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "reviewer preflight: authentication failed", CreatedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)},
+			},
+			want: true,
+		},
+		{
+			name: "other harness does not count",
+			runs: []domain.ReviewRun{
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 59, 0, 0, time.UTC)},
 			},
 			want: false,
 		},
 		{
-			name: "manual failures do not count toward the cap",
+			name: "other head sha does not count",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "old-sha", Harness: harness, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 59, 0, 0, time.UTC)},
+			},
+			want: false,
+		},
+		{
+			name: "manual failures do not count",
+			runs: []domain.ReviewRun{
+				{PRURL: prURL, TargetSHA: "sha1", Harness: harness, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed, CreatedAt: time.Date(2026, 8, 5, 11, 59, 0, 0, time.UTC)},
 			},
 			want: false,
 		},
 	}
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := autoReviewHeadBlocked(tt.runs, prURL, "sha1", harness); got != tt.want {
+			if got := autoReviewHeadBlocked(tt.runs, prURL, "sha1", harness, now); got != tt.want {
 				t.Fatalf("autoReviewHeadBlocked() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestAutoTriggerSkipsCappedFailedHeadButRunsOtherEligiblePRs(t *testing.T) {
+func TestAutoTriggerSkipsBackedOffHeadButRunsOtherEligiblePRs(t *testing.T) {
 	pr1 := "https://github.com/o/r/pull/1"
 	pr2 := "https://github.com/o/r/pull/2"
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode},
 		runs: []domain.ReviewRun{
-			{ID: "run-failed-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: pr1, TargetSHA: "sha1", Status: domain.ReviewRunFailed},
-			{ID: "run-failed-2", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: pr1, TargetSHA: "sha1", Status: domain.ReviewRunFailed},
-			{ID: "run-failed-3", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: pr1, TargetSHA: "sha1", Status: domain.ReviewRunFailed},
+			{ID: "run-failed-1", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, TriggerSource: domain.ReviewTriggerAuto, PRURL: pr1, TargetSHA: "sha1", Status: domain.ReviewRunFailed, CreatedAt: now.Add(-10 * time.Second)},
 		},
 	}
 	launcher := &fakeLauncher{handle: "review-mer-1"}
@@ -2723,8 +2749,8 @@ func TestAutoTriggerSkipsCappedFailedHeadButRunsOtherEligiblePRs(t *testing.T) {
 	if !res.Created || len(res.CreatedRuns) != 1 || res.CreatedRuns[0].PRURL != pr2 {
 		t.Fatalf("auto-review did not skip only the capped head: result=%+v", res)
 	}
-	if len(store.runs) != 4 {
-		t.Fatalf("runs=%+v, want only one new run for the uncapped head", store.runs)
+	if len(store.runs) != 2 {
+		t.Fatalf("runs=%+v, want only one new run for the eligible head", store.runs)
 	}
 }
 

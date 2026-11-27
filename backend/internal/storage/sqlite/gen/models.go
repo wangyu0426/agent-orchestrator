@@ -714,6 +714,7 @@ type ReviewRun struct {
 	BatchID          string
 	AutoInjectReview bool
 	TriggerSource    domain.ReviewTriggerSource
+	CompletedAt      sql.NullTime
 }
 
 type ReviewerQuotaDeferral struct {

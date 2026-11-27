@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -17,12 +18,35 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/structuredreview"
 )
 
-const reviewMaxNudge = 3
+const (
+	feedbackRetryBaseDelay = 30 * time.Second
+	feedbackRetryMaxDelay  = 15 * time.Minute
+)
+
+func feedbackRetryBackoff(failedAttempt int) time.Duration {
+	if failedAttempt <= 1 {
+		return feedbackRetryBaseDelay
+	}
+	delay := feedbackRetryBaseDelay
+	for i := 1; i < failedAttempt; i++ {
+		if delay >= feedbackRetryMaxDelay/2 {
+			return feedbackRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > feedbackRetryMaxDelay {
+		return feedbackRetryMaxDelay
+	}
+	return delay
+}
 
 type reactionState struct {
-	mu       sync.Mutex
-	seen     map[string]string
-	attempts map[string]int
+	mu             sync.Mutex
+	seen           map[string]string
+	attempts       map[string]int
+	failedAttempts map[string]int
+	nextRetryAt    map[string]time.Time
+	lastReason     map[string]string
 	// loaded tracks PR URLs whose persisted dedup payload has been merged into
 	// seen/attempts during this process. Lazy: we only pay the DB read on the
 	// first reaction touching each PR after startup.
@@ -33,19 +57,33 @@ type reactionState struct {
 	// next re-arm would see nothing armed, take the early return, and never
 	// retry the store — leaving the stale "conflicting" signature on disk to
 	// suppress the nudge after a restart. Cleared once the write lands.
-	pendingRearm map[string]bool
+	pendingRearm        map[string]bool
+	pendingRetryPersist map[string]bool
 }
 
 func newReactionState() reactionState {
-	return reactionState{seen: map[string]string{}, attempts: map[string]int{}, loaded: map[string]bool{}, pendingRearm: map[string]bool{}}
+	return reactionState{
+		seen:                map[string]string{},
+		attempts:            map[string]int{},
+		failedAttempts:      map[string]int{},
+		nextRetryAt:         map[string]time.Time{},
+		lastReason:          map[string]string{},
+		loaded:              map[string]bool{},
+		pendingRearm:        map[string]bool{},
+		pendingRetryPersist: map[string]bool{},
+	}
 }
 
 // reactionPayload is the JSON document persisted in pr.last_nudge_signature.
 // Keeping the schema explicit (and stable) lets the daemon restart and resume
-// the existing dedup state without re-nudging an agent.
+// the existing dedup and retry-backoff state without re-nudging an agent or
+// losing pending retries.
 type reactionPayload struct {
-	Seen     map[string]string `json:"seen,omitempty"`
-	Attempts map[string]int    `json:"attempts,omitempty"`
+	Seen           map[string]string    `json:"seen,omitempty"`
+	Attempts       map[string]int       `json:"attempts,omitempty"`
+	FailedAttempts map[string]int       `json:"failed_attempts,omitempty"`
+	NextRetryAt    map[string]time.Time `json:"next_retry_at,omitempty"`
+	LastReason     map[string]string    `json:"last_reason,omitempty"`
 }
 
 // pendingNudge is one actionable PR nudge queued by ApplyPRObservation. Queuing
@@ -53,10 +91,9 @@ type reactionPayload struct {
 // conditions independent — none can suppress another — and centralizes the
 // send + dedup in a single loop.
 type pendingNudge struct {
-	key         string
-	sig         string
-	msg         string
-	maxAttempts int
+	key string
+	sig string
+	msg string
 	// urgent routes the send through sessionguard.NudgeUrgent instead of
 	// Nudge: it still reaches a session idle at a needs-input prompt instead
 	// of being suppressed until the agent resumes. Reserved for the
@@ -206,7 +243,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 					if o.URL != "" {
 						msg += "\nPR: " + domain.SanitizeControlChars(o.URL)
 					}
-					nudges = append(nudges, pendingNudge{key: "ci:" + o.URL, sig: ciFailureSignature(checks), msg: msg, maxAttempts: 0})
+					nudges = append(nudges, pendingNudge{key: "ci:" + o.URL, sig: ciFailureSignature(checks), msg: msg})
 				}
 			}
 		}
@@ -230,8 +267,8 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 					sig = string(o.Review)
 				}
 				// Per comment, like the review loop below: a shared key is a
-				// shared signature slot and a shared attempt budget.
-				nudges = append(nudges, pendingNudge{key: commentNudgeKey(o.URL, comment), sig: sig, msg: msg, maxAttempts: reviewMaxNudge})
+				// shared signature slot.
+				nudges = append(nudges, pendingNudge{key: commentNudgeKey(o.URL, comment), sig: sig, msg: msg})
 			}
 		}
 
@@ -247,7 +284,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 				if o.URL != "" && review.URL == "" {
 					msg += "\nPR: " + domain.SanitizeControlChars(o.URL)
 				}
-				nudges = append(nudges, pendingNudge{key: "review:" + o.URL + ":" + review.ID, sig: string(review.State), msg: msg, maxAttempts: reviewMaxNudge})
+				nudges = append(nudges, pendingNudge{key: "review:" + o.URL + ":" + review.ID, sig: string(review.State), msg: msg})
 			}
 		}
 
@@ -266,10 +303,9 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 				}
 				msg := formatStructuredReviewChangesRequestedMessage(req, o.URL, ident)
 				nudges = append(nudges, pendingNudge{
-					key:         structuredreview.NudgeKey(o.URL, req.Review.ID),
-					sig:         req.Signature,
-					msg:         msg,
-					maxAttempts: reviewMaxNudge,
+					key: structuredreview.NudgeKey(o.URL, req.Review.ID),
+					sig: req.Signature,
+					msg: msg,
 				})
 			}
 		}
@@ -315,7 +351,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 			if o.URL != "" {
 				msg += "\nPR: " + domain.SanitizeControlChars(o.URL)
 			}
-			nudges = append(nudges, pendingNudge{key: mergeConflictKey(o.URL), sig: string(o.Mergeability), msg: msg, maxAttempts: 0, urgent: true})
+			nudges = append(nudges, pendingNudge{key: mergeConflictKey(o.URL), sig: string(o.Mergeability), msg: msg, urgent: true})
 		}
 	}
 	// The definitively-cleared re-arm (#4528) runs above the dead-session gate,
@@ -324,7 +360,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	// other deferred read errors.
 
 	for _, n := range nudges {
-		if _, err := m.sendOnce(ctx, id, o.URL, n.key, n.sig, n.msg, n.maxAttempts, n.urgent); err != nil {
+		if _, err := m.sendOnce(ctx, id, o.URL, n.key, n.sig, n.msg, n.urgent); err != nil {
 			return err
 		}
 	}
@@ -461,7 +497,10 @@ func (m *Manager) rearmMergeConflict(ctx context.Context, prURL string) error {
 	key := mergeConflictKey(prURL)
 	_, seen := m.react.seen[key]
 	_, attempted := m.react.attempts[key]
-	if !seen && !attempted && !m.react.pendingRearm[prURL] {
+	_, failed := m.react.failedAttempts[key]
+	_, hasRetry := m.react.nextRetryAt[key]
+	_, hasReason := m.react.lastReason[key]
+	if !seen && !attempted && !failed && !hasRetry && !hasReason && !m.react.pendingRearm[prURL] {
 		// Nothing is armed and no earlier re-arm is still owed a durable write,
 		// so skip the store write: a steadily mergeable PR must not re-persist
 		// an unchanged payload on every poll.
@@ -469,6 +508,9 @@ func (m *Manager) rearmMergeConflict(ctx context.Context, prURL string) error {
 	}
 	delete(m.react.seen, key)
 	delete(m.react.attempts, key)
+	delete(m.react.failedAttempts, key)
+	delete(m.react.nextRetryAt, key)
+	delete(m.react.lastReason, key)
 	if err := m.persistPRSignaturesLocked(ctx, prURL); err != nil {
 		// The in-memory delete deliberately stands: a conflict returning later
 		// in this process must still nudge. But disk still holds the stale
@@ -802,7 +844,7 @@ func (m *Manager) ApplyTrackerFacts(ctx context.Context, id domain.SessionID, o 
 			// the PR-row signature load/persist is skipped, so the dedup
 			// survives only for the lifetime of this Manager. Cross-restart
 			// persistence ships with #35.
-			_, err := m.sendOnce(ctx, id, "", "tracker-bot:"+o.Issue.URL, strings.Join(ids, ","), msg, 0, false)
+			_, err := m.sendOnce(ctx, id, "", "tracker-bot:"+o.Issue.URL, strings.Join(ids, ","), msg, false)
 			return err
 		}
 	}
@@ -1122,7 +1164,7 @@ const (
 	sendOnceSuppressed
 )
 
-func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key, sig, msg string, maxAttempts int, urgent bool) (sendOnceOutcome, error) {
+func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key, sig, msg string, urgent bool) (sendOnceOutcome, error) {
 	if m.guard == nil {
 		return sendOnceAccounted, nil
 	}
@@ -1139,10 +1181,17 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 	if m.react.seen[key] == sig {
 		return sendOnceAccounted, nil
 	}
-	attempts := m.react.attempts[key]
-	if maxAttempts > 0 && attempts >= maxAttempts {
-		return sendOnceAccounted, nil
+	now := m.clock()
+	if retryAt := m.react.nextRetryAt[key]; !retryAt.IsZero() && now.Before(retryAt) {
+		if prURL != "" && m.react.pendingRetryPersist[prURL] {
+			if persistErr := m.persistPRSignaturesLocked(ctx, prURL); persistErr != nil {
+				return sendOnceSuppressed, fmt.Errorf("persist feedback retry state: %w", persistErr)
+			}
+			delete(m.react.pendingRetryPersist, prURL)
+		}
+		return sendOnceSuppressed, nil
 	}
+	attempts := m.react.attempts[key]
 	// The guard re-reads the session immediately before pasting: the caller's
 	// NeedsInput() entry check ran before this function's dedup/persist I/O, so
 	// a permission hook could have stored blocked (or the session could have
@@ -1166,6 +1215,35 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 	}
 	outcome, err := nudge(ctx, id, msg)
 	if err != nil {
+		failed := m.react.failedAttempts[key] + 1
+		m.react.failedAttempts[key] = failed
+		retryAt := now.Add(feedbackRetryBackoff(failed))
+		m.react.nextRetryAt[key] = retryAt
+		reason := outcome.String()
+		if outcome == sessionguard.Sent {
+			reason = "delivery_error"
+		}
+		m.react.lastReason[key] = reason
+		slog.Default().Info("lifecycle: feedback delivery deferred",
+			"session_id", id,
+			"pr_url", prURL,
+			"key", key,
+			"reason", reason,
+			"failed_attempts", failed,
+			"retry_at", retryAt)
+		if prURL != "" {
+			if persistErr := m.persistPRSignaturesLocked(ctx, prURL); persistErr != nil {
+				m.react.pendingRetryPersist[prURL] = true
+				slog.Default().Warn("lifecycle: persist feedback retry state failed",
+					"session_id", id,
+					"pr_url", prURL,
+					"key", key,
+					"err", persistErr)
+				err = errors.Join(err, fmt.Errorf("persist feedback retry state: %w", persistErr))
+			} else {
+				delete(m.react.pendingRetryPersist, prURL)
+			}
+		}
 		if outcome != sessionguard.Sent {
 			return sendOnceSuppressed, err
 		}
@@ -1182,10 +1260,14 @@ func (m *Manager) sendOnce(ctx context.Context, id domain.SessionID, prURL, key,
 	// send, then crash mid-call) which would silently lose a real nudge.
 	m.react.seen[key] = sig
 	m.react.attempts[key] = attempts + 1
+	delete(m.react.failedAttempts, key)
+	delete(m.react.nextRetryAt, key)
+	delete(m.react.lastReason, key)
 	if prURL != "" {
 		if err := m.persistPRSignaturesLocked(ctx, prURL); err != nil {
 			return sendOnceAccounted, err
 		}
+		delete(m.react.pendingRetryPersist, prURL)
 	}
 	return sendOnceAccounted, nil
 }
@@ -1214,6 +1296,21 @@ func (m *Manager) loadPRSignaturesLocked(ctx context.Context, prURL string) erro
 			m.react.attempts[k] = v
 		}
 	}
+	for k, v := range p.FailedAttempts {
+		if cur, ok := m.react.failedAttempts[k]; !ok || v > cur {
+			m.react.failedAttempts[k] = v
+		}
+	}
+	for k, v := range p.NextRetryAt {
+		if cur, ok := m.react.nextRetryAt[k]; !ok || v.After(cur) {
+			m.react.nextRetryAt[k] = v
+		}
+	}
+	for k, v := range p.LastReason {
+		if _, ok := m.react.lastReason[k]; !ok {
+			m.react.lastReason[k] = v
+		}
+	}
 	return nil
 }
 
@@ -1222,7 +1319,13 @@ func (m *Manager) loadPRSignaturesLocked(ctx context.Context, prURL string) erro
 // hold m.react.mu. A failed persist surfaces upward so the in-memory mutation
 // (which the messenger already acted on) is not silently divergent from disk.
 func (m *Manager) persistPRSignaturesLocked(ctx context.Context, prURL string) error {
-	payload := reactionPayload{Seen: map[string]string{}, Attempts: map[string]int{}}
+	payload := reactionPayload{
+		Seen:           map[string]string{},
+		Attempts:       map[string]int{},
+		FailedAttempts: map[string]int{},
+		NextRetryAt:    map[string]time.Time{},
+		LastReason:     map[string]string{},
+	}
 	for k, v := range m.react.seen {
 		if reactionKeyTargetsPR(k, prURL) {
 			payload.Seen[k] = v
@@ -1231,6 +1334,21 @@ func (m *Manager) persistPRSignaturesLocked(ctx context.Context, prURL string) e
 	for k, v := range m.react.attempts {
 		if reactionKeyTargetsPR(k, prURL) {
 			payload.Attempts[k] = v
+		}
+	}
+	for k, v := range m.react.failedAttempts {
+		if reactionKeyTargetsPR(k, prURL) {
+			payload.FailedAttempts[k] = v
+		}
+	}
+	for k, v := range m.react.nextRetryAt {
+		if reactionKeyTargetsPR(k, prURL) {
+			payload.NextRetryAt[k] = v
+		}
+	}
+	for k, v := range m.react.lastReason {
+		if reactionKeyTargetsPR(k, prURL) {
+			payload.LastReason[k] = v
 		}
 	}
 	raw, err := json.Marshal(payload)

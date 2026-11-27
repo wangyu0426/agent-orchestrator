@@ -28,7 +28,7 @@ func (q *Queries) ArchiveReviewsBySession(ctx context.Context, arg ArchiveReview
 }
 
 const cancelRunningReviewRunsBySession = `-- name: CancelRunningReviewRunsBySession :execrows
-UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND status = 'running' AND verdict = ''
+UPDATE review_run SET status = 'cancelled', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND status = 'running' AND verdict = ''
 `
 
 type CancelRunningReviewRunsBySessionParams struct {
@@ -45,7 +45,7 @@ func (q *Queries) CancelRunningReviewRunsBySession(ctx context.Context, arg Canc
 }
 
 const cancelRunningReviewRunsBySessionAndHarness = `-- name: CancelRunningReviewRunsBySessionAndHarness :execrows
-UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND harness = ? AND status = 'running' AND verdict = ''
+UPDATE review_run SET status = 'cancelled', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND harness = ? AND status = 'running' AND verdict = ''
 `
 
 type CancelRunningReviewRunsBySessionAndHarnessParams struct {
@@ -130,11 +130,20 @@ func (q *Queries) ClearReviewerHandleByHarness(ctx context.Context, arg ClearRev
 const failUnsubmittedReviewBatchForChatTurn = `-- name: FailUnsubmittedReviewBatchForChatTurn :exec
 UPDATE review_run SET
   status = 'failed',
+  completed_at = CURRENT_TIMESTAMP,
   body = CASE
     WHEN EXISTS (
       SELECT 1 FROM conversation_turns AS t
       WHERE t.id = ?1 AND t.failure_code = 'quota_exhausted'
     ) THEN 'reviewer Chat turn failed: quota_exhausted'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = ?1 AND t.failure_code = 'auth_required'
+    ) THEN 'reviewer Chat turn failed: auth_required'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = ?1 AND t.failure_code = 'provider_key_missing'
+    ) THEN 'reviewer Chat turn failed: provider_key_missing'
     ELSE 'reviewer Chat turn ended without submitting a result'
   END
 WHERE status = 'running' AND verdict = '' AND batch_id != ''
@@ -307,7 +316,7 @@ func (q *Queries) GetReviewBySessionAndHarness(ctx context.Context, arg GetRevie
 }
 
 const getReviewRun = `-- name: GetReviewRun :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE id = ?
 `
 
@@ -330,12 +339,13 @@ func (q *Queries) GetReviewRun(ctx context.Context, id string) (ReviewRun, error
 		&i.BatchID,
 		&i.AutoInjectReview,
 		&i.TriggerSource,
+		&i.CompletedAt,
 	)
 	return i, err
 }
 
 const getReviewRunBySessionPRAndSHA = `-- name: GetReviewRunBySessionPRAndSHA :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? ORDER BY created_at DESC LIMIT 1
 `
 
@@ -364,12 +374,13 @@ func (q *Queries) GetReviewRunBySessionPRAndSHA(ctx context.Context, arg GetRevi
 		&i.BatchID,
 		&i.AutoInjectReview,
 		&i.TriggerSource,
+		&i.CompletedAt,
 	)
 	return i, err
 }
 
 const getReviewRunBySessionPRSHAAndHarness = `-- name: GetReviewRunBySessionPRSHAAndHarness :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? AND harness = ? ORDER BY created_at DESC LIMIT 1
 `
 
@@ -404,6 +415,7 @@ func (q *Queries) GetReviewRunBySessionPRSHAAndHarness(ctx context.Context, arg 
 		&i.BatchID,
 		&i.AutoInjectReview,
 		&i.TriggerSource,
+		&i.CompletedAt,
 	)
 	return i, err
 }
@@ -451,7 +463,20 @@ func (q *Queries) InsertReviewRun(ctx context.Context, arg InsertReviewRunParams
 }
 
 const listCurrentHeadReviewRunsBySession = `-- name: ListCurrentHeadReviewRunsBySession :many
-SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.created_at,
+SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -491,14 +516,16 @@ WHERE review_run.session_id = ?
 `
 
 type ListCurrentHeadReviewRunsBySessionRow struct {
-	ID               string
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	CreatedAt        time.Time
-	FailedAutoRuns   int64
-	AutoRetryBlocked int64
+	ID                   string
+	Harness              domain.ReviewerHarness
+	PRURL                string
+	Status               domain.ReviewRunStatus
+	Verdict              domain.ReviewVerdict
+	Body                 string
+	CreatedAt            time.Time
+	LatestFailedAutoBody interface{}
+	FailedAutoRuns       int64
+	AutoRetryBlocked     int64
 }
 
 // AO review passes recorded against each PR's CURRENT head commit. Passes for
@@ -524,7 +551,9 @@ func (q *Queries) ListCurrentHeadReviewRunsBySession(ctx context.Context, sessio
 			&i.PRURL,
 			&i.Status,
 			&i.Verdict,
+			&i.Body,
 			&i.CreatedAt,
+			&i.LatestFailedAutoBody,
 			&i.FailedAutoRuns,
 			&i.AutoRetryBlocked,
 		); err != nil {
@@ -546,7 +575,20 @@ WITH wanted_session AS (
     SELECT CAST(j.value AS TEXT) AS session_id
     FROM json_each(?) AS j
 )
-SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.created_at,
+SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -586,15 +628,17 @@ WHERE pr.head_sha != ''
 `
 
 type ListCurrentHeadReviewRunsBySessionsRow struct {
-	SessionID        domain.SessionID
-	ID               string
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	CreatedAt        time.Time
-	FailedAutoRuns   int64
-	AutoRetryBlocked int64
+	SessionID            domain.SessionID
+	ID                   string
+	Harness              domain.ReviewerHarness
+	PRURL                string
+	Status               domain.ReviewRunStatus
+	Verdict              domain.ReviewVerdict
+	Body                 string
+	CreatedAt            time.Time
+	LatestFailedAutoBody interface{}
+	FailedAutoRuns       int64
+	AutoRetryBlocked     int64
 }
 
 // Batch form of ListCurrentHeadReviewRunsBySession for session-list reads.
@@ -616,7 +660,9 @@ func (q *Queries) ListCurrentHeadReviewRunsBySessions(ctx context.Context, jsonE
 			&i.PRURL,
 			&i.Status,
 			&i.Verdict,
+			&i.Body,
 			&i.CreatedAt,
+			&i.LatestFailedAutoBody,
 			&i.FailedAutoRuns,
 			&i.AutoRetryBlocked,
 		); err != nil {
@@ -743,7 +789,7 @@ func (q *Queries) ListRecoverableChatReviews(ctx context.Context) ([]ListRecover
 }
 
 const listReviewRunsByBatch = `-- name: ListReviewRunsByBatch :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, id ASC
 `
 
@@ -777,6 +823,7 @@ func (q *Queries) ListReviewRunsByBatch(ctx context.Context, arg ListReviewRunsB
 			&i.BatchID,
 			&i.AutoInjectReview,
 			&i.TriggerSource,
+			&i.CompletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -792,7 +839,7 @@ func (q *Queries) ListReviewRunsByBatch(ctx context.Context, arg ListReviewRunsB
 }
 
 const listReviewRunsBySession = `-- name: ListReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? ORDER BY created_at DESC
 `
 
@@ -821,6 +868,7 @@ func (q *Queries) ListReviewRunsBySession(ctx context.Context, sessionID domain.
 			&i.BatchID,
 			&i.AutoInjectReview,
 			&i.TriggerSource,
+			&i.CompletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -900,7 +948,7 @@ func (q *Queries) ListReviewsBySession(ctx context.Context, sessionID domain.Ses
 }
 
 const listRunningReviewRunsBySession = `-- name: ListRunningReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, completed_at
 FROM review_run WHERE session_id = ? AND status = 'running' AND verdict = '' ORDER BY created_at DESC
 `
 
@@ -929,6 +977,7 @@ func (q *Queries) ListRunningReviewRunsBySession(ctx context.Context, sessionID 
 			&i.BatchID,
 			&i.AutoInjectReview,
 			&i.TriggerSource,
+			&i.CompletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1035,7 +1084,7 @@ func (q *Queries) SetReviewInterfaceMode(ctx context.Context, arg SetReviewInter
 }
 
 const supersedeStaleRunningReviewRuns = `-- name: SupersedeStaleRunningReviewRuns :execrows
-UPDATE review_run SET status = 'failed', body = ? WHERE session_id = ? AND pr_url = ? AND target_sha != ? AND status = 'running' AND verdict = ''
+UPDATE review_run SET status = 'failed', body = ?, completed_at = CURRENT_TIMESTAMP WHERE session_id = ? AND pr_url = ? AND target_sha != ? AND status = 'running' AND verdict = ''
 `
 
 type SupersedeStaleRunningReviewRunsParams struct {
@@ -1114,7 +1163,7 @@ func (q *Queries) UpdateReviewAgentSessionID(ctx context.Context, arg UpdateRevi
 }
 
 const updateReviewRunResult = `-- name: UpdateReviewRunResult :execrows
-UPDATE review_run SET status = ?, verdict = ?, body = ?, github_review_id = ?, auto_inject_review = ? WHERE id = ? AND status = 'running'
+UPDATE review_run SET status = ?, verdict = ?, body = ?, github_review_id = ?, auto_inject_review = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'
 `
 
 type UpdateReviewRunResultParams struct {

@@ -48,8 +48,10 @@ func toContractKanbanPRFacts(prs []domain.PRFacts, runs []domain.CurrentHeadRevi
 		facts.Outcome = facts.Outcome || run.Verdict.Valid()
 		facts.Failed = facts.Failed || run.Status == domain.ReviewRunFailed
 		facts.Cancelled = facts.Cancelled || run.Status == domain.ReviewRunCancelled
+		permanentAutoFailure := run.LatestFailedAutoBody != "" &&
+			domain.ClassifyAutoReviewFailure(domain.ReviewRun{Status: domain.ReviewRunFailed, Body: run.LatestFailedAutoBody}) == domain.AutoReviewFailurePermanent
 		facts.RetryExhausted = facts.RetryExhausted ||
-			(run.Status == domain.ReviewRunFailed && (run.AutoRetryBlocked || run.FailedAutoRuns >= domain.AutoReviewFailedRetryLimit))
+			(run.Status == domain.ReviewRunFailed && (run.AutoRetryBlocked || permanentAutoFailure))
 		byPR[run.PRURL] = facts
 	}
 
