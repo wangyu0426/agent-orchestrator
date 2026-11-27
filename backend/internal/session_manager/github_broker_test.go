@@ -188,6 +188,15 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for unsupported SSH port 2222, got %v", err)
 	}
 
+	// Noncanonical uppercase SSH host fails closed so Git's literal insteadOf cannot be bypassed.
+	store.projects["proj-ssh-upper"] = domain.ProjectRecord{
+		ID:            "proj-ssh-upper",
+		RepoOriginURL: "git@GITHUB.COM:wangyu0426/agent-orchestrator.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-ssh-upper", "proj-ssh-upper", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for noncanonical uppercase SSH host, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",

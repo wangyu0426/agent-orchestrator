@@ -7410,8 +7410,8 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 				return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
 			}
 			if scheme == "ssh" {
-				if port := strings.TrimSpace(u.Port()); port != "" && port != "22" {
-					return "", true, fmt.Errorf("%w: unsupported SSH port %q in GitHub origin URL %q", githubbroker.ErrForbiddenRepo, port, originURL)
+				if !strings.HasPrefix(raw, "ssh://git@"+h+"/") && !strings.HasPrefix(raw, "ssh://git@"+h+":22/") {
+					return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
 				}
 			}
 		}
@@ -7420,6 +7420,9 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		if colonIdx := strings.Index(rest, ":"); colonIdx > 0 {
 			parsedHost = strings.ToLower(strings.TrimSpace(rest[:colonIdx]))
 			pathPart = rest[colonIdx+1:]
+			if parsedHost == h && !strings.HasPrefix(raw, "git@"+h+":") {
+				return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+			}
 		}
 	}
 
