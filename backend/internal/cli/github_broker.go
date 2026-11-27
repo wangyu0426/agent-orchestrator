@@ -350,11 +350,23 @@ func buildBrokerGHEnv(baseEnv []string, token, host, configDir string) []string 
 		}
 		out = append(out, kv)
 	}
-	out = append(out, "GH_TOKEN="+token, "GH_CONFIG_DIR="+configDir)
-	if h := strings.TrimSpace(host); h != "" {
+	h := strings.ToLower(strings.TrimSpace(host))
+	tokenVar := "GH_TOKEN"
+	if isEnterpriseGHESHost(h) {
+		tokenVar = "GH_ENTERPRISE_TOKEN"
+	}
+	out = append(out, tokenVar+"="+token, "GH_CONFIG_DIR="+configDir)
+	if h != "" {
 		out = append(out, "GH_HOST="+h)
 	}
 	return out
+}
+
+func isEnterpriseGHESHost(host string) bool {
+	if host == "" || host == "github.com" || host == "ghe.com" || strings.HasSuffix(host, ".ghe.com") || host == "github.localhost" {
+		return false
+	}
+	return true
 }
 
 func resolveBrokerGHConfigParent() (string, error) {
