@@ -116,7 +116,7 @@ func newGitHubBrokerGHCommand(ctx *commandContext) *cobra.Command {
 			child.Stdin = cmd.InOrStdin()
 			child.Stdout = cmd.OutOrStdout()
 			child.Stderr = cmd.ErrOrStderr()
-			child.Env = buildBrokerGHEnv(os.Environ(), resp.Token, isolatedConfigDir)
+			child.Env = buildBrokerGHEnv(os.Environ(), resp.Token, resp.Host, isolatedConfigDir)
 
 			if err := child.Run(); err != nil {
 				var exitErr *exec.ExitError
@@ -332,7 +332,7 @@ func resolveRealGHFromPath(pathEnv, selfDir, goos, pathExt string) (string, erro
 	return "", fmt.Errorf("gh executable not found in PATH outside broker shim: %w", exec.ErrNotFound)
 }
 
-func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
+func buildBrokerGHEnv(baseEnv []string, token, host, configDir string) []string {
 	scrub := map[string]struct{}{
 		"GH_TOKEN":                {},
 		"GITHUB_TOKEN":            {},
@@ -340,8 +340,9 @@ func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
 		"GH_ENTERPRISE_TOKEN":     {},
 		"GITHUB_ENTERPRISE_TOKEN": {},
 		"GH_CONFIG_DIR":           {},
+		"GH_HOST":                 {},
 	}
-	out := make([]string, 0, len(baseEnv)+2)
+	out := make([]string, 0, len(baseEnv)+3)
 	for _, kv := range baseEnv {
 		k, _, _ := strings.Cut(kv, "=")
 		if _, skip := scrub[k]; skip {
@@ -350,6 +351,9 @@ func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
 		out = append(out, kv)
 	}
 	out = append(out, "GH_TOKEN="+token, "GH_CONFIG_DIR="+configDir)
+	if h := strings.TrimSpace(host); h != "" {
+		out = append(out, "GH_HOST="+h)
+	}
 	return out
 }
 

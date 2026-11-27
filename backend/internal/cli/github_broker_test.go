@@ -77,14 +77,14 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 		t.Fatalf("extractGHRepoFlag(--repo=) = %q, want owner/repo2", got)
 	}
 
-	// Verify buildBrokerGHEnv scrubs personal tokens and injects fresh GH_TOKEN + isolated GH_CONFIG_DIR.
-	env := buildBrokerGHEnv([]string{"GITHUB_TOKEN=ghp_personal_1234567890", "GH_TOKEN=ghp_old_1234567890", "PATH=/usr/bin"}, "ghs_fresh_1234567890", "/tmp/iso-gh")
+	// Verify buildBrokerGHEnv scrubs personal tokens/GH_HOST and injects fresh GH_TOKEN + GH_HOST + isolated GH_CONFIG_DIR.
+	env := buildBrokerGHEnv([]string{"GITHUB_TOKEN=ghp_personal_1234567890", "GH_TOKEN=ghp_old_1234567890", "GH_HOST=evil.example.com", "PATH=/usr/bin"}, "ghs_fresh_1234567890", "ghe.internal.example", "/tmp/iso-gh")
 	joined := strings.Join(env, "\n")
-	if strings.Contains(joined, "ghp_personal") || strings.Contains(joined, "ghp_old") {
-		t.Fatalf("personal tokens leaked into gh child env: %s", joined)
+	if strings.Contains(joined, "ghp_personal") || strings.Contains(joined, "ghp_old") || strings.Contains(joined, "evil.example.com") {
+		t.Fatalf("personal tokens or inherited GH_HOST leaked into gh child env: %s", joined)
 	}
-	if !strings.Contains(joined, "GH_TOKEN=ghs_fresh_1234567890") || !strings.Contains(joined, "GH_CONFIG_DIR=/tmp/iso-gh") {
-		t.Fatalf("missing broker GH_TOKEN or GH_CONFIG_DIR in child env: %s", joined)
+	if !strings.Contains(joined, "GH_TOKEN=ghs_fresh_1234567890") || !strings.Contains(joined, "GH_HOST=ghe.internal.example") || !strings.Contains(joined, "GH_CONFIG_DIR=/tmp/iso-gh") {
+		t.Fatalf("missing broker GH_TOKEN, GH_HOST, or GH_CONFIG_DIR in child env: %s", joined)
 	}
 
 	// Verify resolveRealGHFromPath skips broker shim dir and handles Windows PATHEXT without recursing.
