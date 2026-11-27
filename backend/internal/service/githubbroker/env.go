@@ -111,15 +111,21 @@ func EnsureGHShim(dir, aoBinary string) (string, error) {
 	if runtime.GOOS == "windows" {
 		shimPath := filepath.Join(dir, "gh.cmd")
 		content := fmt.Sprintf("@echo off\r\n\"%s\" github-broker gh -- %%*\r\n", aoBinary)
-		if err := os.WriteFile(shimPath, []byte(content), 0o700); err != nil {
+		if err := os.WriteFile(shimPath, []byte(content), 0o600); err != nil {
 			return "", fmt.Errorf("write gh shim: %w", err)
+		}
+		if err := os.Chmod(shimPath, 0o700); err != nil {
+			return "", fmt.Errorf("chmod gh shim: %w", err)
 		}
 		return shimPath, nil
 	}
 	shimPath := filepath.Join(dir, "gh")
 	content := fmt.Sprintf("#!/bin/sh\nexec %s github-broker gh -- \"$@\"\n", shellQuoteForGit(aoBinary))
-	if err := os.WriteFile(shimPath, []byte(content), 0o700); err != nil {
+	if err := os.WriteFile(shimPath, []byte(content), 0o600); err != nil {
 		return "", fmt.Errorf("write gh shim: %w", err)
+	}
+	if err := os.Chmod(shimPath, 0o700); err != nil {
+		return "", fmt.Errorf("chmod gh shim: %w", err)
 	}
 	return shimPath, nil
 }

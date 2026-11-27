@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 )
@@ -106,7 +107,7 @@ func newGitHubBrokerGHCommand(ctx *commandContext) *cobra.Command {
 			}
 			defer func() { _ = os.RemoveAll(isolatedConfigDir) }()
 
-			child := exec.CommandContext(cmd.Context(), realGH, args...)
+			child := process.CommandContext(cmd.Context(), realGH, args...)
 			child.Stdin = cmd.InOrStdin()
 			child.Stdout = cmd.OutOrStdout()
 			child.Stderr = cmd.ErrOrStderr()
@@ -252,7 +253,7 @@ func callGitHubBrokerInvalidate(ctx context.Context, baseURL string, httpClient 
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil
+		return fmt.Errorf("github-broker: invalidate request failed: %v", githubapp.Redact(err.Error()))
 	}
 	_ = resp.Body.Close()
 	return nil
@@ -320,7 +321,6 @@ func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
 		}
 		out = append(out, kv)
 	}
-	out = append(out, "GH_TOKEN="+token)
-	out = append(out, "GH_CONFIG_DIR="+configDir)
+	out = append(out, "GH_TOKEN="+token, "GH_CONFIG_DIR="+configDir)
 	return out
 }

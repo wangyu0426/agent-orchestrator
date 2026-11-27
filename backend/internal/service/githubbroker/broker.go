@@ -196,7 +196,7 @@ func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.Pr
 	for _, raw := range registeredRepos {
 		full, repoName, err := parseOwnerRepo(raw)
 		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrForbiddenRepo, err)
+			return "", fmt.Errorf("%w: %w", ErrForbiddenRepo, err)
 		}
 		if _, ok := b.allowedRepos[strings.ToLower(repoName)]; !ok {
 			return "", fmt.Errorf("%w: repository %q is not in the GitHub App allowlist", ErrForbiddenRepo, full)
@@ -284,7 +284,7 @@ func (b *Broker) InvalidateToken(_ context.Context, req IssueRequest) error {
 	return nil
 }
 
-func (b *Broker) authorize(req IssueRequest) (fullRepo string, repoName string, err error) {
+func (b *Broker) authorize(req IssueRequest) (fullRepo, repoName string, err error) {
 	if strings.TrimSpace(string(req.SessionID)) == "" || strings.TrimSpace(req.BrokerToken) == "" {
 		return "", "", ErrUnauthorized
 	}
@@ -322,7 +322,7 @@ func (b *Broker) authorize(req IssueRequest) (fullRepo string, repoName string, 
 
 	parsedFull, parsedName, err := parseOwnerRepo(rawRepo)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: %v", ErrForbiddenRepo, err)
+		return "", "", fmt.Errorf("%w: %w", ErrForbiddenRepo, err)
 	}
 	key := strings.ToLower(parsedFull)
 	boundName, ok := allowedRepos[key]
