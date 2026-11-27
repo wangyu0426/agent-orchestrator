@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -46,6 +48,10 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	}
 	var broker *githubbroker.Broker
 	if cfg.WorkerBrokerEnabled {
+		brokerHost, hostErr := resolveBrokerGitHubHost(baseURL, cfg.GitHubHost)
+		if hostErr != nil {
+			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app worker broker: %w", hostErr)
+		}
 		owner := strings.TrimSpace(cfg.InstallationOwner)
 		ownerQualifiedRepos := make([]string, 0, len(repos))
 		for _, r := range repos {
@@ -54,7 +60,7 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 		broker, err = githubbroker.New(githubbroker.Config{
 			Provider:       provider,
 			AllowedRepos:   ownerQualifiedRepos,
-			GitHubHost:     cfg.GitHubHost,
+			GitHubHost:     brokerHost,
 			PrivateKeyPath: cfg.PrivateKeyPath,
 			IsolationMode:  cfg.WorkerIsolationMode,
 			GrantsPath:     cfg.GrantsPath,
@@ -114,4 +120,39 @@ func deriveGitHubGraphQLURL(restBase string) string {
 		return prefix + "/api/graphql"
 	}
 	return restBase + "/graphql"
+}
+
+func resolveBrokerGitHubHost(apiBaseURL, explicitHost string) (string, error) {
+	explicit := strings.ToLower(strings.TrimSpace(explicitHost))
+	if apiBaseURL == "" {
+		if explicit != "" && explicit != githubbroker.DefaultGitHubHost {
+			return "", fmt.Errorf("AO_GITHUB_APP_HOST %q does not match default API host %q", explicit, githubbroker.DefaultGitHubHost)
+		}
+		return githubbroker.DefaultGitHubHost, nil
+	}
+	u, err := url.Parse(apiBaseURL)
+	if err != nil || strings.TrimSpace(u.Hostname()) == "" {
+		return "", fmt.Errorf("invalid AO_GITHUB_APP_API_BASE_URL")
+	}
+	apiHost := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if apiHost == "localhost" {
+		if explicit != "" {
+			return explicit, nil
+		}
+		return githubbroker.DefaultGitHubHost, nil
+	}
+	if ip := net.ParseIP(apiHost); ip != nil && ip.IsLoopback() {
+		if explicit != "" {
+			return explicit, nil
+		}
+		return githubbroker.DefaultGitHubHost, nil
+	}
+	expected := strings.TrimPrefix(apiHost, "api.")
+	if expected == "" {
+		expected = apiHost
+	}
+	if explicit != "" && explicit != expected {
+		return "", fmt.Errorf("AO_GITHUB_APP_HOST %q does not match AO_GITHUB_APP_API_BASE_URL host %q", explicit, expected)
+	}
+	return expected, nil
 }
