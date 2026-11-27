@@ -517,11 +517,11 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	return rsaKey, nil
 }
 
-// normalizeRepositories converts repository entries ("repo" or "owner/repo")
-// into a sorted, deduplicated slice of repository names for GitHub's
-// installation access_tokens API. When repos is non-empty, malformed entries
-// (such as "owner/" or blank strings) are rejected so a typo cannot silently
-// widen the token scope to all installation repositories.
+// normalizeRepositories validates and normalizes repository names into a
+// sorted, deduplicated slice for GitHub's installation access_tokens API.
+// GitHub's access_tokens endpoint accepts repository names only (scoped to
+// the installation's account), so owner-qualified or slash-containing entries
+// are rejected rather than silently dropping the owner.
 func normalizeRepositories(repos []string) ([]string, error) {
 	if len(repos) == 0 {
 		return nil, nil
@@ -533,19 +533,8 @@ func normalizeRepositories(repos []string) ([]string, error) {
 		if r == "" {
 			return nil, fmt.Errorf("%w: empty repository entry in scope", ErrInvalidConfig)
 		}
-		parts := strings.Split(r, "/")
-		switch len(parts) {
-		case 1:
-			r = strings.TrimSpace(parts[0])
-		case 2:
-			owner := strings.TrimSpace(parts[0])
-			name := strings.TrimSpace(parts[1])
-			if owner == "" || name == "" {
-				return nil, fmt.Errorf("%w: malformed repository scope %q", ErrInvalidConfig, raw)
-			}
-			r = name
-		default:
-			return nil, fmt.Errorf("%w: malformed repository scope %q", ErrInvalidConfig, raw)
+		if strings.Contains(r, "/") {
+			return nil, fmt.Errorf("%w: repository scope %q must be a repository name without owner", ErrInvalidConfig, raw)
 		}
 		r = strings.TrimSuffix(r, ".git")
 		if r == "" {

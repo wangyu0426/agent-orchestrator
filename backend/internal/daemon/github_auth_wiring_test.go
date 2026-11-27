@@ -214,7 +214,7 @@ func TestGitHubApp_SCMAndTrackerIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("githubapp.NewProvider: %v", err)
 	}
-	appTokens := appProvider.TokenSource("wangyu0426/agent-orchestrator")
+	appTokens := appProvider.TokenSource("agent-orchestrator")
 
 	// 1. Tracker Preflight and Get work with installation token (no /user call).
 	tracker, err := trackergithub.New(trackergithub.Options{

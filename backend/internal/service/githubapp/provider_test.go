@@ -126,7 +126,7 @@ func TestProvider_SignJWTAndExchange(t *testing.T) {
 		t.Fatalf("NewProvider: %v", err)
 	}
 
-	src := p.TokenSource("wangyu0426/agent-orchestrator", "dev-rag-service")
+	src := p.TokenSource("agent-orchestrator", "dev-rag-service")
 	tok, err := src.Token(context.Background())
 	if err != nil {
 		t.Fatalf("Token: %v", err)
@@ -412,8 +412,8 @@ func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 		t.Fatalf("String/GoString leaked private key")
 	}
 
-	// Malformed repository scope must fail closed rather than widening to installation-wide.
-	for _, bad := range []string{"owner/", "/repo", "owner/repo/extra", " "} {
+	// Malformed or owner-qualified repository scopes must fail closed.
+	for _, bad := range []string{"owner/repo", "owner/", "/repo", "owner/repo/extra", " "} {
 		if _, err := p.TokenForRepositories(context.Background(), []string{bad}); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("malformed repo scope %q: got %v, want ErrInvalidConfig", bad, err)
 		}
