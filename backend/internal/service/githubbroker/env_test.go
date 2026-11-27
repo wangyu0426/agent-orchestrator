@@ -25,8 +25,8 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	if env["GIT_TERMINAL_PROMPT"] != "0" {
 		t.Fatalf("expected GIT_TERMINAL_PROMPT=0, got %q", env["GIT_TERMINAL_PROMPT"])
 	}
-	if env["GIT_CONFIG_NOSYSTEM"] != "1" || env["GIT_CONFIG_GLOBAL"] != os.DevNull {
-		t.Fatalf("expected system/global git config isolation, got NOSYSTEM=%q GLOBAL=%q", env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"])
+	if env["GIT_CONFIG_NOSYSTEM"] != "" || env["GIT_CONFIG_GLOBAL"] != "" {
+		t.Fatalf("expected non-GitHub global/system git config to remain preserved, got NOSYSTEM=%q GLOBAL=%q", env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"])
 	}
 	if env[EnvBrokerToken] != "sess-cap-token" {
 		t.Fatalf("expected %s to be set, got %q", EnvBrokerToken, env[EnvBrokerToken])
@@ -54,9 +54,6 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	}
 	if env["GIT_CONFIG_KEY_7"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_7"] != "ssh://git@github.com:22/" {
 		t.Fatalf("expected SSH port-22 rewrite, got %q=%q", env["GIT_CONFIG_KEY_7"], env["GIT_CONFIG_VALUE_7"])
-	}
-	if env["GIT_CONFIG_KEY_8"] != "protocol.ssh.allow" || env["GIT_CONFIG_VALUE_8"] != "never" {
-		t.Fatalf("expected protocol.ssh.allow=never for brokered session, got %q=%q", env["GIT_CONFIG_KEY_8"], env["GIT_CONFIG_VALUE_8"])
 	}
 }
 

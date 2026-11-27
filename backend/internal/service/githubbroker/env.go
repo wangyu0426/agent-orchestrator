@@ -94,16 +94,6 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s/", host)},
 		{fmt.Sprintf("url.https://%s/.insteadOf", host), fmt.Sprintf("ssh://git@%s:22/", host)},
 	}
-	if strings.TrimSpace(opts.BrokerToken) != "" {
-		// For GitHub-brokered sessions, also isolate from system/global git config
-		// and disable SSH transport globally so repo-local rules cannot bypass the broker.
-		env["GIT_CONFIG_NOSYSTEM"] = "1"
-		env["GIT_CONFIG_GLOBAL"] = os.DevNull
-		gitConfigs = append(gitConfigs,
-			[2]string{"protocol.ssh.allow", "never"},
-			[2]string{"http.extraHeader", ""},
-		)
-	}
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(gitConfigs))
 	for i, kv := range gitConfigs {
 		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", i)] = kv[0]
