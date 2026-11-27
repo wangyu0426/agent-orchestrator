@@ -164,6 +164,7 @@ const (
 // configuration/authentication failures.
 type AutoReviewFailureClass string
 
+// Auto-review failure classifications.
 const (
 	AutoReviewFailureTransient AutoReviewFailureClass = "transient"
 	AutoReviewFailureQuota     AutoReviewFailureClass = "quota"
