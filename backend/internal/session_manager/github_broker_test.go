@@ -107,17 +107,24 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected gh shim dir to be removed on teardown, err=%v", err)
 	}
 
-	// Non-GitHub (GitLab / local-only) projects skip broker registration without error.
+	// Non-GitHub (GitLab / local-only) projects skip broker registration without error
+	// but still sanitize GitHub credentials so unauthorized GitHub access fails closed.
 	store.projects["proj-gitlab"] = domain.ProjectRecord{
 		ID:            "proj-gitlab",
 		RepoOriginURL: "https://gitlab.com/group/project.git",
 	}
-	glEnv, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-gitlab", "proj-gitlab", "", nil, domain.AgentHarness("codex"))
+	glEnv, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-gitlab", "proj-gitlab", "", map[string]string{"GH_TOKEN": "ghp_personal_leak"}, domain.AgentHarness("codex"))
 	if err != nil {
-		t.Fatalf("expected non-GitHub project to skip broker, got %v", err)
+		t.Fatalf("expected non-GitHub project to launch without broker grant, got %v", err)
 	}
 	if glEnv[githubbroker.EnvBrokerToken] != "" {
 		t.Fatalf("expected no broker token for non-GitHub project, got %q", glEnv[githubbroker.EnvBrokerToken])
+	}
+	if glEnv["GH_TOKEN"] != "" {
+		t.Fatalf("expected GH_TOKEN to be scrubbed for non-GitHub project in broker mode, got %q", glEnv["GH_TOKEN"])
+	}
+	if glEnv["GIT_CONFIG_KEY_3"] != "protocol.ssh.allow" || glEnv["GIT_CONFIG_VALUE_3"] != "never" {
+		t.Fatalf("expected broker git isolation to still apply for non-GitHub project, got %q=%q", glEnv["GIT_CONFIG_KEY_3"], glEnv["GIT_CONFIG_VALUE_3"])
 	}
 
 	// GitHub SSH URL with explicit port is recognized and brokered.
