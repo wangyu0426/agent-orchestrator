@@ -3151,7 +3151,6 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		workspaceProjectRows = rows
 		workspaceProject = true
 	}
-	m.revokeGitHubBrokerSession(id)
 	var releaseArchiveInput func()
 	var stopArchiveChat func(context.Context) error
 	if archiveOnMerge {
@@ -3230,6 +3229,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 			return KillResult{}, fmt.Errorf("kill %s: runtime: %w", id, err)
 		}
 	}
+	m.revokeGitHubBrokerSession(id)
 	if err := m.terminateReviewer(ctx, id, "cancelled by worker session termination"); err != nil {
 		return KillResult{}, fmt.Errorf("kill %s: reviewer: %w", id, err)
 	}

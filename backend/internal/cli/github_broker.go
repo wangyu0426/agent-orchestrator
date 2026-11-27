@@ -286,12 +286,10 @@ func resolveRealGHBinary() (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv(githubbroker.EnvRealGH)); explicit != "" {
 		return explicit, nil
 	}
-	selfPath, _ := os.Executable()
-	selfDir := filepath.Clean(filepath.Dir(selfPath))
-	return resolveRealGHFromPath(os.Getenv("PATH"), selfDir, runtime.GOOS, os.Getenv("PATHEXT"))
+	return resolveRealGHFromPath(os.Getenv("PATH"), runtime.GOOS, os.Getenv("PATHEXT"))
 }
 
-func resolveRealGHFromPath(pathEnv, selfDir, goos, pathExt string) (string, error) {
+func resolveRealGHFromPath(pathEnv, goos, pathExt string) (string, error) {
 	candidates := []string{"gh"}
 	if goos == "windows" {
 		exts := []string{".exe", ".cmd", ".bat", ".com"}
@@ -318,7 +316,7 @@ func resolveRealGHFromPath(pathEnv, selfDir, goos, pathExt string) (string, erro
 			continue
 		}
 		clean := filepath.Clean(dir)
-		if (selfDir != "" && clean == selfDir) || strings.Contains(clean, "github-broker-bin") {
+		if strings.Contains(clean, "github-broker-bin") {
 			continue
 		}
 		for _, name := range candidates {

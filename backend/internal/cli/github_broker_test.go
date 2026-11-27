@@ -108,11 +108,15 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 	if err := os.WriteFile(realGH, []byte("real"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gotGH, err := resolveRealGHFromPath(shimDir+string(os.PathListSeparator)+realDir, "", "windows", ".EXE;.CMD")
+	// Also place ao beside gh in realDir to verify colocated installs resolve gh.
+	if err := os.WriteFile(filepath.Join(realDir, "ao.exe"), []byte("ao"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gotGH, err := resolveRealGHFromPath(shimDir+string(os.PathListSeparator)+realDir, "windows", ".EXE;.CMD")
 	if err != nil || gotGH != realGH {
 		t.Fatalf("resolveRealGHFromPath(windows) = (%q, %v), want (%q, nil)", gotGH, err, realGH)
 	}
-	if _, err := resolveRealGHFromPath(shimDir, "", "windows", ".EXE;.CMD"); err == nil {
+	if _, err := resolveRealGHFromPath(shimDir, "windows", ".EXE;.CMD"); err == nil {
 		t.Fatalf("expected error when only broker shim dir is in PATH")
 	}
 }
