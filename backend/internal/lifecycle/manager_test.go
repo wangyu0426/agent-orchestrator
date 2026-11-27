@@ -3725,7 +3725,7 @@ func TestLifecycleNudgeStartupGateUsesAdapterCapability(t *testing.T) {
 				Activity: domain.Activity{State: domain.ActivityIdle},
 			}
 
-			outcome, err := m.sendOnce(ctx, "mer-1", "", "tracker-comment:1", "1", "review this", 0, false)
+			outcome, err := m.sendOnce(ctx, "mer-1", "", "tracker-comment:1", "1", "review this", false)
 			if err != nil {
 				t.Fatalf("sendOnce: %v", err)
 			}
@@ -3882,7 +3882,9 @@ func TestApplyTrackerFacts_TerminatedSessionDoesNotRefireOrNudge(t *testing.T) {
 }
 
 func TestPRObservation_RetriesAfterMessengerFailure(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	m, st, msg := newManager()
+	m.clock = func() time.Time { return now }
 	st.sessions["mer-1"] = working("mer-1")
 	o := ports.PRObservation{Fetched: true, URL: "pr1", Mergeability: domain.MergeConflicting}
 	msg.err = errors.New("temporary send failure")
@@ -3890,6 +3892,7 @@ func TestPRObservation_RetriesAfterMessengerFailure(t *testing.T) {
 		t.Fatal("want send error")
 	}
 	msg.err = nil
+	now = now.Add(feedbackRetryBaseDelay)
 	if err := m.ApplyPRObservation(ctx, "mer-1", o); err != nil {
 		t.Fatal(err)
 	}
@@ -5208,8 +5211,9 @@ func TestEmitTelemetryStampsRequestID(t *testing.T) {
 func TestPRObservation_ReviewCommentNudgesDedupPerComment(t *testing.T) {
 	m, st, msg := newManager()
 	st.sessions["mer-1"] = working("mer-1")
-	comments := make([]domain.PullRequestComment, 0, reviewMaxNudge+2)
-	for i := range reviewMaxNudge + 2 {
+	const commentCount = 5
+	comments := make([]domain.PullRequestComment, 0, commentCount)
+	for i := range commentCount {
 		id := fmt.Sprintf("%d", i+1)
 		// Every comment shares one thread: the observer expands a thread into
 		// one row per comment, so this is the routine shape whenever a worker

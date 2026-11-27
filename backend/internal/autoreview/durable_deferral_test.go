@@ -198,9 +198,9 @@ func TestReviewerQuotaRetryCappedPrimaryYieldsToEligibleFallbackOnSameHead(t *te
 		},
 		prs: []domain.PullRequest{{URL: "https://github.com/o/r/pull/1", Number: 1, HeadSHA: "sha-1"}},
 		runs: []domain.ReviewRun{
-			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
-			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
-			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-10 * time.Minute)},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-5 * time.Minute)},
+			{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-1 * time.Minute)},
 		},
 	}
 	trig := &recordingOptionsTrigger{}
@@ -386,15 +386,16 @@ func TestReviewerQuotaActiveDeferralScansPastUnknownPrimaryToPositiveFallback(t 
 	}
 }
 
-func TestReviewerQuotaDisabledAndExplicitOverridePreserveLegacyRetryCap(t *testing.T) {
+func TestReviewerQuotaDisabledAndExplicitOverrideUseBackoffRecovery(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	quotaRuns := []domain.ReviewRun{
-		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
-		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
-		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto},
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-10 * time.Minute)},
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-5 * time.Minute)},
+		{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha-1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, Body: domain.ReviewRunQuotaExhaustedBody, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-1 * time.Minute)},
 	}
 
-	t.Run("disabled policy preserves 3-attempt retry cap", func(t *testing.T) {
+	t.Run("disabled policy defers during backoff and recovers after backoff", func(t *testing.T) {
+		current := now
 		st := &fakeStore{
 			session: domain.SessionRecord{
 				ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
@@ -406,14 +407,20 @@ func TestReviewerQuotaDisabledAndExplicitOverridePreserveLegacyRetryCap(t *testi
 			runs:    quotaRuns,
 		}
 		trig := &recordingOptionsTrigger{}
-		coord := New(st, trig, Config{Clock: func() time.Time { return now }})
+		coord := New(st, trig, Config{Clock: func() time.Time { return current }})
 		res, err := coord.EvaluateSession(context.Background(), "p-1")
-		if err != nil || res.Triggered || res.Reason != "failed_same_sha_retry_limit" || len(trig.calls) != 0 {
-			t.Fatalf("disabled policy must preserve retry cap: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		if err != nil || res.Triggered || res.Reason != "auto_review_retry_backoff" || res.AttemptCount != 3 || res.RetryAt.IsZero() || len(trig.calls) != 0 {
+			t.Fatalf("disabled policy must defer during backoff: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		}
+		current = res.RetryAt
+		res, err = coord.EvaluateSession(context.Background(), "p-1")
+		if err != nil || !res.Triggered || len(trig.calls) != 1 {
+			t.Fatalf("disabled policy must recover after backoff: res=%+v err=%v calls=%d", res, err, len(trig.calls))
 		}
 	})
 
-	t.Run("explicit session reviewer override preserves 3-attempt retry cap", func(t *testing.T) {
+	t.Run("explicit session reviewer override defers during backoff and recovers after backoff", func(t *testing.T) {
+		current := now
 		st := &fakeStore{
 			session: domain.SessionRecord{
 				ID: "p-1", ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
@@ -427,15 +434,20 @@ func TestReviewerQuotaDisabledAndExplicitOverridePreserveLegacyRetryCap(t *testi
 		}
 		trig := &recordingOptionsTrigger{}
 		coord := New(st, trig, Config{
-			Clock: func() time.Time { return now },
+			Clock: func() time.Time { return current },
 			Quota: &workerquota.Policy{
 				Role:      workerquota.RoleReviewer,
 				Fallbacks: []workerquota.Target{{Harness: domain.HarnessAgy, Mode: domain.SessionModeTUI}},
 			},
 		})
 		res, err := coord.EvaluateSession(context.Background(), "p-1")
-		if err != nil || res.Triggered || res.Reason != "failed_same_sha_retry_limit" || len(trig.calls) != 0 {
-			t.Fatalf("explicit override must preserve retry cap: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		if err != nil || res.Triggered || res.Reason != "auto_review_retry_backoff" || res.AttemptCount != 3 || len(trig.calls) != 0 {
+			t.Fatalf("explicit override must defer during backoff: res=%+v err=%v calls=%d", res, err, len(trig.calls))
+		}
+		current = res.RetryAt
+		res, err = coord.EvaluateSession(context.Background(), "p-1")
+		if err != nil || !res.Triggered || len(trig.calls) != 1 {
+			t.Fatalf("explicit override must recover after backoff: res=%+v err=%v calls=%d", res, err, len(trig.calls))
 		}
 	})
 }

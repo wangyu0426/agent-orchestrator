@@ -20,8 +20,6 @@ const (
 	DefaultIdleThreshold = time.Minute
 	// DefaultSweepInterval is the cadence for reevaluating live sessions.
 	DefaultSweepInterval = time.Minute
-	// autoReviewFailedRetryLimit bounds retries for the same current PR head.
-	autoReviewFailedRetryLimit = domain.AutoReviewFailedRetryLimit
 )
 
 // Store provides the durable session, project, PR, and review facts used by
@@ -57,9 +55,11 @@ type OptionsTrigger interface {
 // Result describes whether an evaluation started a review and why it skipped
 // or triggered.
 type Result struct {
-	Triggered bool
-	Reason    string
-	RetryAt   time.Time
+	Triggered    bool
+	Reason       string
+	RetryAt      time.Time
+	AttemptCount int
+	Detail       string
 }
 
 // Coordinator evaluates auto-review policy and owns the periodic sweep.
@@ -212,6 +212,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 	eligible := false
 	hasRunning := false
 	reason := "planner_ineligible"
+	var blockedDecision domain.AutoReviewHeadDecision
 	quotaManaged := selectedRoute != nil
 	for _, state := range states {
 		switch state.Status {
@@ -225,8 +226,9 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		case reviewcore.ReviewStateIneligible:
 			reason = ineligibleReason(prs, state.PRURL)
 		case reviewcore.ReviewStateNeedsReview:
-			if blocked := existingHeadReason(harnessRuns, state.PRURL, state.TargetSHA, quotaManaged); blocked != "" {
-				reason = blocked
+			if dec := existingHeadDecision(harnessRuns, state.PRURL, state.TargetSHA, now, quotaManaged); dec.Blocked {
+				reason = dec.Reason
+				blockedDecision = dec
 				continue
 			}
 			// When quota failover selects a different reviewer harness, never
@@ -241,7 +243,21 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		}
 	}
 	if !eligible && !hasRunning {
-		return Result{Reason: reason}, nil
+		if blockedDecision.Reason == "auto_review_retry_backoff" || blockedDecision.Reason == "permanent_review_failure" {
+			c.logger.Info("auto-review: head deferred or blocked",
+				"session_id", id,
+				"harness", harness,
+				"reason", blockedDecision.Reason,
+				"retry_at", blockedDecision.RetryAt,
+				"attempt_count", blockedDecision.AttemptCount,
+				"detail", blockedDecision.Detail)
+		}
+		return Result{
+			Reason:       reason,
+			RetryAt:      blockedDecision.RetryAt,
+			AttemptCount: blockedDecision.AttemptCount,
+			Detail:       blockedDecision.Detail,
+		}, nil
 	}
 	var result reviewcore.TriggerResult
 	if selectedRoute != nil {
@@ -266,7 +282,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: result.SkipReason}, nil
 	}
 	if !result.Created {
-		return Result{Reason: triggerResultReason(prs, result, harness, quotaManaged)}, nil
+		return Result{Reason: triggerResultReason(prs, result, harness, now, quotaManaged)}, nil
 	}
 	c.clearDeferrals(ctx, id, prs)
 	return Result{Triggered: true, Reason: "triggered"}, nil
@@ -531,12 +547,12 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.
 			logRoute(route, summary, freshPositive, "route_not_ready")
 			continue
 		}
-		// If this route's harness has already hit the per-SHA auto-retry cap on
-		// every pending PR, yield to the next eligible fallback route instead of
-		// stranding the pending HEAD.
-		if allPendingPRsRetryCapped(prs, runs, domain.ReviewerHarness(route.Harness)) {
+		// If this route's harness is permanently blocked or currently in retry
+		// backoff on every pending PR, yield to the next eligible fallback route
+		// instead of stranding the pending HEAD.
+		if allPendingPRsBlockedForRoute(prs, runs, domain.ReviewerHarness(route.Harness), now) {
 			decision.retryCappedRoutes++
-			logRoute(route, summary, freshPositive, "retry_capped")
+			logRoute(route, summary, freshPositive, "route_retry_deferred")
 			continue
 		}
 		// During an active durable deferral, do not stop on an earlier route
@@ -568,9 +584,9 @@ func (c *Coordinator) selectReviewerRoute(ctx context.Context, sessionID domain.
 	return decision
 }
 
-func allPendingPRsRetryCapped(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness) bool {
+func allPendingPRsBlockedForRoute(prs []domain.PullRequest, runs []domain.ReviewRun, harness domain.ReviewerHarness, now time.Time) bool {
 	pending := 0
-	capped := 0
+	blocked := 0
 	for _, pr := range prs {
 		if pr.URL == "" || pr.HeadSHA == "" || pr.Draft || pr.Merged || pr.Closed {
 			continue
@@ -585,11 +601,12 @@ func allPendingPRsRetryCapped(prs []domain.PullRequest, runs []domain.ReviewRun,
 				harnessRuns = append(harnessRuns, r)
 			}
 		}
-		if existingHeadReason(harnessRuns, pr.URL, pr.HeadSHA, true) == "failed_same_sha_retry_limit" {
-			capped++
+		dec := existingHeadDecision(harnessRuns, pr.URL, pr.HeadSHA, now, true)
+		if dec.Reason == "permanent_review_failure" || dec.Reason == "auto_review_retry_backoff" {
+			blocked++
 		}
 	}
-	return pending > 0 && capped == pending
+	return pending > 0 && blocked == pending
 }
 
 func hasFreshPositiveWindow(windows []workerquota.Window, now time.Time) bool {
@@ -619,7 +636,7 @@ func crossHarnessHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) st
 	return ""
 }
 
-func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResult, harness domain.ReviewerHarness, quotaManaged bool) string {
+func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResult, harness domain.ReviewerHarness, now time.Time, quotaManaged bool) string {
 	for _, state := range result.Reviews {
 		if state.Status == reviewcore.ReviewStateRunning {
 			return "review_running"
@@ -632,40 +649,16 @@ func triggerResultReason(prs []domain.PullRequest, result reviewcore.TriggerResu
 		}
 	}
 	for _, pr := range prs {
-		if blocked := existingHeadReason(runs, pr.URL, pr.HeadSHA, quotaManaged); blocked != "" {
-			return blocked
+		if dec := existingHeadDecision(runs, pr.URL, pr.HeadSHA, now, quotaManaged); dec.Blocked {
+			return dec.Reason
 		}
 	}
 	return "planner_up_to_date"
 }
 
-func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string, quotaManaged ...bool) string {
+func existingHeadDecision(runs []domain.ReviewRun, prURL, targetSHA string, now time.Time, quotaManaged ...bool) domain.AutoReviewHeadDecision {
 	ignoreQuotaFailures := len(quotaManaged) > 0 && quotaManaged[0]
-	failedAutoRuns := 0
-	for _, run := range runs {
-		if run.PRURL != prURL || run.TargetSHA != targetSHA {
-			continue
-		}
-		if run.Status == domain.ReviewRunRunning {
-			return "review_running"
-		}
-		if run.Status == domain.ReviewRunCancelled {
-			return "cancelled_same_sha"
-		}
-		if run.Verdict == domain.VerdictApproved {
-			return "already_approved"
-		}
-		if run.Verdict == domain.VerdictChangesRequested {
-			return "changes_requested_same_sha"
-		}
-		if run.Status == domain.ReviewRunFailed && run.TriggerSource == domain.ReviewTriggerAuto && (!ignoreQuotaFailures || !domain.IsQuotaFailedReviewRun(run)) {
-			failedAutoRuns++
-		}
-	}
-	if failedAutoRuns >= autoReviewFailedRetryLimit {
-		return "failed_same_sha_retry_limit"
-	}
-	return ""
+	return domain.EvaluateAutoReviewHead(runs, prURL, targetSHA, "", now, ignoreQuotaFailures)
 }
 
 func effectiveReviewerHarnessWithDefaults(session domain.SessionRecord, config domain.ProjectConfig, defaults domain.ProjectDefaults) domain.ReviewerHarness {

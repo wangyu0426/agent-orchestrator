@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/pkg/contract"
@@ -152,9 +153,22 @@ type CurrentHeadReviewRun struct {
 	AutoRetryBlocked bool
 }
 
-// AutoReviewFailedRetryLimit is how many failed auto review passes one PR head
-// gets before auto review stops retrying it.
-const AutoReviewFailedRetryLimit = 3
+// Auto-review bounded exponential backoff defaults for recoverable failures.
+const (
+	AutoReviewRetryBaseDelay = time.Minute
+	AutoReviewRetryMaxDelay  = 30 * time.Minute
+)
+
+// AutoReviewFailureClass categorizes a failed auto-review run so recovery
+// policy can distinguish transient errors, quota exhaustion, and permanent
+// configuration/authentication failures.
+type AutoReviewFailureClass string
+
+const (
+	AutoReviewFailureTransient AutoReviewFailureClass = "transient"
+	AutoReviewFailureQuota     AutoReviewFailureClass = "quota"
+	AutoReviewFailurePermanent AutoReviewFailureClass = "permanent"
+)
 
 // ReviewRunQuotaExhaustedBody is the durable review_run body recorded when a
 // reviewer Chat turn fails with typed failure_code = 'quota_exhausted'.
@@ -164,6 +178,157 @@ const ReviewRunQuotaExhaustedBody = "reviewer Chat turn failed: quota_exhausted"
 // provider quota exhaustion rather than an ordinary review failure.
 func IsQuotaFailedReviewRun(run ReviewRun) bool {
 	return run.Status == ReviewRunFailed && run.Body == ReviewRunQuotaExhaustedBody
+}
+
+// ClassifyAutoReviewFailure classifies a failed review run into quota,
+// permanent configuration/authentication, or transient failure.
+func ClassifyAutoReviewFailure(run ReviewRun) AutoReviewFailureClass {
+	if IsQuotaFailedReviewRun(run) {
+		return AutoReviewFailureQuota
+	}
+	body := strings.ToLower(strings.TrimSpace(run.Body))
+	if body == "" {
+		return AutoReviewFailureTransient
+	}
+	permanentMarkers := []string{
+		"reviewer preflight:",
+		"unknown reviewer harness",
+		"does not support chat",
+		"invalid api key",
+		"invalid_api_key",
+		"authentication failed",
+		"unauthorized",
+		"forbidden",
+		"permission denied",
+		"not logged in",
+		"login required",
+		"missing credentials",
+		"invalid configuration",
+		"status 401",
+		"status 403",
+		"http 401",
+		"http 403",
+	}
+	for _, marker := range permanentMarkers {
+		if strings.Contains(body, marker) {
+			return AutoReviewFailurePermanent
+		}
+	}
+	return AutoReviewFailureTransient
+}
+
+// AutoReviewRetryBackoff returns the bounded exponential backoff delay for the
+// given 1-based failed auto-review attempt count.
+func AutoReviewRetryBackoff(attempt int) time.Duration {
+	if attempt <= 1 {
+		return AutoReviewRetryBaseDelay
+	}
+	delay := AutoReviewRetryBaseDelay
+	for i := 1; i < attempt; i++ {
+		if delay >= AutoReviewRetryMaxDelay/2 {
+			return AutoReviewRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > AutoReviewRetryMaxDelay {
+		return AutoReviewRetryMaxDelay
+	}
+	return delay
+}
+
+// AutoReviewHeadDecision is the shared eligibility and retry/deferral decision
+// for automatic review of a single (prURL, targetSHA, harness) tuple.
+type AutoReviewHeadDecision struct {
+	Blocked      bool
+	Permanent    bool
+	Reason       string
+	RetryAt      time.Time
+	AttemptCount int
+	Detail       string
+}
+
+// EvaluateAutoReviewHead evaluates whether automatic review for (prURL,
+// targetSHA, harness) is currently blocked, deferred in backoff, permanently
+// blocked by a config/auth error, or eligible to run at now.
+//
+// Both the auto-review coordinator and the review engine call this function so
+// eligibility, backoff, and permanent-failure classification never drift.
+func EvaluateAutoReviewHead(
+	runs []ReviewRun,
+	prURL, targetSHA string,
+	harness ReviewerHarness,
+	now time.Time,
+	ignoreQuotaFailures bool,
+) AutoReviewHeadDecision {
+	failedAutoRuns := 0
+	var latestFailed ReviewRun
+	hasLatestFailed := false
+
+	for _, run := range runs {
+		if run.PRURL != prURL || run.TargetSHA != targetSHA {
+			continue
+		}
+		if harness != "" && run.Harness != harness && run.Harness != "" {
+			continue
+		}
+		if run.Status == ReviewRunRunning {
+			return AutoReviewHeadDecision{Blocked: true, Reason: "review_running"}
+		}
+		if run.Status == ReviewRunCancelled {
+			return AutoReviewHeadDecision{Blocked: true, Reason: "cancelled_same_sha"}
+		}
+		if run.Verdict == VerdictApproved {
+			return AutoReviewHeadDecision{Blocked: true, Reason: "already_approved"}
+		}
+		if run.Verdict == VerdictChangesRequested {
+			return AutoReviewHeadDecision{Blocked: true, Reason: "changes_requested_same_sha"}
+		}
+		if run.Status == ReviewRunFailed && run.TriggerSource == ReviewTriggerAuto {
+			if ignoreQuotaFailures && IsQuotaFailedReviewRun(run) {
+				continue
+			}
+			failedAutoRuns++
+			if !hasLatestFailed || run.CreatedAt.After(latestFailed.CreatedAt) ||
+				(run.CreatedAt.Equal(latestFailed.CreatedAt) && run.CreatedAt.IsZero()) {
+				latestFailed = run
+				hasLatestFailed = true
+			}
+		}
+	}
+
+	if failedAutoRuns == 0 {
+		return AutoReviewHeadDecision{}
+	}
+
+	detail := strings.TrimSpace(latestFailed.Body)
+	if ClassifyAutoReviewFailure(latestFailed) == AutoReviewFailurePermanent {
+		return AutoReviewHeadDecision{
+			Blocked:      true,
+			Permanent:    true,
+			Reason:       "permanent_review_failure",
+			AttemptCount: failedAutoRuns,
+			Detail:       detail,
+		}
+	}
+
+	if !latestFailed.CreatedAt.IsZero() {
+		retryAt := latestFailed.CreatedAt.Add(AutoReviewRetryBackoff(failedAutoRuns))
+		if now.Before(retryAt) {
+			return AutoReviewHeadDecision{
+				Blocked:      true,
+				Reason:       "auto_review_retry_backoff",
+				RetryAt:      retryAt,
+				AttemptCount: failedAutoRuns,
+				Detail:       detail,
+			}
+		}
+	}
+
+	return AutoReviewHeadDecision{
+		Blocked:      false,
+		AttemptCount: failedAutoRuns,
+		Detail:       detail,
+	}
 }
 
 // ReviewerHandle names one live reviewer pane's runtime handle, independent

@@ -76,17 +76,17 @@ func TestEvaluateSessionEligibility(t *testing.T) {
 		{name: "new head after changes requested", want: true, mutate: func(f *fakeStore) {
 			f.runs = []domain.ReviewRun{{PRURL: "pr1", TargetSHA: "old", Status: domain.ReviewRunComplete, Verdict: domain.VerdictChangesRequested, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now}}
 		}},
-		{name: "failed current head retries under limit", want: true, mutate: func(f *fakeStore) {
+		{name: "failed current head retries after backoff", want: true, mutate: func(f *fakeStore) {
 			f.runs = []domain.ReviewRun{
-				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now},
-				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(time.Second)},
+				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-10 * time.Minute)},
+				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-5 * time.Minute)},
 			}
 		}},
-		{name: "failed current head stops after three auto retries", mutate: func(f *fakeStore) {
+		{name: "failed current head defers during backoff", mutate: func(f *fakeStore) {
 			f.runs = []domain.ReviewRun{
-				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now},
-				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(time.Second)},
-				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(2 * time.Second)},
+				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-10 * time.Minute)},
+				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-5 * time.Minute)},
+				{PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto, CreatedAt: now.Add(-time.Minute)},
 			}
 		}},
 		{name: "manual failures do not spend the auto retry budget", want: true, mutate: func(f *fakeStore) {
@@ -128,53 +128,70 @@ func TestEvaluateSessionEligibility(t *testing.T) {
 	}
 }
 
-func TestExistingHeadReasonCapsFailedAutoRetriesPerHead(t *testing.T) {
+func TestExistingHeadDecisionUsesBackoffAndPermanentClassification(t *testing.T) {
 	prURL := "pr1"
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name string
-		runs []domain.ReviewRun
-		want string
+		name        string
+		runs        []domain.ReviewRun
+		now         time.Time
+		wantReason  string
+		wantBlocked bool
 	}{
 		{
-			name: "two failed auto runs do not block",
+			name: "failed auto run within backoff defers",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "temporary network error", CreatedAt: base},
 			},
-			want: "",
+			now:         base.Add(30 * time.Second),
+			wantReason:  "auto_review_retry_backoff",
+			wantBlocked: true,
 		},
 		{
-			name: "three failed auto runs hit the retry limit",
+			name: "four transient failures recover after backoff expires",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "timeout 1", CreatedAt: base},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "timeout 2", CreatedAt: base.Add(2 * time.Minute)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "timeout 3", CreatedAt: base.Add(5 * time.Minute)},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "timeout 4", CreatedAt: base.Add(10 * time.Minute)},
 			},
-			want: "failed_same_sha_retry_limit",
+			now:         base.Add(10*time.Minute + 8*time.Minute),
+			wantReason:  "",
+			wantBlocked: false,
+		},
+		{
+			name: "permanent auth/config failure blocks without retrying",
+			runs: []domain.ReviewRun{
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, Body: "reviewer preflight: invalid API key", CreatedAt: base},
+			},
+			now:         base.Add(2 * time.Hour),
+			wantReason:  "permanent_review_failure",
+			wantBlocked: true,
 		},
 		{
 			name: "other sha does not count",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "old", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "old", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "old", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "old", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerAuto, Status: domain.ReviewRunFailed, CreatedAt: base},
 			},
-			want: "",
+			now:         base.Add(10 * time.Second),
+			wantReason:  "",
+			wantBlocked: false,
 		},
 		{
 			name: "manual failures do not count",
 			runs: []domain.ReviewRun{
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
-				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed},
+				{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, TriggerSource: domain.ReviewTriggerManual, Status: domain.ReviewRunFailed, CreatedAt: base},
 			},
-			want: "",
+			now:         base.Add(10 * time.Second),
+			wantReason:  "",
+			wantBlocked: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := existingHeadReason(tt.runs, prURL, "sha1"); got != tt.want {
-				t.Fatalf("existingHeadReason() = %q, want %q", got, tt.want)
+			got := existingHeadDecision(tt.runs, prURL, "sha1", tt.now)
+			if got.Blocked != tt.wantBlocked || got.Reason != tt.wantReason {
+				t.Fatalf("existingHeadDecision() = %+v, want blocked=%v reason=%q", got, tt.wantBlocked, tt.wantReason)
 			}
 		})
 	}

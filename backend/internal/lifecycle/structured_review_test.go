@@ -163,27 +163,30 @@ func TestApplyPRObservation_StructuredReview_DeliveryFailureRetries(t *testing.T
 		},
 	}
 
+	now := time.Date(2026, 11, 24, 12, 5, 0, 0, time.UTC)
 	msg := &fakeMessenger{err: errors.New("pane busy")}
 	m := New(store, msg, WithStructuredReviewPolicy(structuredreview.Policy{Enabled: true, AllowPRAuthor: true}))
+	m.clock = func() time.Time { return now }
 	obs := ports.PRObservation{Fetched: true, URL: prURL, Number: 25, Review: domain.ReviewNone}
 
-	// First attempt fails: must NOT mark delivered.
+	// First attempt fails: must NOT mark delivered in Seen, but persists retry backoff state.
 	if err := m.ApplyPRObservation(context.Background(), sid, obs); err == nil {
 		t.Fatalf("expected error on first delivery attempt")
 	}
-	if store.signatures[prURL] != "" {
-		t.Fatalf("failed delivery must not persist nudge signature, got %q", store.signatures[prURL])
+	if strings.Contains(store.signatures[prURL], `"seen"`) {
+		t.Fatalf("failed delivery must not mark seen in nudge signature, got %q", store.signatures[prURL])
 	}
 
-	// Clear error and retry: must deliver once and persist.
+	// Clear error and advance past backoff before retry: must deliver once and persist Seen.
 	msg.err = nil
+	now = now.Add(feedbackRetryBaseDelay)
 	if err := m.ApplyPRObservation(context.Background(), sid, obs); err != nil {
 		t.Fatalf("retry ApplyPRObservation: %v", err)
 	}
 	if len(msg.msgs) != 1 {
 		t.Fatalf("expected 1 successful delivery after retry, got %d", len(msg.msgs))
 	}
-	if store.signatures[prURL] == "" {
-		t.Fatalf("expected durable nudge signature after successful delivery")
+	if !strings.Contains(store.signatures[prURL], `"seen"`) {
+		t.Fatalf("expected durable seen nudge signature after successful delivery, got %q", store.signatures[prURL])
 	}
 }
