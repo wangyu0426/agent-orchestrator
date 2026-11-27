@@ -437,7 +437,10 @@ func (t *Tracker) roundTrip(ctx context.Context, method, path string, body any, 
 		return respBody, etag, nextPath, false, nil
 	}
 	classified := classifyError(resp, respBody)
-	if errors.Is(classified, ErrAuthFailed) {
+	// Invalidate cached tokens only on 401 (confirmed credential rejection).
+	// 403 permission/visibility denials are not fixed by re-minting an
+	// installation token and would otherwise churn the token endpoint.
+	if resp.StatusCode == http.StatusUnauthorized {
 		type tokenInvalidator interface {
 			InvalidateToken()
 		}
