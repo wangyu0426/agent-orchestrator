@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,5 +85,30 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 	}
 	if !strings.Contains(joined, "GH_TOKEN=ghs_fresh_1234567890") || !strings.Contains(joined, "GH_CONFIG_DIR=/tmp/iso-gh") {
 		t.Fatalf("missing broker GH_TOKEN or GH_CONFIG_DIR in child env: %s", joined)
+	}
+
+	// Verify resolveRealGHFromPath skips broker shim dir and handles Windows PATHEXT without recursing.
+	tmp := t.TempDir()
+	shimDir := filepath.Join(tmp, "github-broker-bin", "sess-1")
+	realDir := filepath.Join(tmp, "real-bin")
+	if err := os.MkdirAll(shimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shimDir, "gh.cmd"), []byte("shim"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realGH := filepath.Join(realDir, "gh.exe")
+	if err := os.WriteFile(realGH, []byte("real"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gotGH, err := resolveRealGHFromPath(shimDir+string(os.PathListSeparator)+realDir, "", "windows", ".EXE;.CMD")
+	if err != nil || gotGH != realGH {
+		t.Fatalf("resolveRealGHFromPath(windows) = (%q, %v), want (%q, nil)", gotGH, err, realGH)
+	}
+	if _, err := resolveRealGHFromPath(shimDir, "", "windows", ".EXE;.CMD"); err == nil {
+		t.Fatalf("expected error when only broker shim dir is in PATH")
 	}
 }

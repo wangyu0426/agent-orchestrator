@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -286,26 +287,49 @@ func resolveRealGHBinary() (string, error) {
 		return explicit, nil
 	}
 	selfPath, _ := os.Executable()
-	selfDir := filepath.Dir(selfPath)
-	pathEnv := os.Getenv("PATH")
-	var filtered []string
+	selfDir := filepath.Clean(filepath.Dir(selfPath))
+	return resolveRealGHFromPath(os.Getenv("PATH"), selfDir, runtime.GOOS, os.Getenv("PATHEXT"))
+}
+
+func resolveRealGHFromPath(pathEnv, selfDir, goos, pathExt string) (string, error) {
+	candidates := []string{"gh"}
+	if goos == "windows" {
+		exts := []string{".exe", ".cmd", ".bat", ".com"}
+		if strings.TrimSpace(pathExt) != "" {
+			var parsed []string
+			for _, ext := range strings.Split(pathExt, ";") {
+				ext = strings.ToLower(strings.TrimSpace(ext))
+				if ext != "" && strings.HasPrefix(ext, ".") {
+					parsed = append(parsed, ext)
+				}
+			}
+			if len(parsed) > 0 {
+				exts = parsed
+			}
+		}
+		candidates = make([]string, 0, len(exts))
+		for _, ext := range exts {
+			candidates = append(candidates, "gh"+ext)
+		}
+	}
+
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" {
 			continue
 		}
 		clean := filepath.Clean(dir)
-		if clean == selfDir || strings.Contains(clean, "github-broker-bin") {
+		if (selfDir != "" && clean == selfDir) || strings.Contains(clean, "github-broker-bin") {
 			continue
 		}
-		filtered = append(filtered, dir)
-	}
-	for _, dir := range filtered {
-		candidate := filepath.Join(dir, "gh")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+		for _, name := range candidates {
+			candidate := filepath.Join(dir, name)
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() {
+				return candidate, nil
+			}
 		}
 	}
-	return exec.LookPath("gh")
+	return "", fmt.Errorf("gh executable not found in PATH outside broker shim: %w", exec.ErrNotFound)
 }
 
 func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
