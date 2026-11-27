@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,6 +134,71 @@ func TestGitHubApp_SCMAndTrackerIntegration(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/wangyu0426/agent-orchestrator/issues/8/comments":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"node_id":"IC_kwDO1","body":"AO status update","html_url":"https://github.com/wangyu0426/agent-orchestrator/pull/8#issuecomment-1","created_at":"2026-11-27T06:00:00Z","user":{"login":"ao-daemon[bot]","type":"Bot"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/wangyu0426/agent-orchestrator/pulls/8":
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ghs_app_integration_token_") {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"number":8,"state":"open","draft":false,"merged":false,"html_url":"https://github.com/wangyu0426/agent-orchestrator/pull/8","head":{"ref":"feat/test","sha":"abc123"},"base":{"ref":"main"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ghs_app_integration_token_") {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"data": {
+					"repository": {
+						"pullRequest": {
+							"reviewDecision": "CHANGES_REQUESTED",
+							"mergeable": "MERGEABLE",
+							"mergeStateStatus": "CLEAN",
+							"isDraft": false,
+							"state": "OPEN",
+							"commits": {"nodes": [{"commit": {"oid": "abc123", "statusCheckRollup": null}}]},
+							"reviewThreads": {
+								"nodes": [
+									{
+										"id": "T_human",
+										"isResolved": false,
+										"path": "main.go",
+										"line": 10,
+										"comments": {
+											"nodes": [{
+												"id": "C_human",
+												"body": "Please fix this before merge",
+												"path": "main.go",
+												"line": 10,
+												"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8#discussion_r1",
+												"createdAt": "2026-11-27T06:01:00Z",
+												"author": {"__typename": "User", "login": "wangyu0426"}
+											}]
+										}
+									},
+									{
+										"id": "T_bot",
+										"isResolved": false,
+										"path": "",
+										"line": 0,
+										"comments": {
+											"nodes": [{
+												"id": "C_bot",
+												"body": "AO status update",
+												"path": "",
+												"line": 0,
+												"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8#discussion_r2",
+												"createdAt": "2026-11-27T06:02:00Z",
+												"author": {"__typename": "Bot", "login": "ao-daemon[bot]"}
+											}]
+										}
+									}
+								]
+							}
+						}
+					}
+				}
+			}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -202,14 +268,22 @@ func TestGitHubApp_SCMAndTrackerIntegration(t *testing.T) {
 	if !posted.IsBot {
 		t.Fatalf("expected bot-authored status comment IsBot=true, got %+v", posted)
 	}
-	if domain.IsActionableReviewComment(false, posted.IsBot, "", 0) {
-		t.Fatal("own top-level bot status comment must not be treated as actionable review feedback")
+
+	// 4. Exercise App-authenticated REST + GraphQL PR observation through scmProv.Observe:
+	// human CHANGES_REQUESTED review and unresolved human comment are observed,
+	// while the App's own bot status comment is filtered out of pending review comments.
+	obs, err := scmProv.Observe(context.Background(), "https://github.com/wangyu0426/agent-orchestrator/pull/8")
+	if err != nil {
+		t.Fatalf("scmProv.Observe: %v", err)
 	}
-	if !domain.IsActionableReviewComment(false, true, "main.go", 10) {
-		t.Fatal("inline bot code review comment should remain actionable (do not drop all bot comments)")
+	if !obs.Fetched {
+		t.Fatal("expected obs.Fetched=true")
 	}
-	if !domain.IsActionableReviewComment(false, false, "", 0) {
-		t.Fatal("human change-request review comment must be actionable")
+	if obs.Review != domain.ReviewChangesRequest {
+		t.Fatalf("obs.Review = %q, want %q", obs.Review, domain.ReviewChangesRequest)
+	}
+	if len(obs.Comments) != 1 || obs.Comments[0].Author != "wangyu0426" {
+		t.Fatalf("obs.Comments = %+v, want only the 1 human change-request comment (bot status comment filtered)", obs.Comments)
 	}
 
 	if userCalls.Load() != 0 {
