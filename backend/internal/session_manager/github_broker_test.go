@@ -106,4 +106,26 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 	if _, err := os.Stat(shimDir); !os.IsNotExist(err) {
 		t.Fatalf("expected gh shim dir to be removed on teardown, err=%v", err)
 	}
+
+	// Non-GitHub (GitLab / local-only) projects skip broker registration without error.
+	store.projects["proj-gitlab"] = domain.ProjectRecord{
+		ID:            "proj-gitlab",
+		RepoOriginURL: "https://gitlab.com/group/project.git",
+	}
+	glEnv, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-gitlab", "proj-gitlab", "", nil, domain.AgentHarness("codex"))
+	if err != nil {
+		t.Fatalf("expected non-GitHub project to skip broker, got %v", err)
+	}
+	if glEnv[githubbroker.EnvBrokerToken] != "" {
+		t.Fatalf("expected no broker token for non-GitHub project, got %q", glEnv[githubbroker.EnvBrokerToken])
+	}
+
+	// GitHub project outside allowlist still fails closed.
+	store.projects["proj-unlisted"] = domain.ProjectRecord{
+		ID:            "proj-unlisted",
+		RepoOriginURL: "https://github.com/other-org/secret-repo.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-unlisted", "proj-unlisted", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for unlisted GitHub repo, got %v", err)
+	}
 }

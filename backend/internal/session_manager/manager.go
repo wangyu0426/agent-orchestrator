@@ -7298,6 +7298,12 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 			}
 		}
 	}
+	if len(repos) == 0 {
+		// Non-GitHub (e.g. GitLab) or local-only projects do not use the GitHub
+		// App broker; skip registration while continuing to fail closed for any
+		// GitHub origin outside the allowlist.
+		return nil
+	}
 	brokerToken, err := m.githubBroker.RegisterSession(id, project, repos)
 	if err != nil {
 		return err
