@@ -18,6 +18,12 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	})
 
 	for _, k := range InheritedCredentialEnvKeys {
+		if k == "GIT_SSH_COMMAND" {
+			if !strings.Contains(env[k], "github-broker ssh-guard") {
+				t.Fatalf("expected GIT_SSH_COMMAND to invoke ssh-guard, got %q", env[k])
+			}
+			continue
+		}
 		if v, ok := env[k]; !ok || v != "" {
 			t.Fatalf("expected inherited credential %s to be scrubbed to empty, got %q (present=%v)", k, v, ok)
 		}

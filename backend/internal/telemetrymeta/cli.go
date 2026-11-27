@@ -74,6 +74,7 @@ var legacyActorlessSystemCLICommands = map[string]struct{}{
 	"ao github-broker":                {},
 	"ao github-broker gh":             {},
 	"ao github-broker git-credential": {},
+	"ao github-broker ssh-guard":      {},
 	"ao help":                         {},
 	"ao pty-host":                     {},
 	"ao start":                        {},

@@ -74,6 +74,7 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		env[k] = ""
 	}
 	env["GIT_TERMINAL_PROMPT"] = "0"
+	env["GIT_SSH_COMMAND"] = fmt.Sprintf("%s github-broker ssh-guard", shellQuoteForGit(aoBin))
 	env[EnvBrokerToken] = opts.BrokerToken
 	env[EnvBrokerHost] = host
 

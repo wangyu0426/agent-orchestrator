@@ -45,7 +45,53 @@ func newGitHubBrokerCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.AddCommand(newGitHubBrokerGitCredentialCommand(ctx))
 	cmd.AddCommand(newGitHubBrokerGHCommand(ctx))
+	cmd.AddCommand(newGitHubBrokerSSHGuardCommand())
 	return cmd
+}
+
+func newGitHubBrokerSSHGuardCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:                "ssh-guard [args...]",
+		Short:              "Block Git SSH transport to the brokered GitHub host while allowing other hosts",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && args[0] == "--" {
+				args = args[1:]
+			}
+			host := strings.ToLower(strings.TrimSpace(os.Getenv(githubbroker.EnvBrokerHost)))
+			if host == "" {
+				host = githubbroker.DefaultGitHubHost
+			}
+			if sshArgsTargetHost(args, host) {
+				return fmt.Errorf("github-broker: SSH transport to %s is disabled in broker mode; use HTTPS", host)
+			}
+			child := process.CommandContext(cmd.Context(), "ssh", args...)
+			child.Stdin = cmd.InOrStdin()
+			child.Stdout = cmd.OutOrStdout()
+			child.Stderr = cmd.ErrOrStderr()
+			if err := child.Run(); err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					return fmt.Errorf("github-broker: ssh exited with status %d", exitErr.ExitCode())
+				}
+				return err
+			}
+			return nil
+		},
+	}
+}
+
+func sshArgsTargetHost(args []string, host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+	for _, a := range args {
+		if strings.Contains(strings.ToLower(a), h) {
+			return true
+		}
+	}
+	return false
 }
 
 func newGitHubBrokerGitCredentialCommand(ctx *commandContext) *cobra.Command {
