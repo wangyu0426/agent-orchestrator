@@ -121,6 +121,7 @@ type GitHubAppConfig struct {
 	APIBaseURL          string
 	GitHubHost          string
 	Repositories        []string
+	InstallationOwner   string
 	OperatorLogin       string
 	WorkerBrokerEnabled bool
 	WorkerIsolationMode string
@@ -586,6 +587,11 @@ func Load() (Config, error) {
 		if !cfg.GitHubApp.Enabled {
 			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_BROKER_ENABLED requires AO_GITHUB_APP_ENABLED=on")
 		}
+		owner := strings.TrimSpace(strings.TrimPrefix(os.Getenv("AO_GITHUB_APP_INSTALLATION_OWNER"), "@"))
+		if owner == "" || strings.Contains(owner, "/") {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_INSTALLATION_OWNER is required when AO_GITHUB_APP_WORKER_BROKER_ENABLED is on")
+		}
+		cfg.GitHubApp.InstallationOwner = owner
 		isoMode := strings.ToLower(strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_ISOLATION")))
 		switch isoMode {
 		case "", "strict":
@@ -745,6 +751,7 @@ var githubAppEnvKeys = []string{
 	"AO_GITHUB_APP_API_BASE_URL",
 	"AO_GITHUB_APP_HOST",
 	"AO_GITHUB_APP_REPOSITORIES",
+	"AO_GITHUB_APP_INSTALLATION_OWNER",
 	"AO_GITHUB_APP_OPERATOR_LOGIN",
 	"AO_GITHUB_APP_WORKER_BROKER_ENABLED",
 	"AO_GITHUB_APP_WORKER_ISOLATION",

@@ -46,9 +46,14 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	}
 	var broker *githubbroker.Broker
 	if cfg.WorkerBrokerEnabled {
+		owner := strings.TrimSpace(cfg.InstallationOwner)
+		ownerQualifiedRepos := make([]string, 0, len(repos))
+		for _, r := range repos {
+			ownerQualifiedRepos = append(ownerQualifiedRepos, owner+"/"+r)
+		}
 		broker, err = githubbroker.New(githubbroker.Config{
 			Provider:       provider,
-			AllowedRepos:   repos,
+			AllowedRepos:   ownerQualifiedRepos,
 			GitHubHost:     cfg.GitHubHost,
 			PrivateKeyPath: cfg.PrivateKeyPath,
 			IsolationMode:  cfg.WorkerIsolationMode,

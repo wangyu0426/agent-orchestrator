@@ -30,7 +30,7 @@ func (stubBrokerMinter) InvalidateScopedToken(_ githubapp.ScopedTokenRequest) {}
 func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 	broker, err := githubbroker.New(githubbroker.Config{
 		Provider:     stubBrokerMinter{},
-		AllowedRepos: []string{"agent-orchestrator"},
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
 	})
 	if err != nil {
 		t.Fatalf("githubbroker.New: %v", err)

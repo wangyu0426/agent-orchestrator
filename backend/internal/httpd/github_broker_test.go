@@ -41,7 +41,7 @@ func TestMountGitHubBroker_LoopbackAuthAndFailClosed(t *testing.T) {
 	}
 	broker, err := githubbroker.New(githubbroker.Config{
 		Provider:     minter,
-		AllowedRepos: []string{"agent-orchestrator"},
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
 	})
 	if err != nil {
 		t.Fatalf("githubbroker.New: %v", err)

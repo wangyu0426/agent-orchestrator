@@ -88,7 +88,7 @@ func TestBroker_ScopedIssuanceExpiryRefreshAndConcurrency(t *testing.T) {
 
 	broker, err := New(Config{
 		Provider:     provider,
-		AllowedRepos: []string{"agent-orchestrator", "other-repo"},
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator", "wangyu0426/other-repo"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -176,10 +176,15 @@ func TestBroker_UnauthorizedRepoSessionAndRevocation(t *testing.T) {
 
 	broker, err := New(Config{
 		Provider:     provider,
-		AllowedRepos: []string{"repo-a", "repo-b"},
+		AllowedRepos: []string{"org/repo-a", "org/repo-b"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+
+	// Cross-owner repo with the same repo name must be rejected at registration.
+	if _, err := broker.RegisterSession("sess-wrong-owner", "proj-x", []string{"evil-org/repo-a"}); !errors.Is(err, ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for different owner with same repo name, got %v", err)
 	}
 
 	tokA, err := broker.RegisterSession("sess-a", "proj-a", []string{"org/repo-a"})

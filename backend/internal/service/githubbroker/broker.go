@@ -88,8 +88,9 @@ type sessionGrant struct {
 // Broker authenticates worker sessions and mints least-privilege,
 // single-repository GitHub App installation tokens on demand.
 type Broker struct {
-	provider     TokenMinter
-	allowedRepos map[string]struct{}
+	provider TokenMinter
+	// allowedRepos maps normalized lowercase "owner/repo" -> repo name (without owner).
+	allowedRepos map[string]string
 	githubHost   string
 	permissions  map[string]string
 	logger       *slog.Logger
@@ -132,9 +133,16 @@ func New(cfg Config) (*Broker, error) {
 	if cfg.Provider == nil {
 		return nil, fmt.Errorf("%w: token provider is required", ErrInvalidRequest)
 	}
-	normalizedAllowed, err := githubapp.ValidateRepositories(cfg.AllowedRepos)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	if len(cfg.AllowedRepos) == 0 {
+		return nil, fmt.Errorf("%w: at least one owner/repo entry is required in AllowedRepos", ErrInvalidRequest)
+	}
+	allowed := make(map[string]string, len(cfg.AllowedRepos))
+	for _, raw := range cfg.AllowedRepos {
+		full, repoName, err := parseOwnerRepo(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+		}
+		allowed[strings.ToLower(full)] = repoName
 	}
 	if err := ValidateIsolation(cfg.IsolationMode, cfg.PrivateKeyPath); err != nil {
 		return nil, err
@@ -156,10 +164,6 @@ func New(cfg Config) (*Broker, error) {
 		logger.Warn("github app worker broker running with unsafe-same-uid override; same-UID workers share filesystem access with daemon")
 	}
 
-	allowed := make(map[string]struct{}, len(normalizedAllowed))
-	for _, r := range normalizedAllowed {
-		allowed[strings.ToLower(r)] = struct{}{}
-	}
 	return &Broker{
 		provider:     cfg.Provider,
 		allowedRepos: allowed,
@@ -198,10 +202,10 @@ func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.Pr
 		if err != nil {
 			return "", fmt.Errorf("%w: %w", ErrForbiddenRepo, err)
 		}
-		if _, ok := b.allowedRepos[strings.ToLower(repoName)]; !ok {
+		key := strings.ToLower(full)
+		if _, ok := b.allowedRepos[key]; !ok {
 			return "", fmt.Errorf("%w: repository %q is not in the GitHub App allowlist", ErrForbiddenRepo, full)
 		}
-		key := strings.ToLower(full)
 		allowedMap[key] = repoName
 		canonicalMap[key] = full
 	}
@@ -320,7 +324,7 @@ func (b *Broker) authorize(req IssueRequest) (fullRepo, repoName string, err err
 		return "", "", fmt.Errorf("%w: repository is required for multi-repository session", ErrInvalidRequest)
 	}
 
-	parsedFull, parsedName, err := parseOwnerRepo(rawRepo)
+	parsedFull, _, err := parseOwnerRepo(rawRepo)
 	if err != nil {
 		return "", "", fmt.Errorf("%w: %w", ErrForbiddenRepo, err)
 	}
@@ -329,7 +333,7 @@ func (b *Broker) authorize(req IssueRequest) (fullRepo, repoName string, err err
 	if !ok {
 		return "", "", fmt.Errorf("%w: repository %q is not bound to session %s", ErrForbiddenRepo, parsedFull, req.SessionID)
 	}
-	if _, ok := b.allowedRepos[strings.ToLower(parsedName)]; !ok {
+	if _, ok := b.allowedRepos[key]; !ok {
 		return "", "", fmt.Errorf("%w: repository %q is not in the GitHub App allowlist", ErrForbiddenRepo, parsedFull)
 	}
 	return canonicalFull[key], boundName, nil

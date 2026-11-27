@@ -27,6 +27,7 @@ The worker broker is **opt-in** and requires `AO_GITHUB_APP_ENABLED=on`.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `AO_GITHUB_APP_WORKER_BROKER_ENABLED` | Yes (to enable broker) | Set to `on` / `true` / `1`. Fails closed if `AO_GITHUB_APP_ENABLED` is not `on`. |
+| `AO_GITHUB_APP_INSTALLATION_OWNER` | Yes (when broker enabled) | GitHub org/account owner for the installation, used to bind `AO_GITHUB_APP_REPOSITORIES` to canonical `owner/repo` identities. |
 | `AO_GITHUB_APP_WORKER_ISOLATION` | No (default `strict`) | Isolation verification mode: `strict`, `external-sandbox`, or `unsafe-same-uid`. |
 | `AO_GITHUB_APP_HOST` | No (default `github.com`) | GitHub host served by the broker. |
 

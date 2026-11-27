@@ -114,7 +114,7 @@ func EnsureGHShim(dir, aoBinary string) (string, error) {
 		if err := os.WriteFile(shimPath, []byte(content), 0o600); err != nil {
 			return "", fmt.Errorf("write gh shim: %w", err)
 		}
-		if err := os.Chmod(shimPath, 0o700); err != nil {
+		if err := os.Chmod(shimPath, 0o700); err != nil { //nolint:gosec // Executable gh wrapper shim must be owner-executable.
 			return "", fmt.Errorf("chmod gh shim: %w", err)
 		}
 		return shimPath, nil
@@ -124,7 +124,7 @@ func EnsureGHShim(dir, aoBinary string) (string, error) {
 	if err := os.WriteFile(shimPath, []byte(content), 0o600); err != nil {
 		return "", fmt.Errorf("write gh shim: %w", err)
 	}
-	if err := os.Chmod(shimPath, 0o700); err != nil {
+	if err := os.Chmod(shimPath, 0o700); err != nil { //nolint:gosec // Executable gh wrapper shim must be owner-executable.
 		return "", fmt.Errorf("chmod gh shim: %w", err)
 	}
 	return shimPath, nil

@@ -101,7 +101,11 @@ func newGitHubBrokerGHCommand(ctx *commandContext) *cobra.Command {
 				return fmt.Errorf("github-broker: %w", err)
 			}
 
-			isolatedConfigDir, err := os.MkdirTemp("", "ao-gh-config-*")
+			ghConfigParent, err := resolveBrokerGHConfigParent()
+			if err != nil {
+				return fmt.Errorf("github-broker: resolve gh config dir: %w", err)
+			}
+			isolatedConfigDir, err := os.MkdirTemp(ghConfigParent, "gh-*")
 			if err != nil {
 				return fmt.Errorf("github-broker: create isolated gh config dir: %w", err)
 			}
@@ -323,4 +327,20 @@ func buildBrokerGHEnv(baseEnv []string, token, configDir string) []string {
 	}
 	out = append(out, "GH_TOKEN="+token, "GH_CONFIG_DIR="+configDir)
 	return out
+}
+
+func resolveBrokerGHConfigParent() (string, error) {
+	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+	if dataDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dataDir = filepath.Join(home, ".ao")
+	}
+	parent := filepath.Join(dataDir, "runtime", "github-broker-gh-tmp")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	return parent, nil
 }
