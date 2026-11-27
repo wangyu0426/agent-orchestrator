@@ -7398,7 +7398,7 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		u, parseErr := url.Parse(raw)
 		if parseErr != nil {
 			if strings.Contains(strings.ToLower(raw), h) {
-				return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+				return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
 			}
 			return "", false, nil
 		}
@@ -7407,14 +7407,14 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 		scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
 		if parsedHost == h {
 			if scheme == "http" {
-				return "", true, fmt.Errorf("%w: plaintext http GitHub origin URL %q is not supported; use https", githubbroker.ErrForbiddenRepo, originURL)
+				return "", true, fmt.Errorf("%w: plaintext http GitHub origin URL is not supported; use https", githubbroker.ErrForbiddenRepo)
 			}
 			if scheme == "https" && u.User != nil {
 				return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
 			}
 			if scheme == "ssh" {
 				if !strings.HasPrefix(raw, "ssh://git@"+h+"/") && !strings.HasPrefix(raw, "ssh://git@"+h+":22/") {
-					return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+					return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL", githubbroker.ErrForbiddenRepo)
 				}
 			}
 		}
@@ -7424,14 +7424,14 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 			parsedHost = strings.ToLower(strings.TrimSpace(rest[:colonIdx]))
 			pathPart = rest[colonIdx+1:]
 			if parsedHost == h && !strings.HasPrefix(raw, "git@"+h+":") {
-				return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+				return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL", githubbroker.ErrForbiddenRepo)
 			}
 		}
 	}
 
 	if parsedHost == "" {
 		if strings.Contains(strings.ToLower(raw), h) {
-			return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+			return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
 		}
 		return "", false, nil
 	}
@@ -7442,7 +7442,7 @@ func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, is
 	clean := strings.TrimSuffix(strings.Trim(pathPart, "/"), ".git")
 	parts := strings.Split(clean, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL %q", githubbroker.ErrForbiddenRepo, originURL)
+		return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
 	}
 	return parts[0] + "/" + parts[1], true, nil
 }
