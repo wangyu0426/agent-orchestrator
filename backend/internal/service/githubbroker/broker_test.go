@@ -360,6 +360,32 @@ func TestBroker_PersistsGrantVerifiersAcrossDaemonRestart(t *testing.T) {
 		t.Fatalf("expected revoked session to stay unauthorized after restart, got %v", err)
 	}
 
+	// Transient lookup errors fail closed without revoking the live grant.
+	tokTransient, err := broker3.RegisterSession("sess-transient", "proj-1", []string{"wangyu0426/agent-orchestrator"})
+	if err != nil {
+		t.Fatalf("RegisterSession transient: %v", err)
+	}
+	broker3.SetSessionActiveChecker(func(_ context.Context, _ domain.SessionID) (bool, error) {
+		return false, context.Canceled
+	})
+	if _, err := broker3.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-transient",
+		BrokerToken: tokTransient,
+		Repository:  "wangyu0426/agent-orchestrator",
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on transient lookup error, got %v", err)
+	}
+	broker3.SetSessionActiveChecker(func(_ context.Context, _ domain.SessionID) (bool, error) {
+		return true, nil
+	})
+	if resp, err := broker3.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-transient",
+		BrokerToken: tokTransient,
+		Repository:  "wangyu0426/agent-orchestrator",
+	}); err != nil || resp.Token != "ghs_restarted_token_1234567890" {
+		t.Fatalf("expected live grant to survive transient lookup error, got resp=%+v err=%v", resp, err)
+	}
+
 	// Out-of-band termination (e.g. tracker-closed session) is pruned on reconcile
 	// and rejected fail-closed on IssueToken.
 	tok2, err := broker3.RegisterSession("sess-tracker-closed", "proj-1", []string{"wangyu0426/agent-orchestrator"})

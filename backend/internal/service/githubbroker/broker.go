@@ -227,7 +227,11 @@ func (b *Broker) ReconcileSessions(ctx context.Context) {
 
 	for _, id := range ids {
 		active, err := checker(ctx, id)
-		if err != nil || !active {
+		if err != nil {
+			b.logger.Warn("githubbroker: skipping reconcile for session due to lookup error", "session", id, "error", err)
+			continue
+		}
+		if !active {
 			b.RevokeSession(id)
 		}
 	}
@@ -325,7 +329,10 @@ func (b *Broker) IssueToken(ctx context.Context, req IssueRequest) (IssueRespons
 	b.mu.RUnlock()
 	if checker != nil {
 		active, checkErr := checker(ctx, req.SessionID)
-		if checkErr != nil || !active {
+		if checkErr != nil {
+			return IssueResponse{}, fmt.Errorf("githubbroker: verify session state: %w", checkErr)
+		}
+		if !active {
 			b.RevokeSession(req.SessionID)
 			return IssueResponse{}, ErrUnauthorized
 		}

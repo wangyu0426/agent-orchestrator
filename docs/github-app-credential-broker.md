@@ -76,4 +76,5 @@ Production deployment must be operator-approved (never performed automatically b
 
 1. Unset `AO_GITHUB_APP_WORKER_BROKER_ENABLED` (or set it to `off`) to revert worker credentials while keeping daemon App auth, or also unset `AO_GITHUB_APP_ENABLED` to return fully to legacy PAT/`gh` mode.
 2. Restart the AO daemon.
-3. Verify workers resume using the configured legacy credential chain.
+3. Restart/relaunch any live worker sessions that were started while broker mode was enabled. Because daemon startup adopts surviving worker runtimes, those existing processes still carry the broker `PATH` shim and scrubbed personal credentials in their environment and will receive `503` from the disabled broker until relaunched.
+4. Verify newly launched workers resume using the configured legacy credential chain.

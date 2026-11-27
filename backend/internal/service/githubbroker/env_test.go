@@ -52,6 +52,9 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	if env["GIT_CONFIG_KEY_6"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_6"] != "git@github.com:" {
 		t.Fatalf("expected SSH rewrite for git@github.com:, got %q=%q", env["GIT_CONFIG_KEY_6"], env["GIT_CONFIG_VALUE_6"])
 	}
+	if env["GIT_CONFIG_KEY_8"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_8"] != "ssh://git@github.com:22/" {
+		t.Fatalf("expected SSH port-22 rewrite, got %q=%q", env["GIT_CONFIG_KEY_8"], env["GIT_CONFIG_VALUE_8"])
+	}
 }
 
 func TestEnsureGHShim_WritesExecutableShim(t *testing.T) {
