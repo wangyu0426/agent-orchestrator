@@ -8203,6 +8203,8 @@ export interface components {
             batchId: string;
             body: string;
             /** Format: date-time */
+            completedAt?: null | string;
+            /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
             deliveredAt?: null | string;

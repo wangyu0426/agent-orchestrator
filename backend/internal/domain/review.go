@@ -204,7 +204,6 @@ func ClassifyAutoReviewFailure(run ReviewRun) AutoReviewFailureClass {
 		return AutoReviewFailureTransient
 	}
 	permanentMarkers := []string{
-		"reviewer preflight:",
 		"unknown reviewer harness",
 		"does not support chat",
 		"invalid api key",
