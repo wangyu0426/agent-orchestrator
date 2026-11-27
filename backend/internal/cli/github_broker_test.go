@@ -76,6 +76,9 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 	if got := extractGHRepoFlag([]string{"api", "--repo=owner/repo2"}); got != "owner/repo2" {
 		t.Fatalf("extractGHRepoFlag(--repo=) = %q, want owner/repo2", got)
 	}
+	if h, r := splitGHRepoSelector("ghe.example.com/org/repo", "github.com"); h != "ghe.example.com" || r != "org/repo" {
+		t.Fatalf("splitGHRepoSelector(host/org/repo) = (%q, %q), want (ghe.example.com, org/repo)", h, r)
+	}
 	if got := parseOwnerRepoFromRemoteURL("ssh://git@github.com:22/wangyu0426/agent-orchestrator.git", "github.com"); got != "wangyu0426/agent-orchestrator" {
 		t.Fatalf("parseOwnerRepoFromRemoteURL(ssh:22) = %q, want wangyu0426/agent-orchestrator", got)
 	}

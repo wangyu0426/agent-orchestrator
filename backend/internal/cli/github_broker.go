@@ -94,6 +94,8 @@ func newGitHubBrokerGHCommand(ctx *commandContext) *cobra.Command {
 			host := strings.TrimSpace(os.Getenv(githubbroker.EnvBrokerHost))
 			if repo == "" {
 				repo = detectGitOriginRepo(cmd.Context(), host)
+			} else {
+				host, repo = splitGHRepoSelector(repo, host)
 			}
 			resp, err := ctx.fetchGitHubBrokerToken(cmd.Context(), host, repo)
 			if err != nil {
@@ -283,6 +285,15 @@ func extractGHRepoFlag(args []string) string {
 		}
 	}
 	return ""
+}
+
+func splitGHRepoSelector(raw, defaultHost string) (host, repo string) {
+	s := strings.Trim(strings.TrimSpace(raw), "/")
+	parts := strings.Split(s, "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != "" {
+		return parts[0], parts[1] + "/" + parts[2]
+	}
+	return defaultHost, s
 }
 
 func detectGitOriginRepo(ctx context.Context, host string) string {
