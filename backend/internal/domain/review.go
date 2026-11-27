@@ -150,8 +150,11 @@ type CurrentHeadReviewRun struct {
 	CreatedAt time.Time
 	// FailedAutoRuns counts every failed auto review pass on this PR head.
 	FailedAutoRuns int
-	// AutoRetryBlocked reports a cancelled pass or a verdict on this PR head for
-	// this harness, either of which stops auto review from retrying the head.
+	// LatestFailedAutoBody is the body of the most recent non-quota failed
+	// auto review pass on this PR head for this harness.
+	LatestFailedAutoBody string
+	// AutoRetryBlocked reports a cancelled pass, verdict, or permanent auto
+	// failure on this PR head for this harness.
 	AutoRetryBlocked bool
 }
 

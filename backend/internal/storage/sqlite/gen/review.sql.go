@@ -464,6 +464,19 @@ func (q *Queries) InsertReviewRun(ctx context.Context, arg InsertReviewRunParams
 
 const listCurrentHeadReviewRunsBySession = `-- name: ListCurrentHeadReviewRunsBySession :many
 SELECT review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -503,15 +516,16 @@ WHERE review_run.session_id = ?
 `
 
 type ListCurrentHeadReviewRunsBySessionRow struct {
-	ID               string
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	Body             string
-	CreatedAt        time.Time
-	FailedAutoRuns   int64
-	AutoRetryBlocked int64
+	ID                   string
+	Harness              domain.ReviewerHarness
+	PRURL                string
+	Status               domain.ReviewRunStatus
+	Verdict              domain.ReviewVerdict
+	Body                 string
+	CreatedAt            time.Time
+	LatestFailedAutoBody interface{}
+	FailedAutoRuns       int64
+	AutoRetryBlocked     int64
 }
 
 // AO review passes recorded against each PR's CURRENT head commit. Passes for
@@ -539,6 +553,7 @@ func (q *Queries) ListCurrentHeadReviewRunsBySession(ctx context.Context, sessio
 			&i.Verdict,
 			&i.Body,
 			&i.CreatedAt,
+			&i.LatestFailedAutoBody,
 			&i.FailedAutoRuns,
 			&i.AutoRetryBlocked,
 		); err != nil {
@@ -561,6 +576,19 @@ WITH wanted_session AS (
     FROM json_each(?) AS j
 )
 SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url, review_run.status, review_run.verdict, review_run.body, review_run.created_at,
+       COALESCE((
+           SELECT failed.body
+           FROM review_run failed
+           WHERE failed.session_id = review_run.session_id
+             AND failed.pr_url = review_run.pr_url
+             AND failed.target_sha = review_run.target_sha
+             AND failed.harness = review_run.harness
+             AND failed.status = 'failed'
+             AND failed.trigger_source = 'auto'
+             AND failed.body != 'reviewer Chat turn failed: quota_exhausted'
+           ORDER BY COALESCE(failed.completed_at, failed.created_at) DESC, failed.created_at DESC, failed.id DESC
+           LIMIT 1
+       ), '') AS latest_failed_auto_body,
        (
            SELECT COUNT(*)
            FROM review_run failed
@@ -600,16 +628,17 @@ WHERE pr.head_sha != ''
 `
 
 type ListCurrentHeadReviewRunsBySessionsRow struct {
-	SessionID        domain.SessionID
-	ID               string
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	Status           domain.ReviewRunStatus
-	Verdict          domain.ReviewVerdict
-	Body             string
-	CreatedAt        time.Time
-	FailedAutoRuns   int64
-	AutoRetryBlocked int64
+	SessionID            domain.SessionID
+	ID                   string
+	Harness              domain.ReviewerHarness
+	PRURL                string
+	Status               domain.ReviewRunStatus
+	Verdict              domain.ReviewVerdict
+	Body                 string
+	CreatedAt            time.Time
+	LatestFailedAutoBody interface{}
+	FailedAutoRuns       int64
+	AutoRetryBlocked     int64
 }
 
 // Batch form of ListCurrentHeadReviewRunsBySession for session-list reads.
@@ -633,6 +662,7 @@ func (q *Queries) ListCurrentHeadReviewRunsBySessions(ctx context.Context, jsonE
 			&i.Verdict,
 			&i.Body,
 			&i.CreatedAt,
+			&i.LatestFailedAutoBody,
 			&i.FailedAutoRuns,
 			&i.AutoRetryBlocked,
 		); err != nil {

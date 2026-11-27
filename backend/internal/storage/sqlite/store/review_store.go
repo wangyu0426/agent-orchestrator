@@ -525,19 +525,21 @@ func (s *Store) ListCurrentHeadReviewRunsForSession(ctx context.Context, id doma
 	}
 	out := make([]domain.CurrentHeadReviewRun, 0, len(rows))
 	for _, r := range rows {
-		permanent := r.Status == domain.ReviewRunFailed &&
-			domain.ClassifyAutoReviewFailure(domain.ReviewRun{Status: r.Status, Body: r.Body}) == domain.AutoReviewFailurePermanent
+		latestFailedAutoBody, _ := r.LatestFailedAutoBody.(string)
+		permanent := latestFailedAutoBody != "" &&
+			domain.ClassifyAutoReviewFailure(domain.ReviewRun{Status: domain.ReviewRunFailed, Body: latestFailedAutoBody}) == domain.AutoReviewFailurePermanent
 		out = append(out, domain.CurrentHeadReviewRun{
-			SessionID:        id,
-			Harness:          r.Harness,
-			PRURL:            r.PRURL,
-			Status:           r.Status,
-			Verdict:          r.Verdict,
-			Body:             r.Body,
-			ID:               r.ID,
-			CreatedAt:        r.CreatedAt,
-			FailedAutoRuns:   int(r.FailedAutoRuns),
-			AutoRetryBlocked: r.AutoRetryBlocked != 0 || permanent,
+			SessionID:            id,
+			Harness:              r.Harness,
+			PRURL:                r.PRURL,
+			Status:               r.Status,
+			Verdict:              r.Verdict,
+			Body:                 r.Body,
+			ID:                   r.ID,
+			CreatedAt:            r.CreatedAt,
+			FailedAutoRuns:       int(r.FailedAutoRuns),
+			LatestFailedAutoBody: latestFailedAutoBody,
+			AutoRetryBlocked:     r.AutoRetryBlocked != 0 || permanent,
 		})
 	}
 	return out, nil
@@ -560,19 +562,21 @@ func (s *Store) ListCurrentHeadReviewRunsForSessions(ctx context.Context, ids []
 		return nil, fmt.Errorf("list current-head review runs for sessions: %w", err)
 	}
 	for _, r := range rows {
-		permanent := r.Status == domain.ReviewRunFailed &&
-			domain.ClassifyAutoReviewFailure(domain.ReviewRun{Status: r.Status, Body: r.Body}) == domain.AutoReviewFailurePermanent
+		latestFailedAutoBody, _ := r.LatestFailedAutoBody.(string)
+		permanent := latestFailedAutoBody != "" &&
+			domain.ClassifyAutoReviewFailure(domain.ReviewRun{Status: domain.ReviewRunFailed, Body: latestFailedAutoBody}) == domain.AutoReviewFailurePermanent
 		out[r.SessionID] = append(out[r.SessionID], domain.CurrentHeadReviewRun{
-			SessionID:        r.SessionID,
-			Harness:          r.Harness,
-			PRURL:            r.PRURL,
-			Status:           r.Status,
-			Verdict:          r.Verdict,
-			Body:             r.Body,
-			ID:               r.ID,
-			CreatedAt:        r.CreatedAt,
-			FailedAutoRuns:   int(r.FailedAutoRuns),
-			AutoRetryBlocked: r.AutoRetryBlocked != 0 || permanent,
+			SessionID:            r.SessionID,
+			Harness:              r.Harness,
+			PRURL:                r.PRURL,
+			Status:               r.Status,
+			Verdict:              r.Verdict,
+			Body:                 r.Body,
+			ID:                   r.ID,
+			CreatedAt:            r.CreatedAt,
+			FailedAutoRuns:       int(r.FailedAutoRuns),
+			LatestFailedAutoBody: latestFailedAutoBody,
+			AutoRetryBlocked:     r.AutoRetryBlocked != 0 || permanent,
 		})
 	}
 	for _, id := range ids {
