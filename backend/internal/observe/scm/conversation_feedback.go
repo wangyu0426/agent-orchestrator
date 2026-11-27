@@ -90,7 +90,13 @@ func (o *Observer) refreshConversationFeedback(
 			}
 			o.logProviderRequest("fetch_conversation_comments", repoFullName(s.repo), started, err)
 			if err != nil {
-				o.logger.Warn("scm observer: conversation comments refresh failed; preserving persisted active rows for retry", "pr", prURL, "err", err)
+				if cooldown, ok := rateLimitCooldown(now, err); ok {
+					o.setRateLimitCooldown(now, s.repo.Provider, cooldown)
+					o.logger.Warn("scm observer: conversation comments rate-limited; entering cooldown while preserving persisted active rows",
+						"pr", prURL, "provider", s.repo.Provider, "cooldown", cooldown, "err", err)
+				} else {
+					o.logger.Warn("scm observer: conversation comments refresh failed; preserving persisted active rows for retry", "pr", prURL, "err", err)
+				}
 				hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
 			} else if comments.PRMerged || comments.PRClosed {
 				continue
@@ -214,28 +220,9 @@ func (o *Observer) reconcileConversationFeedback(
 			continue
 		}
 
-		allowed, authReason := domain.AuthorizePRCommentFeedback(cfg, c.Author, c.IsBot)
-		if !allowed {
-			if prev, exists := existingByID[c.ID]; exists && prev.State == domain.PRConversationFeedbackActive {
-				prev.State = domain.PRConversationFeedbackDeleted
-				prev.UpdatedAtProvider = c.UpdatedAt
-				prev.ObservedAt = now
-				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
-					return false, err
-				}
-			}
-			o.logger.Info("scm observer: conversation feedback ignored",
-				"event", "ignored",
-				"pr", prURL,
-				"session", s.session.ID,
-				"comment_id", c.ID,
-				"author", c.Author,
-				"is_bot", c.IsBot,
-				"reason", authReason,
-			)
-			continue
-		}
-
+		// Record pre-cutoff historic commands as baseline BEFORE checking
+		// trustedAuthors so expanding trustedAuthors later cannot replay
+		// comments that predate rollout/enablement.
 		if prev, exists := existingByID[c.ID]; exists {
 			if prev.State == domain.PRConversationFeedbackBaseline || prev.State == domain.PRConversationFeedbackSuperseded {
 				continue
@@ -266,6 +253,28 @@ func (o *Observer) reconcileConversationFeedback(
 				"comment_id", c.ID,
 				"author", c.Author,
 				"reason", "baseline_historic",
+			)
+			continue
+		}
+
+		allowed, authReason := domain.AuthorizePRCommentFeedback(cfg, c.Author, c.IsBot)
+		if !allowed {
+			if prev, exists := existingByID[c.ID]; exists && prev.State == domain.PRConversationFeedbackActive {
+				prev.State = domain.PRConversationFeedbackDeleted
+				prev.UpdatedAtProvider = c.UpdatedAt
+				prev.ObservedAt = now
+				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+					return false, err
+				}
+			}
+			o.logger.Info("scm observer: conversation feedback ignored",
+				"event", "ignored",
+				"pr", prURL,
+				"session", s.session.ID,
+				"comment_id", c.ID,
+				"author", c.Author,
+				"is_bot", c.IsBot,
+				"reason", authReason,
 			)
 			continue
 		}
