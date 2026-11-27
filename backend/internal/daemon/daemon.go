@@ -639,7 +639,7 @@ func Run(buildVersion string) (retErr error) {
 			if getErr != nil {
 				return false, getErr
 			}
-			return found && !rec.IsTerminated, nil
+			return found && !rec.IsTerminated && rec.Activity.State != domain.ActivityExited, nil
 		})
 		ghAuth.workerBroker.ReconcileSessions(ctx)
 	}
