@@ -309,6 +309,40 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 				})
 			}
 		}
+
+		if fbStore, ok := m.store.(conversationFeedbackStore); ok {
+			fbItems, err := fbStore.ListActivePRConversationFeedback(ctx, o.URL)
+			if err != nil {
+				return fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
+			}
+			for _, item := range fbItems {
+				if !item.AutoInjectReview {
+					slog.Default().Info("lifecycle: conversation feedback ignored",
+						"event", "ignored",
+						"session", id,
+						"pr", o.URL,
+						"comment_id", item.CommentID,
+						"author", item.Author,
+						"reason", "auto_inject_review_disabled",
+					)
+					continue
+				}
+				msg := formatConversationFeedbackMessage(item, ident, o.URL)
+				slog.Default().Info("lifecycle: conversation feedback queued",
+					"event", "queued",
+					"session", id,
+					"pr", o.URL,
+					"comment_id", item.CommentID,
+					"author", item.Author,
+					"body_hash", item.BodyHash,
+				)
+				nudges = append(nudges, pendingNudge{
+					key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
+					sig: item.BodyHash,
+					msg: msg,
+				})
+			}
+		}
 	}
 
 	// Only the merge-conflict nudge needs a store read (the parent-stack check).
@@ -445,6 +479,36 @@ func commentNudgeKey(prURL string, comment ports.PRCommentObservation) string {
 		id = strings.TrimSpace(comment.ThreadID)
 	}
 	return "comment:" + prURL + ":" + id
+}
+
+type conversationFeedbackStore interface {
+	ListActivePRConversationFeedback(ctx context.Context, prURL string) ([]domain.PullRequestConversationFeedback, error)
+}
+
+func conversationFeedbackNudgeKey(prURL, commentID string) string {
+	return "conv-feedback:" + prURL + ":" + strings.TrimSpace(commentID)
+}
+
+func formatConversationFeedbackMessage(item domain.PullRequestConversationFeedback, ident, prURL string) string {
+	var b strings.Builder
+	b.WriteString("Operator review feedback on ")
+	b.WriteString(ident)
+	if author := strings.TrimSpace(item.Author); author != "" {
+		b.WriteString(" (from @")
+		b.WriteString(domain.SanitizeControlChars(author))
+		b.WriteString(")")
+	}
+	b.WriteString(":\n")
+	b.WriteString(domain.SanitizeControlChars(item.Body))
+	if item.URL != "" {
+		b.WriteString("\nComment: ")
+		b.WriteString(domain.SanitizeControlChars(item.URL))
+	}
+	if prURL != "" {
+		b.WriteString("\nPR: ")
+		b.WriteString(domain.SanitizeControlChars(prURL))
+	}
+	return b.String()
 }
 
 // mergeConflictKey is the reaction-dedup key for a PR's merge-conflict nudge.

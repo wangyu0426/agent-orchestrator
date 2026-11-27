@@ -360,6 +360,26 @@ type SCMReviewCommentObservation struct {
 	CreatedAt time.Time
 }
 
+// SCMConversationCommentObservation is one normalized top-level PR conversation
+// comment fetched via complete/paginated retrieval for explicit operator
+// feedback command evaluation.
+type SCMConversationCommentObservation struct {
+	// ID is the provider's stable comment identifier.
+	ID string
+	// Author is the provider login/name of the commenter.
+	Author string
+	// IsBot is true when the provider identifies the author as a bot.
+	IsBot bool
+	// Body is the raw comment body text.
+	Body string
+	// URL is a provider link to the comment.
+	URL string
+	// CreatedAt is the provider's comment creation time; zero when unknown.
+	CreatedAt time.Time
+	// UpdatedAt is the provider's comment last-edit time; zero when unknown.
+	UpdatedAt time.Time
+}
+
 // SCMMergeabilityObservation is the normalized mergeability verdict.
 type SCMMergeabilityObservation struct {
 	// State is AO's normalized mergeability state.

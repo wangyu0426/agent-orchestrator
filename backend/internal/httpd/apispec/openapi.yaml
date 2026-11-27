@@ -22452,6 +22452,20 @@ components:
       - contentType
       - data
       type: object
+    PRCommentFeedbackConfig:
+      properties:
+        enabled:
+          type: boolean
+        enabledAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        trustedAuthors:
+          items:
+            type: string
+          type: array
+      type: object
     PRReviewState:
       properties:
         latestRun:
@@ -22752,6 +22766,8 @@ components:
           items:
             type: string
           type: array
+        prCommentFeedback:
+          $ref: '#/components/schemas/PRCommentFeedbackConfig'
         preRemove:
           items:
             type: string

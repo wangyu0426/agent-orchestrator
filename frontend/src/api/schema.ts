@@ -7801,6 +7801,12 @@ export interface components {
             data: string;
             name: string;
         };
+        PRCommentFeedbackConfig: {
+            enabled?: boolean;
+            /** Format: date-time */
+            enabledAt?: null | string;
+            trustedAuthors?: string[];
+        };
         PRReviewState: {
             latestRun?: components["schemas"]["ReviewRun"];
             prNumber: number;
@@ -7916,6 +7922,7 @@ export interface components {
             orchestratorRules?: string;
             orchestratorRulesFile?: string;
             postCreate?: string[];
+            prCommentFeedback?: components["schemas"]["PRCommentFeedbackConfig"];
             preRemove?: string[];
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
             sessionPrefix?: string;

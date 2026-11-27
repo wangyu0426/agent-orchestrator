@@ -117,6 +117,12 @@ type containerReapConfig struct {
 	Disabled bool `json:"disabled,omitempty"`
 }
 
+type prCommentFeedbackConfig struct {
+	Enabled        bool     `json:"enabled,omitempty"`
+	TrustedAuthors []string `json:"trustedAuthors,omitempty"`
+	EnabledAt      string   `json:"enabledAt,omitempty"`
+}
+
 // projectConfig mirrors the daemon's typed domain.ProjectConfig for the CLI
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json. Every domain key must be modeled here, or set-config drops it
@@ -143,8 +149,9 @@ type projectConfig struct {
 	TerminateOnPRMerge    *bool                `json:"terminateOnPrMerge,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
-	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
-	Reviewers            []reviewerConfig `json:"reviewers,omitempty"`
+	WorkersRequestReview bool                     `json:"workersRequestReview,omitempty"`
+	PRCommentFeedback    *prCommentFeedbackConfig `json:"prCommentFeedback,omitempty"`
+	Reviewers            []reviewerConfig         `json:"reviewers,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for

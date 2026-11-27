@@ -676,6 +676,10 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	conversationFeedbackActive := o.refreshConversationFeedback(ctx, subjects, observations, selection.subjectsByPR, localOnlyObservations, now)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	for _, key := range dispatchOrder(observations, selection.subjectsByPR) {
 		if err := ctx.Err(); err != nil {
@@ -703,7 +707,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			preserveLocalReviewDecision: reviewStale[key],
 		}
 		prepared := o.prepareForPersistence(obs, local, opts, now)
-		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review {
+		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review && !conversationFeedbackActive[key] {
 			// Details are left out of the hashes, and a provider reads them only
 			// when none are stored or the PR's updatedAt moved, so details here
 			// with no other change are ones the store lacks (a PR stored before

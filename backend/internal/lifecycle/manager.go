@@ -205,6 +205,15 @@ func WithStructuredReviewPolicy(policy structuredreview.Policy) Option {
 	return func(m *Manager) { m.structuredReview = policy }
 }
 
+// WithClock overrides the lifecycle manager's clock (primarily for tests).
+func WithClock(clock func() time.Time) Option {
+	return func(m *Manager) {
+		if clock != nil {
+			m.clock = clock
+		}
+	}
+}
+
 // WithContainerReaper wires the container leg of #2652: MarkTerminated will
 // force-remove the terminated session's ao.session-labeled Docker containers,
 // unless the project opts out via ProjectConfig.ContainerReap.Disabled.
