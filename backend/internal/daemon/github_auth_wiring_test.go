@@ -504,15 +504,20 @@ func TestGitHubApp_SCM403PreservesTokenAnd401Refreshes(t *testing.T) {
 	}
 }
 
-type appFeedbackMessenger struct {
-	mu       sync.Mutex
-	messages []string
+type deliveredFeedback struct {
+	sessionID domain.SessionID
+	message   string
 }
 
-func (m *appFeedbackMessenger) Send(_ context.Context, _ domain.SessionID, msg string) error {
+type appFeedbackMessenger struct {
+	mu       sync.Mutex
+	messages []deliveredFeedback
+}
+
+func (m *appFeedbackMessenger) Send(_ context.Context, sessionID domain.SessionID, msg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.messages = append(m.messages, msg)
+	m.messages = append(m.messages, deliveredFeedback{sessionID: sessionID, message: msg})
 	return nil
 }
 
@@ -530,6 +535,10 @@ func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`[]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			if r.Header.Get("Authorization") != "Bearer ghs_observer_e2e_token_1234" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			prNode := `{
 				"number": 8,
 				"title": "Test PR",
@@ -559,7 +568,7 @@ func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment
 						"body": "Please fix this",
 						"submittedAt": "2026-11-27T06:01:00Z",
 						"commit": {"oid": "abc123"},
-						"author": {"__typename": "User", "login": "wangyu0426"}
+						"author": {"__typename": "User", "login": "reviewer-alice"}
 					}]
 				},
 				"reviewThreads": {
@@ -574,7 +583,7 @@ func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment
 								"body": "Please fix this before merge",
 								"url": "https://github.com/wangyu0426/agent-orchestrator/pull/8#discussion_r1",
 								"createdAt": "2026-11-27T06:01:00Z",
-								"author": {"__typename": "User", "login": "wangyu0426"}
+								"author": {"__typename": "User", "login": "reviewer-alice"}
 							}]
 						}
 					}]
@@ -660,7 +669,7 @@ func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment
 	if err != nil {
 		t.Fatalf("ListPRReviews: %v", err)
 	}
-	if len(reviews) != 1 || reviews[0].Author != "wangyu0426" || reviews[0].State != domain.ReviewChangesRequest || reviews[0].IsBot {
+	if len(reviews) != 1 || reviews[0].Author != "reviewer-alice" || reviews[0].State != domain.ReviewChangesRequest || reviews[0].IsBot {
 		t.Fatalf("persisted reviews = %+v, want 1 human CHANGES_REQUESTED review", reviews)
 	}
 
@@ -668,16 +677,29 @@ func TestGitHubApp_ObserverRoutesHumanChangeRequestAndIgnoresOwnBotStatusComment
 	if err != nil {
 		t.Fatalf("ListPRComments: %v", err)
 	}
-	if len(comments) != 1 || comments[0].Author != "wangyu0426" || comments[0].IsBot {
+	if len(comments) != 1 || comments[0].Author != "reviewer-alice" || comments[0].IsBot {
 		t.Fatalf("persisted comments = %+v, want only the 1 human review comment (own bot status comment must not be persisted as review feedback)", comments)
 	}
 
 	messenger.mu.Lock()
-	msgs := append([]string(nil), messenger.messages...)
+	msgs := append([]deliveredFeedback(nil), messenger.messages...)
 	messenger.mu.Unlock()
-	for _, msg := range msgs {
-		if strings.Contains(msg, "AO status update") {
-			t.Fatalf("own bot status comment must not be routed as feedback: %q", msg)
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one human change-request feedback message to be delivered to session messenger, got 0")
+	}
+	var sawHumanFeedback bool
+	for _, m := range msgs {
+		if m.sessionID != rec.ID {
+			t.Fatalf("delivered feedback to session %q, want %q", m.sessionID, rec.ID)
 		}
+		if strings.Contains(m.message, "AO status update") {
+			t.Fatalf("own bot status comment must not be routed as feedback: %q", m.message)
+		}
+		if strings.Contains(m.message, "Please fix this before merge") || strings.Contains(m.message, "reviewer-alice") {
+			sawHumanFeedback = true
+		}
+	}
+	if !sawHumanFeedback {
+		t.Fatalf("expected delivered feedback to contain human change-request content, got %+v", msgs)
 	}
 }
