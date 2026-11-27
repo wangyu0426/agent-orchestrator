@@ -125,4 +125,19 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 	if _, err := resolveRealGHFromPath(shimDir, "windows", ".EXE;.CMD"); err == nil {
 		t.Fatalf("expected error when only broker shim dir is in PATH")
 	}
+
+	// Verify SSH config alias resolution catches `Host gh` -> `HostName github.com`.
+	if got := parseSSHConfigHostname("user git\nhostname github.com\nport 22\n"); got != "github.com" {
+		t.Fatalf("parseSSHConfigHostname = %q, want github.com", got)
+	}
+	sshCfgPath := filepath.Join(tmp, "ssh_config")
+	if err := os.WriteFile(sshCfgPath, []byte("Host gh\n  HostName github.com\n  User git\nHost gl\n  HostName gitlab.com\n  User git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "gh"}, "github.com") {
+		t.Fatalf("expected SSH alias 'gh' -> github.com to be blocked")
+	}
+	if sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "gl"}, "github.com") {
+		t.Fatalf("expected SSH alias 'gl' -> gitlab.com to be allowed")
+	}
 }

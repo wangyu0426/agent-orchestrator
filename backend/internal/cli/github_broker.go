@@ -62,7 +62,7 @@ func newGitHubBrokerSSHGuardCommand() *cobra.Command {
 			if host == "" {
 				host = githubbroker.DefaultGitHubHost
 			}
-			if sshArgsTargetHost(args, host) {
+			if sshArgsTargetHost(args, host) || sshResolvedHostnameTargetsHost(cmd.Context(), args, host) {
 				return fmt.Errorf("github-broker: SSH transport to %s is disabled in broker mode; use HTTPS", host)
 			}
 			child := process.CommandContext(cmd.Context(), "ssh", args...)
@@ -92,6 +92,35 @@ func sshArgsTargetHost(args []string, host string) bool {
 		}
 	}
 	return false
+}
+
+// sshResolvedHostnameTargetsHost runs `ssh -G` (config-only, no network) to
+// resolve SSH Host aliases (e.g. `Host gh` -> `HostName github.com`) and fails
+// closed if the resolved hostname matches the brokered GitHub host.
+func sshResolvedHostnameTargetsHost(ctx context.Context, args []string, host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+	gArgs := append([]string{"-G"}, args...)
+	out, err := process.CommandContext(ctx, "ssh", gArgs...).Output()
+	if err != nil {
+		// Fail closed if ssh -G cannot resolve the target.
+		return true
+	}
+	resolved := parseSSHConfigHostname(string(out))
+	return resolved == "" || strings.EqualFold(resolved, h)
+}
+
+func parseSSHConfigHostname(output string) string {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && strings.EqualFold(fields[0], "hostname") {
+			return strings.TrimSpace(fields[1])
+		}
+	}
+	return ""
 }
 
 func newGitHubBrokerGitCredentialCommand(ctx *commandContext) *cobra.Command {
