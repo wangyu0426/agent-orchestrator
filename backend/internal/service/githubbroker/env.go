@@ -28,6 +28,9 @@ var InheritedCredentialEnvKeys = []string{
 	"GITHUB_ENTERPRISE_TOKEN",
 	"GIT_ASKPASS",
 	"SSH_ASKPASS",
+	"SSH_AUTH_SOCK",
+	"GIT_SSH",
+	"GIT_SSH_COMMAND",
 }
 
 // WorkerEnvOptions configures the worker environment overlays for broker mode.

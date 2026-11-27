@@ -47,7 +47,7 @@ When broker mode is active, `githubbroker.WorkerEnv` enforces the following acro
 
 | Vector | Mitigation |
 | --- | --- |
-| **SSH remotes** (`git@github.com:...`, `ssh://git@github.com/...`) | Environment-only Git config `url.https://<host>/.insteadOf` rewrites SSH remotes to HTTPS without mutating `.git/config` or `~/.gitconfig`. |
+| **SSH remotes & agent** (`git@github.com:...`, `ssh://git@github.com/...`, `SSH_AUTH_SOCK`, `GIT_SSH`, `GIT_SSH_COMMAND`) | Environment-only Git config `url.https://<host>/.insteadOf` rewrites SSH remotes to HTTPS without mutating `.git/config` or `~/.gitconfig`; `SSH_AUTH_SOCK`, `GIT_SSH`, and `GIT_SSH_COMMAND` are scrubbed from worker environments. |
 | **Inherited personal tokens** (`GH_TOKEN`, `GITHUB_TOKEN`, `AO_GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) | Explicitly scrubbed to empty in worker env and in every `ao github-broker gh` child process. |
 | **Credential helper bypasses** (system/global `credential.helper`, `GIT_ASKPASS`, `SSH_ASKPASS`) | `GIT_CONFIG_KEY_0=credential.helper` with empty value clears inherited helpers; `GIT_CONFIG_KEY_1` installs `!ao github-broker git-credential`; `credential.useHttpPath=true` ensures repo path validation; `GIT_ASKPASS`/`SSH_ASKPASS` are scrubbed and `GIT_TERMINAL_PROMPT=0`. |
 | **Global `gh` auth state** (`~/.config/gh/hosts.yml`) | `GH_CONFIG_DIR` is pointed to an isolated empty directory; global `gh` auth is never read or mutated. |
