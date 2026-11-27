@@ -25,6 +25,9 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	if env["GIT_TERMINAL_PROMPT"] != "0" {
 		t.Fatalf("expected GIT_TERMINAL_PROMPT=0, got %q", env["GIT_TERMINAL_PROMPT"])
 	}
+	if env["GIT_CONFIG_NOSYSTEM"] != "1" || env["GIT_CONFIG_GLOBAL"] != os.DevNull {
+		t.Fatalf("expected system/global git config isolation, got NOSYSTEM=%q GLOBAL=%q", env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"])
+	}
 	if env[EnvBrokerToken] != "sess-cap-token" {
 		t.Fatalf("expected %s to be set, got %q", EnvBrokerToken, env[EnvBrokerToken])
 	}

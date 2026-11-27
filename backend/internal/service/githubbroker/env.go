@@ -73,6 +73,11 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		env[k] = ""
 	}
 	env["GIT_TERMINAL_PROMPT"] = "0"
+	// Isolate Git from system and global ~/.gitconfig so competing
+	// url.*.insteadOf rules (e.g. HTTPS-to-SSH), credential helpers, or
+	// http.*.extraHeader entries cannot route GitHub remotes around the broker.
+	env["GIT_CONFIG_NOSYSTEM"] = "1"
+	env["GIT_CONFIG_GLOBAL"] = os.DevNull
 	env[EnvBrokerToken] = opts.BrokerToken
 	env[EnvBrokerHost] = host
 
