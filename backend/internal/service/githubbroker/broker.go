@@ -229,6 +229,7 @@ func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.Pr
 	token := base64.RawURLEncoding.EncodeToString(raw)
 
 	b.mu.Lock()
+	prev, hadPrev := b.grants[sessionID]
 	b.grants[sessionID] = &sessionGrant{
 		sessionID:     sessionID,
 		projectID:     projectID,
@@ -236,11 +237,16 @@ func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.Pr
 		allowedRepos:  allowedMap,
 		canonicalFull: canonicalMap,
 	}
-	persistErr := b.persistGrantsLocked()
-	b.mu.Unlock()
-	if persistErr != nil {
-		b.logger.Warn("githubbroker: failed to persist session grants", "session", sessionID, "error", persistErr)
+	if persistErr := b.persistGrantsLocked(); persistErr != nil {
+		if hadPrev {
+			b.grants[sessionID] = prev
+		} else {
+			delete(b.grants, sessionID)
+		}
+		b.mu.Unlock()
+		return "", fmt.Errorf("githubbroker: persist session grant: %w", persistErr)
 	}
+	b.mu.Unlock()
 
 	return token, nil
 }
@@ -253,9 +259,14 @@ func (b *Broker) RevokeSession(sessionID domain.SessionID) {
 	b.mu.Lock()
 	delete(b.grants, sessionID)
 	persistErr := b.persistGrantsLocked()
+	if persistErr != nil && b.grantsPath != "" {
+		// Fail closed: remove the stale grants file so a daemon restart cannot
+		// reload a revoked grant.
+		_ = os.Remove(b.grantsPath)
+	}
 	b.mu.Unlock()
 	if persistErr != nil {
-		b.logger.Warn("githubbroker: failed to persist session revocation", "session", sessionID, "error", persistErr)
+		b.logger.Warn("githubbroker: failed to persist session revocation; removed grants file to fail closed", "session", sessionID, "error", persistErr)
 	}
 }
 
