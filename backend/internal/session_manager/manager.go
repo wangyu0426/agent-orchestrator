@@ -28,6 +28,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerkeys"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessiontemp"
@@ -474,6 +475,7 @@ type Manager struct {
 	preview                     PreviewLifecycle
 	browser                     BrowserLifecycle
 	browserCapabilities         BrowserCapabilityIssuer
+	githubBroker                *githubbroker.Broker
 	agentBrowserURL             string
 	agentBrowserToken           string
 	agentAccounts               ports.AgentAccountLaunchEnv
@@ -944,6 +946,9 @@ type Deps struct {
 	// instead of the desktop browser bridge.
 	AgentBrowserURL   string
 	AgentBrowserToken string
+	// GitHubBroker is the optional repo-scoped GitHub App credential broker for
+	// worker git/gh operations. Nil preserves legacy auth mode.
+	GitHubBroker *githubbroker.Broker
 	// DataDir owns durable attachment storage and is exported to spawned agents
 	// as AO_DATA_DIR so their hook commands can open the same store.
 	DataDir string
@@ -1019,6 +1024,7 @@ func New(d Deps) *Manager {
 		preview:                        d.Preview,
 		browser:                        d.Browser,
 		browserCapabilities:            d.BrowserCapabilities,
+		githubBroker:                   d.GitHubBroker,
 		agentBrowserURL:                d.AgentBrowserURL,
 		agentBrowserToken:              d.AgentBrowserToken,
 		attachments:                    attachmentstore.New(d.DataDir),
@@ -3102,6 +3108,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	}
 	ctx, cancelTeardown := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancelTeardown()
+	m.revokeGitHubBrokerSession(id)
 	// Automatic archive must never cancel a worker that is still provisioning.
 	if !archiveOnMerge {
 		if err := m.cancelAsyncChatSpawn(ctx, id); err != nil {
@@ -7258,6 +7265,9 @@ func (m *Manager) launchRuntimeEnvForHarness(ctx context.Context, id domain.Sess
 	if err := m.applySessionTempEnv(ctx, id, env); err != nil {
 		return nil, "", fmt.Errorf("prepare session temporary directory: %w", err)
 	}
+	if err := m.applyGitHubBrokerEnv(ctx, id, project, env); err != nil {
+		return nil, "", fmt.Errorf("prepare github credential broker env: %w", err)
+	}
 	if m.browserCapabilities == nil {
 		return env, "", nil
 	}
@@ -7270,6 +7280,99 @@ func (m *Manager) launchRuntimeEnvForHarness(ctx context.Context, id domain.Sess
 	}
 	env[EnvBrowserCapability] = token
 	return env, verifier, nil
+}
+
+func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID, project domain.ProjectID, env map[string]string) error {
+	if m.githubBroker == nil || id == "" {
+		return nil
+	}
+	var repos []string
+	if m.store != nil && project != "" {
+		proj, found, err := m.store.GetProject(ctx, string(project))
+		if err != nil {
+			return fmt.Errorf("read project %s for github broker: %w", project, err)
+		}
+		if found {
+			if ownerRepo := extractOwnerRepoFromOriginURL(proj.RepoOriginURL, m.githubBroker.GitHubHost()); ownerRepo != "" {
+				repos = append(repos, ownerRepo)
+			}
+		}
+	}
+	brokerToken, err := m.githubBroker.RegisterSession(id, project, repos)
+	if err != nil {
+		return err
+	}
+
+	aoBin := "ao"
+	if m.executable != nil {
+		if exe, exeErr := m.executable(); exeErr == nil && strings.TrimSpace(exe) != "" {
+			aoBin = exe
+		}
+	}
+
+	var ghShimDir, ghConfigDir string
+	if m.dataDir != "" {
+		ghShimDir = filepath.Join(m.dataDir, "runtime", "github-broker-bin", string(id))
+		if _, err := githubbroker.EnsureGHShim(ghShimDir, aoBin); err != nil {
+			m.githubBroker.RevokeSession(id)
+			return err
+		}
+		ghConfigDir = filepath.Join(m.dataDir, "runtime", "github-broker-gh", string(id))
+		if err := os.MkdirAll(ghConfigDir, 0o700); err != nil {
+			m.githubBroker.RevokeSession(id)
+			return fmt.Errorf("create isolated gh config dir: %w", err)
+		}
+	}
+
+	brokerEnv := githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
+		BrokerToken: brokerToken,
+		GitHubHost:  m.githubBroker.GitHubHost(),
+		AOBinary:    aoBin,
+		GHConfigDir: ghConfigDir,
+		GHShimDir:   ghShimDir,
+		CurrentPATH: env["PATH"],
+	})
+	for k, v := range brokerEnv {
+		setProtectedEnv(env, k, v, envKeysCaseInsensitive)
+	}
+	return nil
+}
+
+func (m *Manager) revokeGitHubBrokerSession(id domain.SessionID) {
+	if m.githubBroker == nil || id == "" {
+		return
+	}
+	m.githubBroker.RevokeSession(id)
+	if m.dataDir != "" {
+		_ = os.RemoveAll(filepath.Join(m.dataDir, "runtime", "github-broker-bin", string(id)))
+		_ = os.RemoveAll(filepath.Join(m.dataDir, "runtime", "github-broker-gh", string(id)))
+	}
+}
+
+func extractOwnerRepoFromOriginURL(originURL, host string) string {
+	raw := strings.TrimSpace(originURL)
+	if raw == "" {
+		return ""
+	}
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		h = githubbroker.DefaultGitHubHost
+	}
+	lower := strings.ToLower(raw)
+	for _, prefix := range []string{
+		"https://" + h + "/",
+		"http://" + h + "/",
+		"git@" + h + ":",
+		"ssh://git@" + h + "/",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := strings.TrimSuffix(strings.Trim(raw[len(prefix):], "/"), ".git")
+			if strings.Count(rest, "/") == 1 {
+				return rest
+			}
+		}
+	}
+	return ""
 }
 
 // prepareWorkerLaunchEnv couples capability issuance with durable verifier
