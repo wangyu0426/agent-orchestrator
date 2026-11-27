@@ -311,36 +311,42 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		}
 
 		if fbStore, ok := m.store.(conversationFeedbackStore); ok {
-			fbItems, err := fbStore.ListActivePRConversationFeedback(ctx, o.URL)
+			proj, found, err := fbStore.GetProject(ctx, string(rec.ProjectID))
 			if err != nil {
-				return fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
+				return fmt.Errorf("load project %s for conversation feedback: %w", rec.ProjectID, err)
 			}
-			for _, item := range fbItems {
-				if !item.AutoInjectReview {
-					slog.Default().Info("lifecycle: conversation feedback ignored",
-						"event", "ignored",
+			if found && proj.Config.PRCommentFeedback.Enabled {
+				fbItems, err := fbStore.ListActivePRConversationFeedback(ctx, o.URL)
+				if err != nil {
+					return fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
+				}
+				for _, item := range fbItems {
+					if !item.AutoInjectReview {
+						slog.Default().Info("lifecycle: conversation feedback ignored",
+							"event", "ignored",
+							"session", id,
+							"pr", o.URL,
+							"comment_id", item.CommentID,
+							"author", item.Author,
+							"reason", "auto_inject_review_disabled",
+						)
+						continue
+					}
+					msg := formatConversationFeedbackMessage(item, ident, o.URL)
+					slog.Default().Info("lifecycle: conversation feedback queued",
+						"event", "queued",
 						"session", id,
 						"pr", o.URL,
 						"comment_id", item.CommentID,
 						"author", item.Author,
-						"reason", "auto_inject_review_disabled",
+						"body_hash", item.BodyHash,
 					)
-					continue
+					nudges = append(nudges, pendingNudge{
+						key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
+						sig: item.BodyHash,
+						msg: msg,
+					})
 				}
-				msg := formatConversationFeedbackMessage(item, ident, o.URL)
-				slog.Default().Info("lifecycle: conversation feedback queued",
-					"event", "queued",
-					"session", id,
-					"pr", o.URL,
-					"comment_id", item.CommentID,
-					"author", item.Author,
-					"body_hash", item.BodyHash,
-				)
-				nudges = append(nudges, pendingNudge{
-					key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
-					sig: item.BodyHash,
-					msg: msg,
-				})
 			}
 		}
 	}
@@ -483,6 +489,7 @@ func commentNudgeKey(prURL string, comment ports.PRCommentObservation) string {
 
 type conversationFeedbackStore interface {
 	ListActivePRConversationFeedback(ctx context.Context, prURL string) ([]domain.PullRequestConversationFeedback, error)
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 }
 
 func conversationFeedbackNudgeKey(prURL, commentID string) string {

@@ -653,3 +653,105 @@ func TestPRCommentFeedback_Disabled_HistoricBaseline_And_TerminalPR(t *testing.T
 		t.Fatalf("merged PR must not deliver feedback, got %+v", messenger.snapshot())
 	}
 }
+
+func TestPRCommentFeedback_DisableRollbackSuppressesDeferredDelivery(t *testing.T) {
+	mockSrv := newMockPRServer(t, "wangyu0426", "deadbeef9999")
+	mockSrv.setComments([]mockCommentNode{
+		{ID: "IC_deferred", Author: "wangyu0426", Body: "/ao review-feedback Deferred command", CreatedAt: "2026-11-27T17:10:00Z"},
+	})
+
+	st, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Date(2026, 11, 27, 17, 15, 0, 0, time.UTC)
+	proj := domain.ProjectRecord{
+		ID:            "webpob",
+		Path:          t.TempDir(),
+		RepoOriginURL: "https://github.com/wangyu0426/WebPoB.git",
+		RegisteredAt:  now,
+		Config: domain.ProjectConfig{
+			PRCommentFeedback: domain.PRCommentFeedbackConfig{
+				Enabled:        true,
+				TrustedAuthors: []string{"wangyu0426"},
+			},
+		},
+	}
+	if err := st.UpsertProject(context.Background(), proj); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+
+	rec, err := st.CreateSession(context.Background(), domain.SessionRecord{
+		ProjectID:        "webpob",
+		Kind:             domain.KindWorker,
+		Metadata:         domain.SessionMetadata{Branch: "feat/webpob-9"},
+		Activity:         domain.Activity{State: domain.ActivityWaitingInput, LastActivityAt: now},
+		AutoInjectReview: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	if _, err := st.ClaimPR(context.Background(), domain.PullRequest{
+		URL:       prURL,
+		SessionID: rec.ID,
+		Number:    9,
+		HeadSHA:   "deadbeef9999",
+		Author:    "wangyu0426",
+		Provider:  "github",
+		Host:      "github.com",
+		Repo:      "wangyu0426/WebPoB",
+		UpdatedAt: now,
+	}, nil, nil, nil, nil, ports.ReviewWriteReplace, true); err != nil {
+		t.Fatalf("ClaimPR: %v", err)
+	}
+
+	scmProv, err := scmgithub.NewProvider(scmgithub.ProviderOptions{
+		RESTBase:   mockSrv.server.URL,
+		GraphQLURL: mockSrv.server.URL + "/graphql",
+		Token:      scmgithub.StaticTokenSource("ghp_legacy_test_token"),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("scmgithub.NewProvider: %v", err)
+	}
+	messenger := &fakeFeedbackMessenger{}
+	lcm := lifecycle.New(st, messenger, lifecycle.WithClock(func() time.Time { return now }))
+	multi := scmmulti.New(scmmulti.NamedProvider{Key: "github", Provider: scmProv})
+	obs := scmobserve.New(multi, st, lcm, scmobserve.Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Clock:  func() time.Time { return now },
+	})
+
+	// Persist active command while worker is waiting_input (deferred).
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatalf("initial poll: %v", err)
+	}
+	if len(messenger.snapshot()) != 0 {
+		t.Fatalf("expected 0 deliveries while waiting_input, got %d", len(messenger.snapshot()))
+	}
+
+	// Operator rolls back by disabling prCommentFeedback.enabled, then worker resumes.
+	proj.Config.PRCommentFeedback.Enabled = false
+	if err := st.UpsertProject(context.Background(), proj); err != nil {
+		t.Fatalf("UpsertProject disable: %v", err)
+	}
+	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
+	if err := st.UpdateSession(context.Background(), rec); err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+
+	// Trigger a direct PR observation in lifecycle: must NOT deliver the previously deferred row.
+	if err := lcm.ApplyPRObservation(context.Background(), rec.ID, ports.PRObservation{
+		Fetched: true,
+		URL:     prURL,
+		Number:  9,
+	}); err != nil {
+		t.Fatalf("ApplyPRObservation after disable: %v", err)
+	}
+	if len(messenger.snapshot()) != 0 {
+		t.Fatalf("disabled prCommentFeedback must not deliver deferred feedback, got %+v", messenger.snapshot())
+	}
+}
