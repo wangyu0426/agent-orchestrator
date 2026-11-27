@@ -22,10 +22,10 @@ import (
 // and GitLab providers via a multi Provider dispatcher. Missing credentials
 // for one provider do not prevent the other from starting; the observer is
 // disabled only when no provider has usable credentials.
-func startSCMObserver(ctx context.Context, store *sqlite.Store, lcm *lifecycle.Manager, branchStates scmobserve.BranchStateReconciler, gitlabCfg config.GitLabConfig, reviewRefresher *scmReviewRefresher, logger *slog.Logger) <-chan struct{} {
+func startSCMObserver(ctx context.Context, store *sqlite.Store, lcm *lifecycle.Manager, branchStates scmobserve.BranchStateReconciler, ghAuth githubAuthWiring, gitlabCfg config.GitLabConfig, reviewRefresher *scmReviewRefresher, logger *slog.Logger) <-chan struct{} {
 	var named []scmmulti.NamedProvider
 
-	ghProvider, ghErr := newGitHubSCMProvider(logger)
+	ghProvider, ghErr := newGitHubSCMProviderWithAuth(ghAuth, logger)
 	if ghErr != nil {
 		logSCMProviderDisabled(logger, "github", ghErr)
 	} else {
@@ -44,12 +44,28 @@ func startSCMObserver(ctx context.Context, store *sqlite.Store, lcm *lifecycle.M
 		return closedDone()
 	}
 	provider := scmmulti.New(named...)
-	observer := scmobserve.New(provider, store, lcm, scmobserve.Config{Logger: logger, ScopedIdentityResolver: provider, BranchStates: branchStates})
+	observer := scmobserve.New(provider, store, lcm, scmobserve.Config{Logger: logger, ScopedIdentityResolver: ghAuth.attributionResolver(provider), BranchStates: branchStates})
 	reviewRefresher.Bind(observer)
 	return observer.Start(ctx)
 }
 
 func newGitHubSCMProvider(logger *slog.Logger) (*scmgithub.Provider, error) {
+	return newGitHubSCMProviderWithAuth(githubAuthWiring{}, logger)
+}
+
+func newGitHubSCMProviderWithAuth(ghAuth githubAuthWiring, logger *slog.Logger) (*scmgithub.Provider, error) {
+	if ghAuth.appEnabled {
+		if ghAuth.appTokens == nil {
+			return nil, errors.New("github app auth enabled but token source unavailable")
+		}
+		return scmgithub.NewProvider(scmgithub.ProviderOptions{
+			Token:              ghAuth.appTokens,
+			RESTBase:           ghAuth.apiBaseURL,
+			GraphQLURL:         ghAuth.graphqlURL,
+			SkipTokenPreflight: true,
+			Logger:             logger,
+		})
+	}
 	tokens := scmgithub.FallbackTokenSource{
 		scmgithub.EnvTokenSource{EnvVars: []string{"AO_GITHUB_TOKEN"}},
 		&scmgithub.GHTokenSource{},
@@ -61,8 +77,8 @@ func newGitHubSCMProvider(logger *slog.Logger) (*scmgithub.Provider, error) {
 // renames and transfers, sharing AO's GitHub auth. It returns a nil interface
 // (not a typed nil) when the provider cannot be built, so callers degrade to
 // exact origin matching.
-func newGitHubRepoResolver(logger *slog.Logger) ports.GitHubRepositoryResolver {
-	gh, err := newGitHubSCMProvider(logger)
+func newGitHubRepoResolver(ghAuth githubAuthWiring, logger *slog.Logger) ports.GitHubRepositoryResolver {
+	gh, err := newGitHubSCMProviderWithAuth(ghAuth, logger)
 	if err != nil {
 		return nil
 	}
@@ -100,8 +116,12 @@ func logSCMProviderDisabled(logger *slog.Logger, provider string, err error) {
 // observer (e.g. session service PR claiming). Returns nil when no provider
 // has usable credentials — callers must tolerate a nil SCM.
 func newMultiSCMProvider(gitlabCfg config.GitLabConfig, logger *slog.Logger) *scmmulti.Provider {
+	return newMultiSCMProviderWithAuth(githubAuthWiring{}, gitlabCfg, logger)
+}
+
+func newMultiSCMProviderWithAuth(ghAuth githubAuthWiring, gitlabCfg config.GitLabConfig, logger *slog.Logger) *scmmulti.Provider {
 	var named []scmmulti.NamedProvider
-	if gh, err := newGitHubSCMProvider(logger); err == nil {
+	if gh, err := newGitHubSCMProviderWithAuth(ghAuth, logger); err == nil {
 		named = append(named, scmmulti.NamedProvider{Key: "github", Provider: gh})
 	}
 	if gl, err := newGitLabSCMProvider(gitlabCfg, logger); err == nil {
@@ -118,9 +138,9 @@ func newMultiSCMProvider(gitlabCfg config.GitLabConfig, logger *slog.Logger) *sc
 // token), the multi-merger still routes to the healthy one — same
 // degrade-gracefully pattern as newMultiSCMProvider. Returns nil when no
 // provider has usable credentials.
-func newMultiSCMMerger(gitlabCfg config.GitLabConfig, logger *slog.Logger) *scmmulti.Merger {
+func newMultiSCMMerger(ghAuth githubAuthWiring, gitlabCfg config.GitLabConfig, logger *slog.Logger) *scmmulti.Merger {
 	var named []scmmulti.NamedMerger
-	if gh, err := newGitHubSCMProvider(logger); err == nil {
+	if gh, err := newGitHubSCMProviderWithAuth(ghAuth, logger); err == nil {
 		named = append(named, scmmulti.NamedMerger{Key: "github", Merger: gh})
 	}
 	if gl, err := newGitLabSCMProvider(gitlabCfg, logger); err == nil {

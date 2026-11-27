@@ -345,7 +345,7 @@ func telemetryEmitsSpawned(cfg config.Config) bool {
 // (issue #2685). The returned service is mounted at httpd APIDeps.Sessions.
 // It also returns the manager so the caller can wire Reconcile into the boot
 // sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, artifactVersions *artifactversions.Capturer, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, reviewers *reviewer.Resolver, reviewRefresher reviewsvc.ThreadRefresher, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+func startSession(ctx context.Context, cfg config.Config, ghAuth githubAuthWiring, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, artifactVersions *artifactversions.Capturer, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, reviewers *reviewer.Resolver, reviewRefresher reviewsvc.ThreadRefresher, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -396,7 +396,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		CodexOperationGate:  codexOperationGate,
 	})
 	mgr.SetAgentReadiness(agentReadiness)
-	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
+	scmProvider := newMultiSCMProviderWithAuth(ghAuth, cfg.GitLab, log)
 	// Attach the operator's GitHub login to product telemetry only when its carrier
 	// event can actually be sent, and guard the typed nil from newMultiSCMProvider
 	// so the interface stays nil (degrading to anonymous) rather than wrapping a
@@ -406,19 +406,20 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		githubIdentity = scmProvider
 	}
 	deps := sessionsvc.Deps{
-		Manager:           mgr,
-		Store:             store,
-		PRClaimer:         store,
-		SCM:               scmProvider,
-		DataDir:           cfg.DataDir,
-		Tracker:           tracker,
-		Telemetry:         telemetry,
-		Milestones:        installMilestones(cfg),
-		Delivery:          lcm.DeliveryTelemetry(),
-		Logger:            log,
-		BackgroundContext: ctx,
-		AgentReadiness:    agentReadiness,
-		GithubIdentity:    githubIdentity,
+		Manager:             mgr,
+		Store:               store,
+		PRClaimer:           store,
+		SCM:                 scmProvider,
+		AttributionIdentity: ghAuth.attributionResolver(scmProvider),
+		DataDir:             cfg.DataDir,
+		Tracker:             tracker,
+		Telemetry:           telemetry,
+		Milestones:          installMilestones(cfg),
+		Delivery:            lcm.DeliveryTelemetry(),
+		Logger:              log,
+		BackgroundContext:   ctx,
+		AgentReadiness:      agentReadiness,
+		GithubIdentity:      githubIdentity,
 		// no_signal only makes sense for harnesses with complete lifecycle signal
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable:        activitydispatch.FullySupportsHarness,

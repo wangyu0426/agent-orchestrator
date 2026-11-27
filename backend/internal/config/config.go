@@ -109,6 +109,20 @@ type TelemetryConfig struct {
 	LocalRetention time.Duration
 }
 
+// GitHubAppConfig configures opt-in GitHub App installation authentication for
+// the AO daemon's SCM and Tracker adapters. When Enabled is false, the daemon
+// preserves its legacy PAT/env/gh credential chain. When Enabled is true, App
+// mode fails closed and never falls back to personal credentials.
+type GitHubAppConfig struct {
+	Enabled        bool
+	AppID          int64
+	InstallationID int64
+	PrivateKeyPath string
+	APIBaseURL     string
+	Repositories   []string
+	OperatorLogin  string
+}
+
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
 // token overrides. It is loaded once at daemon boot from environment variables
 // (no hot-reload), matching the existing config pattern. gitlab.com is always
@@ -215,6 +229,9 @@ type Config struct {
 	// normalizes it. The desktop uses this to identify dev daemons after the
 	// process cwd is moved to the stable data dir.
 	StartupWorkingDirectory string
+	// GitHubApp carries opt-in GitHub App installation auth settings for the
+	// daemon's SCM and Tracker adapters.
+	GitHubApp GitHubAppConfig
 	// GitLab carries the self-managed GitLab host allowlist and per-host
 	// token overrides, loaded once at boot from environment variables.
 	GitLab GitLabConfig
@@ -503,6 +520,54 @@ func Load() (Config, error) {
 		cfg.Telemetry.LocalRetention = d
 	}
 
+	if raw, ok := os.LookupEnv("AO_GITHUB_APP_ENABLED"); ok && strings.TrimSpace(raw) != "" {
+		v, err := parseToggleEnv("AO_GITHUB_APP_ENABLED", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.GitHubApp.Enabled = v
+	}
+	if cfg.GitHubApp.Enabled {
+		appIDRaw := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_ID"))
+		appID, err := strconv.ParseInt(appIDRaw, 10, 64)
+		if err != nil || appID <= 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_ID %q: must be a positive integer when AO_GITHUB_APP_ENABLED is on", appIDRaw)
+		}
+		cfg.GitHubApp.AppID = appID
+
+		installIDRaw := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_INSTALLATION_ID"))
+		installID, err := strconv.ParseInt(installIDRaw, 10, 64)
+		if err != nil || installID <= 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_INSTALLATION_ID %q: must be a positive integer when AO_GITHUB_APP_ENABLED is on", installIDRaw)
+		}
+		cfg.GitHubApp.InstallationID = installID
+
+		keyPath := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_PRIVATE_KEY_PATH"))
+		if keyPath == "" {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_PRIVATE_KEY_PATH is required when AO_GITHUB_APP_ENABLED is on")
+		}
+		absKeyPath, err := filepath.Abs(keyPath)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve AO_GITHUB_APP_PRIVATE_KEY_PATH: %w", err)
+		}
+		cfg.GitHubApp.PrivateKeyPath = absKeyPath
+
+		cfg.GitHubApp.APIBaseURL = strings.TrimSpace(os.Getenv("AO_GITHUB_APP_API_BASE_URL"))
+		cfg.GitHubApp.OperatorLogin = strings.TrimSpace(strings.TrimPrefix(os.Getenv("AO_GITHUB_APP_OPERATOR_LOGIN"), "@"))
+		rawRepos, ok := os.LookupEnv("AO_GITHUB_APP_REPOSITORIES")
+		if !ok {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_REPOSITORIES is required when AO_GITHUB_APP_ENABLED is on")
+		}
+		for _, r := range strings.Split(rawRepos, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				cfg.GitHubApp.Repositories = append(cfg.GitHubApp.Repositories, r)
+			}
+		}
+		if len(cfg.GitHubApp.Repositories) == 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_REPOSITORIES %q: must contain at least one repository when AO_GITHUB_APP_ENABLED is on", rawRepos)
+		}
+	}
+
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
 		hosts := make([]string, 0, 4)
 		for _, h := range strings.Split(raw, ",") {
@@ -639,6 +704,25 @@ var telemetryEnvKeys = []string{
 // install. The daemon keeps its own copy of the settings in Config.
 func ScrubTelemetryEnv() {
 	for _, key := range telemetryEnvKeys {
+		_ = os.Unsetenv(key)
+	}
+}
+
+var githubAppEnvKeys = []string{
+	"AO_GITHUB_APP_ENABLED",
+	"AO_GITHUB_APP_ID",
+	"AO_GITHUB_APP_INSTALLATION_ID",
+	"AO_GITHUB_APP_PRIVATE_KEY_PATH",
+	"AO_GITHUB_APP_API_BASE_URL",
+	"AO_GITHUB_APP_REPOSITORIES",
+	"AO_GITHUB_APP_OPERATOR_LOGIN",
+}
+
+// ScrubGitHubAppEnv removes GitHub App configuration variables from the daemon
+// process environment after Load has consumed them so spawned workers never
+// inherit the private-key path or app installation metadata.
+func ScrubGitHubAppEnv() {
+	for _, key := range githubAppEnvKeys {
 		_ = os.Unsetenv(key)
 	}
 }

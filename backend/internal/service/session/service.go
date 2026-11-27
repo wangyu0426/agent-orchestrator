@@ -234,6 +234,7 @@ type Service struct {
 	terminalTitles      terminalTitleSource
 	store               Store
 	prClaimer           ports.PRClaimer
+	attributionIdentity ports.ScopedIdentityResolver
 	scm                 scmProvider
 	tracker             ports.Tracker
 	clock               func() time.Time
@@ -342,14 +343,15 @@ func New(manager *sessionmanager.Manager, store Store) *Service {
 // path keeps existing tests and callers small; daemon wiring uses NewWithDeps
 // to supply SCM observation for PR claiming.
 type Deps struct {
-	Manager   commander
-	Store     Store
-	PRClaimer ports.PRClaimer
-	SCM       scmProvider
-	Tracker   ports.Tracker
-	Clock     func() time.Time
-	DataDir   string
-	Telemetry ports.EventSink
+	Manager             commander
+	Store               Store
+	PRClaimer           ports.PRClaimer
+	SCM                 scmProvider
+	AttributionIdentity ports.ScopedIdentityResolver
+	Tracker             ports.Tracker
+	Clock               func() time.Time
+	DataDir             string
+	Telemetry           ports.EventSink
 	// Milestones durably records the install's first spawned session, so
 	// ao.sessions.spawned carries first_for_install. Left nil, it is omitted.
 	Milestones ports.InstallMilestones
@@ -394,7 +396,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, prReviewDiagnostics: d.PRReviewDiagnostics, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, orchestratorQuota: d.OrchestratorQuota}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, attributionIdentity: d.AttributionIdentity, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, prReviewDiagnostics: d.PRReviewDiagnostics, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, orchestratorQuota: d.OrchestratorQuota}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {

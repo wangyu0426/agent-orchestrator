@@ -19,6 +19,19 @@ import (
 )
 
 func newGitHubTracker() (ports.Tracker, error) {
+	return newGitHubTrackerWithAuth(githubAuthWiring{})
+}
+
+func newGitHubTrackerWithAuth(ghAuth githubAuthWiring) (ports.Tracker, error) {
+	if ghAuth.appEnabled {
+		if ghAuth.appTokens == nil {
+			return nil, errors.New("github app auth enabled but token source unavailable")
+		}
+		return trackergithub.New(trackergithub.Options{
+			Token:   ghAuth.appTokens,
+			BaseURL: ghAuth.apiBaseURL,
+		})
+	}
 	return trackergithub.New(trackergithub.Options{Token: &ghTokenSource{}})
 }
 
@@ -97,19 +110,38 @@ func newGitLabTracker(gitlabCfg config.GitLabConfig) (ports.Tracker, error) {
 // tolerate a nil ports.Tracker (the session service's nil-guard handles
 // this).
 func newMultiTracker(gitlabCfg config.GitLabConfig, logger *slog.Logger) ports.Tracker {
+	return newMultiTrackerWithAuth(githubAuthWiring{}, gitlabCfg, logger)
+}
+
+func newMultiTrackerWithAuth(ghAuth githubAuthWiring, gitlabCfg config.GitLabConfig, logger *slog.Logger) ports.Tracker {
 	var named []trackermulti.NamedTracker
 
-	// Probing the environment is a cheap read — no subprocess. Only when no
-	// env token exists do we defer to the gh CLI fallback, lazily.
-	env := trackergithub.EnvTokenSource{EnvVars: []string{"AO_GITHUB_TOKEN"}}
-	if _, err := env.Token(context.Background()); err == nil {
-		if t, err := newGitHubTracker(); err != nil {
-			logTrackerDisabled(logger, "github", err)
+	if ghAuth.appEnabled {
+		if ghAuth.appTokens == nil {
+			logTrackerDisabled(logger, "github", errors.New("github app auth enabled but token source unavailable"))
 		} else {
-			named = append(named, trackermulti.NamedTracker{Key: "github", Tracker: t})
+			named = append(named, trackermulti.NamedTracker{
+				Key: "github",
+				Tracker: &lazyTracker{
+					name:   "github",
+					logger: logger,
+					build:  func() (ports.Tracker, error) { return newGitHubTrackerWithAuth(ghAuth) },
+				},
+			})
 		}
 	} else {
-		named = append(named, trackermulti.NamedTracker{Key: "github", Tracker: &lazyTracker{name: "github", logger: logger, build: newGitHubTracker}})
+		// Probing the environment is a cheap read — no subprocess. Only when no
+		// env token exists do we defer to the gh CLI fallback, lazily.
+		env := trackergithub.EnvTokenSource{EnvVars: []string{"AO_GITHUB_TOKEN"}}
+		if _, err := env.Token(context.Background()); err == nil {
+			if t, err := newGitHubTracker(); err != nil {
+				logTrackerDisabled(logger, "github", err)
+			} else {
+				named = append(named, trackermulti.NamedTracker{Key: "github", Tracker: t})
+			}
+		} else {
+			named = append(named, trackermulti.NamedTracker{Key: "github", Tracker: &lazyTracker{name: "github", logger: logger, build: newGitHubTracker}})
+		}
 	}
 
 	if t, err := newGitLabTracker(gitlabCfg); err != nil {

@@ -172,7 +172,7 @@ func (c *Client) doRESTWithETag(ctx context.Context, path string, q url.Values, 
 		return RESTResponse{StatusCode: resp.StatusCode, ETag: resp.Header.Get("ETag"), Body: b}, nil
 	}
 	err = classifyError(resp, b)
-	if errors.Is(err, ErrAuthFailed) {
+	if resp.StatusCode == http.StatusUnauthorized {
 		c.invalidateToken()
 	}
 	return RESTResponse{StatusCode: resp.StatusCode, Body: b}, err
@@ -260,7 +260,7 @@ func (c *Client) doREST(ctx context.Context, method, path string, q url.Values, 
 	}
 
 	err = classifyError(resp, b)
-	if errors.Is(err, ErrAuthFailed) {
+	if resp.StatusCode == http.StatusUnauthorized {
 		c.invalidateToken()
 	}
 	return RESTResponse{StatusCode: resp.StatusCode, Body: b}, err
@@ -306,7 +306,7 @@ func (c *Client) doGraphQL(ctx context.Context, query string, variables map[stri
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := classifyError(resp, respBody)
-		if errors.Is(err, ErrAuthFailed) {
+		if resp.StatusCode == http.StatusUnauthorized {
 			c.invalidateToken()
 		}
 		return nil, err

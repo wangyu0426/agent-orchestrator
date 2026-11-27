@@ -662,9 +662,13 @@ func (s *Service) branchPRIdentity(ctx context.Context, cache map[string]ports.S
 	if identity, ok := cache[key]; ok {
 		return identity, nil
 	}
-	resolver, ok := s.scm.(ports.ScopedIdentityResolver)
-	if !ok {
-		return ports.SCMIdentity{}, fmt.Errorf("cannot check who opened %s: the %s provider does not report the signed-in account", prURL, repo.Provider)
+	resolver := s.attributionIdentity
+	if resolver == nil {
+		var ok bool
+		resolver, ok = s.scm.(ports.ScopedIdentityResolver)
+		if !ok {
+			return ports.SCMIdentity{}, fmt.Errorf("cannot check who opened %s: the %s provider does not report the signed-in account", prURL, repo.Provider)
+		}
 	}
 	identity, err := resolver.AuthenticatedIdentityForProvider(ctx, repo.Provider, repo.Host)
 	if err != nil {
