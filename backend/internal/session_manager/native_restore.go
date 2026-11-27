@@ -127,7 +127,7 @@ func (m *Manager) rollbackNativeInitialization(ctx context.Context, original dom
 	}
 	var rollbackErr error
 	if original.IsTerminated {
-		rollbackErr = m.lcm.MarkTerminated(ctx, original.ID)
+		rollbackErr = m.markTerminated(ctx, original.ID)
 	} else {
 		rollbackErr = m.recordAgentExited(ctx, rec)
 	}
