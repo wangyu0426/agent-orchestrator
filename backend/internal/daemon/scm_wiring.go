@@ -58,7 +58,13 @@ func newGitHubSCMProviderWithAuth(ghAuth githubAuthWiring, logger *slog.Logger) 
 		if ghAuth.appTokens == nil {
 			return nil, errors.New("github app auth enabled but token source unavailable")
 		}
-		return scmgithub.NewProvider(scmgithub.ProviderOptions{Token: ghAuth.appTokens, SkipTokenPreflight: true, Logger: logger})
+		return scmgithub.NewProvider(scmgithub.ProviderOptions{
+			Token:              ghAuth.appTokens,
+			RESTBase:           ghAuth.apiBaseURL,
+			GraphQLURL:         ghAuth.graphqlURL,
+			SkipTokenPreflight: true,
+			Logger:             logger,
+		})
 	}
 	tokens := scmgithub.FallbackTokenSource{
 		scmgithub.EnvTokenSource{EnvVars: []string{"AO_GITHUB_TOKEN"}},

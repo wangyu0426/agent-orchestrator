@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
@@ -14,17 +15,20 @@ import (
 type githubAuthWiring struct {
 	appEnabled bool
 	appTokens  *githubapp.ScopedTokenSource
+	apiBaseURL string
+	graphqlURL string
 }
 
 func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githubAuthWiring, error) {
 	if !cfg.Enabled {
 		return githubAuthWiring{}, nil
 	}
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
 	provider, err := githubapp.NewProvider(githubapp.Config{
 		AppID:          cfg.AppID,
 		InstallationID: cfg.InstallationID,
 		PrivateKeyPath: cfg.PrivateKeyPath,
-		BaseURL:        cfg.APIBaseURL,
+		BaseURL:        baseURL,
 		Logger:         logger,
 	})
 	if err != nil {
@@ -33,5 +37,18 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	return githubAuthWiring{
 		appEnabled: true,
 		appTokens:  provider.TokenSource(cfg.Repositories...),
+		apiBaseURL: baseURL,
+		graphqlURL: deriveGitHubGraphQLURL(baseURL),
 	}, nil
+}
+
+func deriveGitHubGraphQLURL(restBase string) string {
+	restBase = strings.TrimRight(strings.TrimSpace(restBase), "/")
+	if restBase == "" {
+		return ""
+	}
+	if prefix, ok := strings.CutSuffix(restBase, "/api/v3"); ok {
+		return prefix + "/api/graphql"
+	}
+	return restBase + "/graphql"
 }

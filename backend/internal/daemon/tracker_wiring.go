@@ -27,7 +27,10 @@ func newGitHubTrackerWithAuth(ghAuth githubAuthWiring) (ports.Tracker, error) {
 		if ghAuth.appTokens == nil {
 			return nil, errors.New("github app auth enabled but token source unavailable")
 		}
-		return trackergithub.New(trackergithub.Options{Token: ghAuth.appTokens})
+		return trackergithub.New(trackergithub.Options{
+			Token:   ghAuth.appTokens,
+			BaseURL: ghAuth.apiBaseURL,
+		})
 	}
 	return trackergithub.New(trackergithub.Options{Token: &ghTokenSource{}})
 }

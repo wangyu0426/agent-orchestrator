@@ -216,3 +216,70 @@ func TestGitHubApp_SCMAndTrackerIntegration(t *testing.T) {
 		t.Fatalf("expected 1 GET /installation/repositories preflight call, got %d", installRepoCalls.Load())
 	}
 }
+
+func TestGitHubAppWiring_ThreadsAPIBaseURLAndGraphQL(t *testing.T) {
+	if got := deriveGitHubGraphQLURL("https://github.example.com/api/v3"); got != "https://github.example.com/api/graphql" {
+		t.Fatalf("GHES graphql = %q, want https://github.example.com/api/graphql", got)
+	}
+	if got := deriveGitHubGraphQLURL("https://api.github.com/"); got != "https://api.github.com/graphql" {
+		t.Fatalf("default graphql = %q, want https://api.github.com/graphql", got)
+	}
+
+	keyPath := writeTempAppKey(t)
+	var hitTracker, hitSCM atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/888/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      "ghs_enterprise_token_123456",
+				"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+			hitTracker.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"total_count":0,"repositories":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/1/comments":
+			hitSCM.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"node_id":"IC_1","body":"ok","html_url":"https://example.com/1","created_at":"2026-11-27T06:00:00Z","user":{"login":"ao[bot]","type":"Bot"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled:        true,
+		AppID:          111,
+		InstallationID: 888,
+		PrivateKeyPath: keyPath,
+		APIBaseURL:     srv.URL,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring: %v", err)
+	}
+
+	tracker, err := newGitHubTrackerWithAuth(auth)
+	if err != nil {
+		t.Fatalf("newGitHubTrackerWithAuth: %v", err)
+	}
+	if err := tracker.Preflight(context.Background()); err != nil {
+		t.Fatalf("tracker.Preflight against custom APIBaseURL: %v", err)
+	}
+
+	scmProv, err := newGitHubSCMProviderWithAuth(auth, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubSCMProviderWithAuth: %v", err)
+	}
+	if _, err := scmProv.PostComment(context.Background(), ports.SCMCommentRequest{
+		PR:   ports.SCMPRRef{Repo: ports.SCMRepo{Provider: "github", Owner: "org", Name: "repo"}, Number: 1},
+		Body: "ok",
+	}); err != nil {
+		t.Fatalf("scmProv.PostComment against custom APIBaseURL: %v", err)
+	}
+
+	if hitTracker.Load() != 1 || hitSCM.Load() != 1 {
+		t.Fatalf("expected custom APIBaseURL to be hit by both tracker (%d) and scm (%d)", hitTracker.Load(), hitSCM.Load())
+	}
+}
