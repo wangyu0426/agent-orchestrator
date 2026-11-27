@@ -65,19 +65,19 @@ func CLIActorType(actorType, commandPath string) string {
 }
 
 var legacyActorlessSystemCLICommands = map[string]struct{}{
-	"ao agent-process":           {},
-	"ao agent-process supervise": {},
-	"ao browser-host":            {},
-	"ao chat-host":               {},
-	"ao completion":              {},
-	"ao daemon":                        {},
-	"ao github-broker":                 {},
-	"ao github-broker gh":              {},
-	"ao github-broker git-credential":  {},
-	"ao help":                          {},
-	"ao pty-host":                {},
-	"ao start":                   {},
-	"ao unreal-provider":         {},
+	"ao agent-process":                {},
+	"ao agent-process supervise":      {},
+	"ao browser-host":                 {},
+	"ao chat-host":                    {},
+	"ao completion":                   {},
+	"ao daemon":                       {},
+	"ao github-broker":                {},
+	"ao github-broker gh":             {},
+	"ao github-broker git-credential": {},
+	"ao help":                         {},
+	"ao pty-host":                     {},
+	"ao start":                        {},
+	"ao unreal-provider":              {},
 }
 
 var legacyActorlessUserCLICommands = map[string]struct{}{
