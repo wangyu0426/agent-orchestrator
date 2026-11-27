@@ -533,8 +533,19 @@ func normalizeRepositories(repos []string) ([]string, error) {
 		if r == "" {
 			return nil, fmt.Errorf("%w: empty repository entry in scope", ErrInvalidConfig)
 		}
-		if idx := strings.LastIndex(r, "/"); idx >= 0 {
-			r = strings.TrimSpace(r[idx+1:])
+		parts := strings.Split(r, "/")
+		switch len(parts) {
+		case 1:
+			r = strings.TrimSpace(parts[0])
+		case 2:
+			owner := strings.TrimSpace(parts[0])
+			name := strings.TrimSpace(parts[1])
+			if owner == "" || name == "" {
+				return nil, fmt.Errorf("%w: malformed repository scope %q", ErrInvalidConfig, raw)
+			}
+			r = name
+		default:
+			return nil, fmt.Errorf("%w: malformed repository scope %q", ErrInvalidConfig, raw)
 		}
 		r = strings.TrimSuffix(r, ".git")
 		if r == "" {

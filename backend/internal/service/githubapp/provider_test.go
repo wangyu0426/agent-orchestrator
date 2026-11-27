@@ -413,10 +413,9 @@ func TestProvider_RevokedCredentialsAndRedaction(t *testing.T) {
 	}
 
 	// Malformed repository scope must fail closed rather than widening to installation-wide.
-	if _, err := p.TokenForRepositories(context.Background(), []string{"owner/"}); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("malformed repo scope 'owner/': got %v, want ErrInvalidConfig", err)
-	}
-	if _, err := p.TokenSource(" ").Token(context.Background()); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("blank repo scope: got %v, want ErrInvalidConfig", err)
+	for _, bad := range []string{"owner/", "/repo", "owner/repo/extra", " "} {
+		if _, err := p.TokenForRepositories(context.Background(), []string{bad}); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("malformed repo scope %q: got %v, want ErrInvalidConfig", bad, err)
+		}
 	}
 }
