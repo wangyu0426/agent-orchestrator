@@ -396,7 +396,11 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		CodexOperationGate:  codexOperationGate,
 	})
 	mgr.SetAgentReadiness(agentReadiness)
-	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
+	ghAuth, ghAuthErr := newGitHubAuthWiring(cfg.GitHubApp, log)
+	if ghAuthErr != nil {
+		log.Warn("github app auth wiring failed for session service; failing closed", "err", ghAuthErr)
+	}
+	scmProvider := newMultiSCMProviderWithAuth(ghAuth, cfg.GitLab, log)
 	// Attach the operator's GitHub login to product telemetry only when its carrier
 	// event can actually be sent, and guard the typed nil from newMultiSCMProvider
 	// so the interface stays nil (degrading to anonymous) rather than wrapping a

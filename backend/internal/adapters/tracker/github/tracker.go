@@ -368,7 +368,16 @@ func cloneIssues(in []domain.Issue) []domain.Issue {
 // startup glitch is recoverable on a subsequent call.
 func (t *Tracker) Preflight(ctx context.Context) error {
 	return t.preflight.Run(ctx, func(ctx context.Context) error {
-		_, err := t.do(ctx, http.MethodGet, "/user", nil)
+		path := "/user"
+		type preflightPathProvider interface {
+			PreflightPath() string
+		}
+		if p, ok := t.tokens.(preflightPathProvider); ok {
+			if custom := strings.TrimSpace(p.PreflightPath()); custom != "" {
+				path = custom
+			}
+		}
+		_, err := t.do(ctx, http.MethodGet, path, nil)
 		return err
 	})
 }
@@ -427,7 +436,16 @@ func (t *Tracker) roundTrip(ctx context.Context, method, path string, body any, 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return respBody, etag, nextPath, false, nil
 	}
-	return respBody, etag, nextPath, false, classifyError(resp, respBody)
+	classified := classifyError(resp, respBody)
+	if errors.Is(classified, ErrAuthFailed) {
+		type tokenInvalidator interface {
+			InvalidateToken()
+		}
+		if inv, ok := t.tokens.(tokenInvalidator); ok {
+			inv.InvalidateToken()
+		}
+	}
+	return respBody, etag, nextPath, false, classified
 }
 
 func classifyError(resp *http.Response, body []byte) error {

@@ -137,6 +137,10 @@ func startGitHubLoginResolver(ctx context.Context, cfg config.Config, ident port
 	if ident == nil || !cfg.Telemetry.Events || cfg.Telemetry.Remote != config.TelemetryRemotePostHog {
 		return
 	}
+	if cfg.GitHubApp.Enabled {
+		// GitHub App installation tokens have no human /user login.
+		return
+	}
 	go func() {
 		defer sentryobs.RecoverBackground()
 		for _, delay := range gitHubLoginRetryDelays {

@@ -169,6 +169,7 @@ func Run(buildVersion string) (retErr error) {
 	cfg.Telemetry.AppVersion = telemetryAppVersion(cfg.Telemetry.AppVersion, buildVersion)
 	// Children inherit os.Environ(); the export settings stay in cfg only.
 	config.ScrubTelemetryEnv()
+	config.ScrubGitHubAppEnv()
 	// A daemon started from an AO shell tab must not pass that tab's marker to
 	// the agents it launches, or none of them would name itself to the daemon.
 	// Shell tabs set it again explicitly.
@@ -623,7 +624,16 @@ func Run(buildVersion string) (retErr error) {
 	// blocked. May be nil (no usable credentials) — the session service's
 	// nil-guard and the intake resolver's backoff both tolerate that
 	// (issue #2685).
-	tracker := newMultiTracker(cfg.GitLab, log)
+	ghAuth, err := newGitHubAuthWiring(cfg.GitHubApp, log)
+	if err != nil {
+		stop()
+		lcStack.Stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return err
+	}
+	tracker := newMultiTrackerWithAuth(ghAuth, cfg.GitLab, log)
 	codexPlugin := codexagent.New()
 	codexHome, err := codexPlugin.NativeSessionConfigDir(ctx, nil)
 	if err != nil {
@@ -836,7 +846,7 @@ func Run(buildVersion string) (retErr error) {
 	// Chat session, because waking it waits for admitted input to drain.
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	githubRepos := newGitHubRepoResolver(log)
+	githubRepos := newGitHubRepoResolver(ghAuth, log)
 	if githubRepos != nil {
 		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
 	}
@@ -1107,10 +1117,10 @@ func Run(buildVersion string) (retErr error) {
 			wired.SetUsageFlusher(usagePipeline)
 		}
 	}
-	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, sessionSvc, cfg.GitLab, reviewRefresher, log)
+	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, sessionSvc, ghAuth, cfg.GitLab, reviewRefresher, log)
 	var prActions prsvc.ActionManager
-	prReader := newMultiSCMProvider(cfg.GitLab, log)
-	prMerger := newMultiSCMMerger(cfg.GitLab, log)
+	prReader := newMultiSCMProviderWithAuth(ghAuth, cfg.GitLab, log)
+	prMerger := newMultiSCMMerger(ghAuth, cfg.GitLab, log)
 	if prReader != nil && prMerger != nil {
 		prActions = prsvc.NewActionService(prsvc.ActionDeps{
 			Store:         store,

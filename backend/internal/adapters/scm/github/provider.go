@@ -110,6 +110,18 @@ func (p *Provider) AuthenticatedIdentity(ctx context.Context) (ports.SCMIdentity
 	if p.identityResolved {
 		return p.identity, nil
 	}
+	type identityProvider interface {
+		SCMIdentity() (ports.SCMIdentity, bool)
+	}
+	if p.client != nil && p.client.tokens != nil {
+		if ip, ok := p.client.tokens.(identityProvider); ok {
+			if id, handled := ip.SCMIdentity(); handled {
+				p.identity = id
+				p.identityResolved = true
+				return p.identity, nil
+			}
+		}
+	}
 	resp, err := p.client.doREST(ctx, http.MethodGet, "/user", nil, nil)
 	if err != nil {
 		return ports.SCMIdentity{}, err
