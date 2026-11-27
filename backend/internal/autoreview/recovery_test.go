@@ -122,6 +122,7 @@ func TestAutoReviewPermanentFailureBlocksWithActionableDetail(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	for _, body := range []string{
 		"reviewer preflight: invalid API key",
+		"reviewer preflight: chat driver requires authentication",
 		domain.ReviewRunAuthRequiredBody,
 		domain.ReviewRunProviderKeyMissingBody,
 	} {

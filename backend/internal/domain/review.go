@@ -212,6 +212,7 @@ func ClassifyAutoReviewFailure(run ReviewRun) AutoReviewFailureClass {
 		"invalid api key",
 		"invalid_api_key",
 		"authentication failed",
+		"chat driver requires authentication",
 		"unauthorized",
 		"forbidden",
 		"permission denied",
