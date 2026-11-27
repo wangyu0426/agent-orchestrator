@@ -135,6 +135,14 @@ UPDATE review_run SET
       SELECT 1 FROM conversation_turns AS t
       WHERE t.id = ?1 AND t.failure_code = 'quota_exhausted'
     ) THEN 'reviewer Chat turn failed: quota_exhausted'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = ?1 AND t.failure_code = 'auth_required'
+    ) THEN 'reviewer Chat turn failed: auth_required'
+    WHEN EXISTS (
+      SELECT 1 FROM conversation_turns AS t
+      WHERE t.id = ?1 AND t.failure_code = 'provider_key_missing'
+    ) THEN 'reviewer Chat turn failed: provider_key_missing'
     ELSE 'reviewer Chat turn ended without submitting a result'
   END
 WHERE status = 'running' AND verdict = '' AND batch_id != ''

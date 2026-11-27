@@ -119,36 +119,44 @@ func TestAutoReviewFourPlusLegitimateReviewFixCycles(t *testing.T) {
 
 func TestAutoReviewPermanentFailureBlocksWithActionableDetail(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
-	store := &fakeStore{
-		session: domain.SessionRecord{
-			ID:                "s1",
-			ProjectID:         "p1",
-			Kind:              domain.KindWorker,
-			Harness:           domain.HarnessCodex,
-			AutoReviewEnabled: true,
-			Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
-		},
-		project: domain.ProjectRecord{ID: "p1"},
-		prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
-		runs: []domain.ReviewRun{{
-			ID:            "perm-1",
-			PRURL:         "pr1",
-			TargetSHA:     "sha1",
-			Harness:       domain.ReviewerCodex,
-			TriggerSource: domain.ReviewTriggerAuto,
-			Status:        domain.ReviewRunFailed,
-			Body:          "reviewer preflight: invalid API key",
-			CreatedAt:     now.Add(-2 * time.Hour),
-		}},
-	}
-	trig := &fakeTrigger{}
-	coord := New(store, trig, Config{Clock: func() time.Time { return now }})
+	for _, body := range []string{
+		"reviewer preflight: invalid API key",
+		domain.ReviewRunAuthRequiredBody,
+		domain.ReviewRunProviderKeyMissingBody,
+	} {
+		t.Run(body, func(t *testing.T) {
+			store := &fakeStore{
+				session: domain.SessionRecord{
+					ID:                "s1",
+					ProjectID:         "p1",
+					Kind:              domain.KindWorker,
+					Harness:           domain.HarnessCodex,
+					AutoReviewEnabled: true,
+					Activity:          domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-5 * time.Minute)},
+				},
+				project: domain.ProjectRecord{ID: "p1"},
+				prs:     []domain.PullRequest{{URL: "pr1", Number: 1, HeadSHA: "sha1"}},
+				runs: []domain.ReviewRun{{
+					ID:            "perm-1",
+					PRURL:         "pr1",
+					TargetSHA:     "sha1",
+					Harness:       domain.ReviewerCodex,
+					TriggerSource: domain.ReviewTriggerAuto,
+					Status:        domain.ReviewRunFailed,
+					Body:          body,
+					CreatedAt:     now.Add(-2 * time.Hour),
+				}},
+			}
+			trig := &fakeTrigger{}
+			coord := New(store, trig, Config{Clock: func() time.Time { return now }})
 
-	res, err := coord.EvaluateSession(context.Background(), "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Triggered || res.Reason != "permanent_review_failure" || res.Detail == "" || trig.calls != 0 {
-		t.Fatalf("permanent failure = %+v calls=%d, want permanent_review_failure with detail", res, trig.calls)
+			res, err := coord.EvaluateSession(context.Background(), "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Triggered || res.Reason != "permanent_review_failure" || res.Detail != body || trig.calls != 0 {
+				t.Fatalf("permanent failure = %+v calls=%d, want permanent_review_failure with detail=%q", res, trig.calls, body)
+			}
+		})
 	}
 }

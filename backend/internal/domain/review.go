@@ -175,6 +175,13 @@ const (
 // reviewer Chat turn fails with typed failure_code = 'quota_exhausted'.
 const ReviewRunQuotaExhaustedBody = "reviewer Chat turn failed: quota_exhausted"
 
+// Durable review_run bodies recorded when a reviewer Chat turn fails with a
+// typed permanent authentication/configuration failure_code.
+const (
+	ReviewRunAuthRequiredBody       = "reviewer Chat turn failed: auth_required"
+	ReviewRunProviderKeyMissingBody = "reviewer Chat turn failed: provider_key_missing"
+)
+
 // IsQuotaFailedReviewRun reports whether a failed review run was caused by
 // provider quota exhaustion rather than an ordinary review failure.
 func IsQuotaFailedReviewRun(run ReviewRun) bool {
@@ -186,6 +193,9 @@ func IsQuotaFailedReviewRun(run ReviewRun) bool {
 func ClassifyAutoReviewFailure(run ReviewRun) AutoReviewFailureClass {
 	if IsQuotaFailedReviewRun(run) {
 		return AutoReviewFailureQuota
+	}
+	if run.Body == ReviewRunAuthRequiredBody || run.Body == ReviewRunProviderKeyMissingBody {
+		return AutoReviewFailurePermanent
 	}
 	body := strings.ToLower(strings.TrimSpace(run.Body))
 	if body == "" {
