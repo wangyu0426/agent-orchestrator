@@ -167,16 +167,15 @@ func (o *Observer) reconcileConversationFeedback(
 		existingByID[r.CommentID] = r
 	}
 
-	// Establish baseline cutoff on first observation after enablement so historic
-	// comments are never replayed on rollout.
+	// Establish baseline cutoff so historic comments are never replayed on rollout.
+	// cfg.EnabledAt always applies to newly seen comments; s.known.ObservedAt
+	// applies until a complete (!result.Partial) scan has initialized the PR.
 	var cutoff time.Time
-	if !initialized {
-		if cfg.EnabledAt != nil && !cfg.EnabledAt.IsZero() {
-			cutoff = cfg.EnabledAt.UTC()
-		}
-		if !s.known.ObservedAt.IsZero() && s.known.ObservedAt.UTC().After(cutoff) {
-			cutoff = s.known.ObservedAt.UTC()
-		}
+	if cfg.EnabledAt != nil && !cfg.EnabledAt.IsZero() {
+		cutoff = cfg.EnabledAt.UTC()
+	}
+	if !initialized && !s.known.ObservedAt.IsZero() && s.known.ObservedAt.UTC().After(cutoff) {
+		cutoff = s.known.ObservedAt.UTC()
 	}
 
 	presentIDs := make(map[string]bool, len(comments))
@@ -227,7 +226,7 @@ func (o *Observer) reconcileConversationFeedback(
 			if prev.State == domain.PRConversationFeedbackBaseline || prev.State == domain.PRConversationFeedbackSuperseded {
 				continue
 			}
-		} else if !initialized && !cutoff.IsZero() && !c.CreatedAt.IsZero() && c.CreatedAt.UTC().Before(cutoff) {
+		} else if !cutoff.IsZero() && !c.CreatedAt.IsZero() && c.CreatedAt.UTC().Before(cutoff) {
 			baseline := domain.PullRequestConversationFeedback{
 				PRURL:             prURL,
 				CommentID:         c.ID,
@@ -396,7 +395,7 @@ func (o *Observer) reconcileConversationFeedback(
 		}
 	}
 
-	if !initialized {
+	if !initialized && !result.Partial {
 		if err := fbStore.MarkPRConversationFeedbackInitialized(ctx, prURL, now); err != nil {
 			return false, err
 		}
