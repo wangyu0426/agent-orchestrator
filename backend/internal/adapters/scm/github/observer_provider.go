@@ -407,20 +407,22 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 
 // FetchConversationComments fetches top-level PR conversation comments using
 // paginated GraphQL retrieval so explicit operator feedback commands beyond the
-// 50-comment view-only window are never silently lost.
-func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) ([]ports.SCMConversationCommentObservation, error) {
+// 50-comment view-only window are never silently lost. If pagination stops
+// before the final page (unusable cursor or page cap), Partial is set to true.
+func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
 	var out []ports.SCMConversationCommentObservation
 	cursor := ""
+	partial := false
 	for page := 1; page <= githubConversationCommentMaxPages; page++ {
 		query := buildConversationCommentsQuery(ref, cursor)
 		data, err := p.client.doGraphQL(ctx, query, nil)
 		if err != nil {
-			return nil, fmt.Errorf("github scm: fetch conversation comments for %s#%d: %w", repoFullName(ref.Repo), ref.Number, err)
+			return ports.SCMConversationCommentsResult{}, fmt.Errorf("github scm: fetch conversation comments for %s#%d: %w", repoFullName(ref.Repo), ref.Number, err)
 		}
 		repoData, _ := data["repo"].(map[string]any)
 		pr, _ := repoData["pullRequest"].(map[string]any)
 		if pr == nil {
-			return nil, fmt.Errorf("%w: pull request %s#%d not found in conversation comments response", ErrNotFound, repoFullName(ref.Repo), ref.Number)
+			return ports.SCMConversationCommentsResult{}, fmt.Errorf("%w: pull request %s#%d not found in conversation comments response", ErrNotFound, repoFullName(ref.Repo), ref.Number)
 		}
 		conn, _ := pr["comments"].(map[string]any)
 		for _, n := range nodes(conn["nodes"]) {
@@ -446,15 +448,17 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 		if nextCursor == "" || nextCursor == cursor {
 			p.logger.Warn("github scm: conversation comments page is partial with unusable cursor",
 				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
 			break
 		}
 		cursor = nextCursor
 		if page == githubConversationCommentMaxPages {
 			p.logger.Warn("github scm: conversation comments page limit reached",
 				"repo", repoFullName(ref.Repo), "pr", ref.Number, "max_pages", githubConversationCommentMaxPages)
+			partial = true
 		}
 	}
-	return out, nil
+	return ports.SCMConversationCommentsResult{Comments: out, Partial: partial}, nil
 }
 
 func buildConversationCommentsQuery(ref ports.SCMPRRef, cursor string) string {

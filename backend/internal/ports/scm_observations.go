@@ -380,6 +380,15 @@ type SCMConversationCommentObservation struct {
 	UpdatedAt time.Time
 }
 
+// SCMConversationCommentsResult carries paginated top-level PR conversation
+// comments together with a Partial flag indicating whether retrieval stopped
+// before the last page (page cap or unusable cursor). When Partial is true,
+// callers must not treat comments absent from Comments as deleted.
+type SCMConversationCommentsResult struct {
+	Comments []SCMConversationCommentObservation
+	Partial  bool
+}
+
 // SCMMergeabilityObservation is the normalized mergeability verdict.
 type SCMMergeabilityObservation struct {
 	// State is AO's normalized mergeability state.

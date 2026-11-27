@@ -13,7 +13,7 @@ import (
 // ConversationCommentProvider is an optional provider capability for paginated
 // top-level PR conversation comment retrieval.
 type ConversationCommentProvider interface {
-	FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) ([]ports.SCMConversationCommentObservation, error)
+	FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error)
 }
 
 // conversationFeedbackStore is the optional persistence capability for durable
@@ -125,9 +125,10 @@ func (o *Observer) reconcileConversationFeedback(
 	fbStore conversationFeedbackStore,
 	s *subject,
 	cfg domain.PRCommentFeedbackConfig,
-	comments []ports.SCMConversationCommentObservation,
+	result ports.SCMConversationCommentsResult,
 	now time.Time,
 ) (bool, error) {
+	comments := result.Comments
 	prURL := s.known.URL
 	_, initialized, err := fbStore.GetPRConversationFeedbackState(ctx, prURL)
 	if err != nil {
@@ -269,21 +270,31 @@ func (o *Observer) reconcileConversationFeedback(
 		})
 	}
 
-	// Mark any previously active command that disappeared from the PR as deleted.
-	for _, prev := range existingRows {
-		if prev.State == domain.PRConversationFeedbackActive && !presentIDs[prev.CommentID] {
-			prev.State = domain.PRConversationFeedbackDeleted
-			prev.ObservedAt = now
-			if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
-				return false, err
+	// Mark any previously active command that disappeared from the PR as deleted,
+	// ONLY when every page of conversation comments was fetched. A partial listing
+	// must not infer deletion from absence.
+	if result.Partial {
+		o.logger.Warn("scm observer: conversation comments listing is partial; skipping absence-based deletion",
+			"pr", prURL,
+			"session", s.session.ID,
+			"fetched_count", len(comments),
+		)
+	} else {
+		for _, prev := range existingRows {
+			if prev.State == domain.PRConversationFeedbackActive && !presentIDs[prev.CommentID] {
+				prev.State = domain.PRConversationFeedbackDeleted
+				prev.ObservedAt = now
+				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+					return false, err
+				}
+				o.logger.Info("scm observer: conversation feedback deleted",
+					"event", "ignored",
+					"pr", prURL,
+					"session", s.session.ID,
+					"comment_id", prev.CommentID,
+					"reason", "deleted",
+				)
 			}
-			o.logger.Info("scm observer: conversation feedback deleted",
-				"event", "ignored",
-				"pr", prURL,
-				"session", s.session.ID,
-				"comment_id", prev.CommentID,
-				"reason", "deleted",
-			)
 		}
 	}
 
@@ -318,6 +329,15 @@ func (o *Observer) reconcileConversationFeedback(
 				"body_hash", item.BodyHash,
 				"state", item.State,
 			)
+		}
+	}
+
+	if result.Partial && !hasActive {
+		for _, prev := range existingRows {
+			if prev.State == domain.PRConversationFeedbackActive && !presentIDs[prev.CommentID] {
+				hasActive = true
+				break
+			}
 		}
 	}
 
