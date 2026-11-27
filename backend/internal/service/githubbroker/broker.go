@@ -254,12 +254,20 @@ func (b *Broker) IssueToken(ctx context.Context, req IssueRequest) (IssueRespons
 		return IssueResponse{}, err
 	}
 
-	scoped, err := b.provider.MintScopedToken(ctx, githubapp.ScopedTokenRequest{
+	mintReq := githubapp.ScopedTokenRequest{
 		Repositories: []string{repoName},
 		Permissions:  cloneMap(b.permissions),
-	})
+	}
+	scoped, err := b.provider.MintScopedToken(ctx, mintReq)
 	if err != nil {
 		return IssueResponse{}, fmt.Errorf("githubbroker: mint token: %w", errors.New(githubapp.Redact(err.Error())))
+	}
+	// Verify that the GitHub installation actually minted a token bound to the
+	// exact authorized owner/repo. This fails closed if AO_GITHUB_APP_INSTALLATION_OWNER
+	// is misconfigured for the installation ID or if GitHub returns a different repo.
+	if len(scoped.FullNames) != 1 || !strings.EqualFold(scoped.FullNames[0], fullRepo) {
+		b.provider.InvalidateScopedToken(mintReq)
+		return IssueResponse{}, fmt.Errorf("%w: minted token scope %v does not match authorized repository %q", ErrForbiddenRepo, scoped.FullNames, fullRepo)
 	}
 
 	return IssueResponse{

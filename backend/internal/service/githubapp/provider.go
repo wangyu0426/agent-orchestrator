@@ -84,12 +84,14 @@ type Config struct {
 type cachedToken struct {
 	token     string
 	expiresAt time.Time
+	fullNames []string
 }
 
 type inflightRefresh struct {
 	done      chan struct{}
 	token     string
 	expiresAt time.Time
+	fullNames []string
 	err       error
 }
 
@@ -105,6 +107,7 @@ type ScopedToken struct {
 	Token        string
 	ExpiresAt    time.Time
 	Repositories []string
+	FullNames    []string
 	Permissions  map[string]string
 }
 
@@ -280,6 +283,7 @@ func (p *Provider) MintScopedToken(ctx context.Context, req ScopedTokenRequest) 
 			Token:        entry.token,
 			ExpiresAt:    entry.expiresAt,
 			Repositories: append([]string(nil), normalized...),
+			FullNames:    append([]string(nil), entry.fullNames...),
 			Permissions:  clonePermissions(perms),
 		}
 		p.mu.Unlock()
@@ -296,6 +300,7 @@ func (p *Provider) MintScopedToken(ctx context.Context, req ScopedTokenRequest) 
 				Token:        call.token,
 				ExpiresAt:    call.expiresAt,
 				Repositories: append([]string(nil), normalized...),
+				FullNames:    append([]string(nil), call.fullNames...),
 				Permissions:  clonePermissions(perms),
 			}, nil
 		case <-ctx.Done():
@@ -318,18 +323,20 @@ func (p *Provider) MintScopedToken(ctx context.Context, req ScopedTokenRequest) 
 		exchangeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 
-		token, expiresAt, err := p.exchangeToken(exchangeCtx, normalized, perms)
+		token, expiresAt, fullNames, err := p.exchangeToken(exchangeCtx, normalized, perms)
 
 		p.mu.Lock()
 		if err == nil {
 			p.cache[scopeKey] = cachedToken{
 				token:     token,
 				expiresAt: expiresAt,
+				fullNames: fullNames,
 			}
 		}
 		delete(p.inflight, scopeKey)
 		call.token = token
 		call.expiresAt = expiresAt
+		call.fullNames = fullNames
 		call.err = err
 		close(call.done)
 		p.mu.Unlock()
@@ -344,6 +351,7 @@ func (p *Provider) MintScopedToken(ctx context.Context, req ScopedTokenRequest) 
 			Token:        call.token,
 			ExpiresAt:    call.expiresAt,
 			Repositories: append([]string(nil), normalized...),
+			FullNames:    append([]string(nil), call.fullNames...),
 			Permissions:  clonePermissions(perms),
 		}, nil
 	case <-ctx.Done():
@@ -456,11 +464,11 @@ func (p *Provider) isFresh(entry cachedToken, now time.Time) bool {
 	return now.Add(p.refreshSkew).Before(entry.expiresAt)
 }
 
-func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[string]string) (string, time.Time, error) {
+func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[string]string) (string, time.Time, []string, error) {
 	now := p.clock()
 	jwt, err := p.SignJWT(now)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, nil, err
 	}
 
 	var reqBody io.Reader = http.NoBody
@@ -473,7 +481,7 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[
 			Permissions:  perms,
 		})
 		if err != nil {
-			return "", time.Time{}, fmt.Errorf("%w: encode scope payload: %w", ErrTokenExchange, err)
+			return "", time.Time{}, nil, fmt.Errorf("%w: encode scope payload: %w", ErrTokenExchange, err)
 		}
 		reqBody = bytes.NewReader(payload)
 	}
@@ -481,7 +489,7 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[
 	endpoint := fmt.Sprintf("%s/app/installations/%d/access_tokens", p.baseURL, p.installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reqBody)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: build request: %v", ErrTokenExchange, Redact(err.Error()))
+		return "", time.Time{}, nil, fmt.Errorf("%w: build request: %v", ErrTokenExchange, Redact(err.Error()))
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -493,47 +501,57 @@ func (p *Provider) exchangeToken(ctx context.Context, repos []string, perms map[
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: %v", ErrTokenExchange, Redact(err.Error()))
+		return "", time.Time{}, nil, fmt.Errorf("%w: %v", ErrTokenExchange, Redact(err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: read response: %v", ErrTokenExchange, Redact(err.Error()))
+		return "", time.Time{}, nil, fmt.Errorf("%w: read response: %v", ErrTokenExchange, Redact(err.Error()))
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		msg := extractGitHubMessage(body)
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return "", time.Time{}, fmt.Errorf("%w: status %d: %s", ErrAuthFailed, resp.StatusCode, Redact(msg))
+			return "", time.Time{}, nil, fmt.Errorf("%w: status %d: %s", ErrAuthFailed, resp.StatusCode, Redact(msg))
 		}
-		return "", time.Time{}, fmt.Errorf("%w: status %d: %s", ErrTokenExchange, resp.StatusCode, Redact(msg))
+		return "", time.Time{}, nil, fmt.Errorf("%w: status %d: %s", ErrTokenExchange, resp.StatusCode, Redact(msg))
 	}
 
 	var parsed struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
+		Token        string `json:"token"`
+		ExpiresAt    string `json:"expires_at"`
+		Repositories []struct {
+			FullName string `json:"full_name"`
+		} `json:"repositories"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: decode response: %v", ErrTokenExchange, Redact(err.Error()))
+		return "", time.Time{}, nil, fmt.Errorf("%w: decode response: %v", ErrTokenExchange, Redact(err.Error()))
 	}
 	token := strings.TrimSpace(parsed.Token)
 	if token == "" {
-		return "", time.Time{}, fmt.Errorf("%w: empty token in response", ErrTokenExchange)
+		return "", time.Time{}, nil, fmt.Errorf("%w: empty token in response", ErrTokenExchange)
 	}
 
 	if strings.TrimSpace(parsed.ExpiresAt) == "" {
-		return "", time.Time{}, fmt.Errorf("%w: missing expires_at in response", ErrTokenExchange)
+		return "", time.Time{}, nil, fmt.Errorf("%w: missing expires_at in response", ErrTokenExchange)
 	}
 	expiresAt, err := time.Parse(time.RFC3339, parsed.ExpiresAt)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: invalid expires_at: %w", ErrTokenExchange, err)
+		return "", time.Time{}, nil, fmt.Errorf("%w: invalid expires_at: %w", ErrTokenExchange, err)
 	}
 	if !expiresAt.After(p.clock()) {
-		return "", time.Time{}, fmt.Errorf("%w: token expires_at %s is not in the future", ErrTokenExchange, parsed.ExpiresAt)
+		return "", time.Time{}, nil, fmt.Errorf("%w: token expires_at %s is not in the future", ErrTokenExchange, parsed.ExpiresAt)
 	}
 
-	return token, expiresAt, nil
+	var fullNames []string
+	for _, repo := range parsed.Repositories {
+		if fn := strings.TrimSpace(repo.FullName); fn != "" {
+			fullNames = append(fullNames, fn)
+		}
+	}
+
+	return token, expiresAt, fullNames, nil
 }
 
 func validateBaseURL(raw string) error {

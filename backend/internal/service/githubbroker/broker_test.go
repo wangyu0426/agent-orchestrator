@@ -81,8 +81,9 @@ func TestBroker_ScopedIssuanceExpiryRefreshAndConcurrency(t *testing.T) {
 
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      fmt.Sprintf("ghs_scoped_token_%02d_abcdefghij", n),
-			"expires_at": exp.Format(time.RFC3339),
+			"token":        fmt.Sprintf("ghs_scoped_token_%02d_abcdefghij", n),
+			"expires_at":   exp.Format(time.RFC3339),
+			"repositories": []map[string]string{{"full_name": "wangyu0426/agent-orchestrator"}},
 		})
 	})
 
@@ -169,8 +170,9 @@ func TestBroker_UnauthorizedRepoSessionAndRevocation(t *testing.T) {
 	provider, _ := newMockGitHubProvider(t, func() time.Time { return now }, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      "ghs_valid_token_000000000000",
-			"expires_at": now.Add(1 * time.Hour).Format(time.RFC3339),
+			"token":        "ghs_valid_token_000000000000",
+			"expires_at":   now.Add(1 * time.Hour).Format(time.RFC3339),
+			"repositories": []map[string]string{{"full_name": "org/repo-a"}},
 		})
 	})
 
@@ -251,5 +253,38 @@ func TestBroker_RedactionAndIsolationFailClosed(t *testing.T) {
 	}
 	if err := ValidateIsolation("unsafe-same-uid", keyPath); err != nil {
 		t.Fatalf("expected unsafe-same-uid to pass, got %v", err)
+	}
+}
+
+func TestBroker_FailsClosedOnInstallationOwnerMismatch(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	provider, _ := newMockGitHubProvider(t, func() time.Time { return now }, func(w http.ResponseWriter, r *http.Request) {
+		// Simulate misconfigured AO_GITHUB_APP_INSTALLATION_OWNER: installation
+		// actually owns "other-owner/agent-orchestrator", not "wangyu0426/agent-orchestrator".
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":        "ghs_wrong_owner_token_1234567890",
+			"expires_at":   now.Add(1 * time.Hour).Format(time.RFC3339),
+			"repositories": []map[string]string{{"full_name": "other-owner/agent-orchestrator"}},
+		})
+	})
+
+	broker, err := New(Config{
+		Provider:     provider,
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sessToken, err := broker.RegisterSession("sess-mismatch", "proj-1", []string{"wangyu0426/agent-orchestrator"})
+	if err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if _, err := broker.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-mismatch",
+		BrokerToken: sessToken,
+		Repository:  "wangyu0426/agent-orchestrator",
+	}); !errors.Is(err, ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo when installation owner mismatches, got %v", err)
 	}
 }

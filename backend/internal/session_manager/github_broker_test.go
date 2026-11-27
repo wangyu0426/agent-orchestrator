@@ -21,6 +21,7 @@ func (stubBrokerMinter) MintScopedToken(_ context.Context, req githubapp.ScopedT
 		Token:        "ghs_session_mgr_token_1234567890",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 		Repositories: req.Repositories,
+		FullNames:    []string{"wangyu0426/agent-orchestrator"},
 		Permissions:  req.Permissions,
 	}, nil
 }

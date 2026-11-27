@@ -26,6 +26,7 @@ func (s *stubTokenMinter) MintScopedToken(_ context.Context, req githubapp.Scope
 		Token:        s.token,
 		ExpiresAt:    s.expiresAt,
 		Repositories: req.Repositories,
+		FullNames:    []string{"wangyu0426/agent-orchestrator"},
 		Permissions:  req.Permissions,
 	}, nil
 }
