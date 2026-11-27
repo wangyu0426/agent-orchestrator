@@ -733,14 +733,33 @@ func TestPRCommentFeedback_DisableRollbackSuppressesDeferredDelivery(t *testing.
 		t.Fatalf("expected 0 deliveries while waiting_input, got %d", len(messenger.snapshot()))
 	}
 
-	// Operator rolls back by disabling prCommentFeedback.enabled, then worker resumes.
-	proj.Config.PRCommentFeedback.Enabled = false
+	// Operator removes the author from trustedAuthors while keeping enabled=true:
+	// previously deferred command must NOT be delivered.
+	proj.Config.PRCommentFeedback.TrustedAuthors = []string{"other-operator"}
 	if err := st.UpsertProject(context.Background(), proj); err != nil {
-		t.Fatalf("UpsertProject disable: %v", err)
+		t.Fatalf("UpsertProject untrust: %v", err)
 	}
 	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
 	if err := st.UpdateSession(context.Background(), rec); err != nil {
 		t.Fatalf("UpdateSession: %v", err)
+	}
+	if err := lcm.ApplyPRObservation(context.Background(), rec.ID, ports.PRObservation{
+		Fetched: true,
+		URL:     prURL,
+		Number:  9,
+	}); err != nil {
+		t.Fatalf("ApplyPRObservation after untrust: %v", err)
+	}
+	if len(messenger.snapshot()) != 0 {
+		t.Fatalf("removed trustedAuthor must not deliver deferred feedback, got %+v", messenger.snapshot())
+	}
+
+	// Operator rolls back by disabling prCommentFeedback.enabled, then triggers observation:
+	// previously deferred row must still NOT be delivered.
+	proj.Config.PRCommentFeedback.Enabled = false
+	proj.Config.PRCommentFeedback.TrustedAuthors = []string{"wangyu0426"}
+	if err := st.UpsertProject(context.Background(), proj); err != nil {
+		t.Fatalf("UpsertProject disable: %v", err)
 	}
 
 	// Trigger a direct PR observation in lifecycle: must NOT deliver the previously deferred row.

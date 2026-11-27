@@ -198,6 +198,14 @@ func (o *Observer) reconcileConversationFeedback(
 
 		allowed, authReason := domain.AuthorizePRCommentFeedback(cfg, c.Author, c.IsBot)
 		if !allowed {
+			if prev, exists := existingByID[c.ID]; exists && prev.State == domain.PRConversationFeedbackActive {
+				prev.State = domain.PRConversationFeedbackDeleted
+				prev.UpdatedAtProvider = c.UpdatedAt
+				prev.ObservedAt = now
+				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+					return false, err
+				}
+			}
 			o.logger.Info("scm observer: conversation feedback ignored",
 				"event", "ignored",
 				"pr", prURL,

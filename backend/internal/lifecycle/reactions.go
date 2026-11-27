@@ -321,6 +321,17 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 					return fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
 				}
 				for _, item := range fbItems {
+					if allowed, reason := domain.AuthorizePRCommentFeedback(proj.Config.PRCommentFeedback, item.Author, false); !allowed {
+						slog.Default().Info("lifecycle: conversation feedback ignored",
+							"event", "ignored",
+							"session", id,
+							"pr", o.URL,
+							"comment_id", item.CommentID,
+							"author", item.Author,
+							"reason", reason,
+						)
+						continue
+					}
 					if !item.AutoInjectReview {
 						slog.Default().Info("lifecycle: conversation feedback ignored",
 							"event", "ignored",
