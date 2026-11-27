@@ -57,6 +57,7 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 			GitHubHost:     cfg.GitHubHost,
 			PrivateKeyPath: cfg.PrivateKeyPath,
 			IsolationMode:  cfg.WorkerIsolationMode,
+			GrantsPath:     cfg.GrantsPath,
 			Logger:         logger,
 		})
 		if err != nil {

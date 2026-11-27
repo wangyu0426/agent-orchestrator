@@ -14,9 +14,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -71,7 +74,10 @@ type Config struct {
 	Permissions    map[string]string
 	PrivateKeyPath string
 	IsolationMode  string
-	Logger         *slog.Logger
+	// GrantsPath optionally persists session grant verifiers (never raw tokens)
+	// so surviving live workers stay authorized across daemon restarts.
+	GrantsPath string
+	Logger     *slog.Logger
 }
 
 type sessionGrant struct {
@@ -93,6 +99,7 @@ type Broker struct {
 	allowedRepos map[string]string
 	githubHost   string
 	permissions  map[string]string
+	grantsPath   string
 	logger       *slog.Logger
 
 	mu     sync.RWMutex
@@ -164,14 +171,19 @@ func New(cfg Config) (*Broker, error) {
 		logger.Warn("github app worker broker running with unsafe-same-uid override; same-UID workers share filesystem access with daemon")
 	}
 
-	return &Broker{
+	b := &Broker{
 		provider:     cfg.Provider,
 		allowedRepos: allowed,
 		githubHost:   host,
 		permissions:  perms,
+		grantsPath:   strings.TrimSpace(cfg.GrantsPath),
 		logger:       logger,
 		grants:       make(map[domain.SessionID]*sessionGrant),
-	}, nil
+	}
+	if err := b.loadGrants(); err != nil {
+		return nil, fmt.Errorf("githubbroker: load persisted grants: %w", err)
+	}
+	return b, nil
 }
 
 // GitHubHost returns the GitHub host served by this broker.
@@ -224,7 +236,11 @@ func (b *Broker) RegisterSession(sessionID domain.SessionID, projectID domain.Pr
 		allowedRepos:  allowedMap,
 		canonicalFull: canonicalMap,
 	}
+	persistErr := b.persistGrantsLocked()
 	b.mu.Unlock()
+	if persistErr != nil {
+		b.logger.Warn("githubbroker: failed to persist session grants", "session", sessionID, "error", persistErr)
+	}
 
 	return token, nil
 }
@@ -235,11 +251,12 @@ func (b *Broker) RevokeSession(sessionID domain.SessionID) {
 		return
 	}
 	b.mu.Lock()
-	if grant, ok := b.grants[sessionID]; ok {
-		grant.revoked = true
-		grant.verifier = ""
-	}
+	delete(b.grants, sessionID)
+	persistErr := b.persistGrantsLocked()
 	b.mu.Unlock()
+	if persistErr != nil {
+		b.logger.Warn("githubbroker: failed to persist session revocation", "session", sessionID, "error", persistErr)
+	}
 }
 
 // IssueToken authenticates the session caller, validates the requested
@@ -381,4 +398,92 @@ func cloneMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+type persistedGrant struct {
+	SessionID domain.SessionID `json:"session_id"`
+	ProjectID domain.ProjectID `json:"project_id"`
+	Verifier  string           `json:"verifier"`
+	Repos     []string         `json:"repos"`
+}
+
+func (b *Broker) loadGrants() error {
+	if b.grantsPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(b.grantsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var records []persistedGrant
+	if err := json.Unmarshal(data, &records); err != nil {
+		return err
+	}
+	for _, rec := range records {
+		if rec.SessionID == "" || rec.Verifier == "" || len(rec.Repos) == 0 {
+			continue
+		}
+		allowedMap := make(map[string]string, len(rec.Repos))
+		canonicalMap := make(map[string]string, len(rec.Repos))
+		for _, raw := range rec.Repos {
+			full, repoName, err := parseOwnerRepo(raw)
+			if err != nil {
+				continue
+			}
+			key := strings.ToLower(full)
+			if _, ok := b.allowedRepos[key]; !ok {
+				continue
+			}
+			allowedMap[key] = repoName
+			canonicalMap[key] = full
+		}
+		if len(allowedMap) == 0 {
+			continue
+		}
+		b.grants[rec.SessionID] = &sessionGrant{
+			sessionID:     rec.SessionID,
+			projectID:     rec.ProjectID,
+			verifier:      rec.Verifier,
+			allowedRepos:  allowedMap,
+			canonicalFull: canonicalMap,
+		}
+	}
+	return nil
+}
+
+func (b *Broker) persistGrantsLocked() error {
+	if b.grantsPath == "" {
+		return nil
+	}
+	records := make([]persistedGrant, 0, len(b.grants))
+	for _, g := range b.grants {
+		if g.revoked || g.verifier == "" {
+			continue
+		}
+		repos := make([]string, 0, len(g.canonicalFull))
+		for _, full := range g.canonicalFull {
+			repos = append(repos, full)
+		}
+		records = append(records, persistedGrant{
+			SessionID: g.sessionID,
+			ProjectID: g.projectID,
+			Verifier:  g.verifier,
+			Repos:     repos,
+		})
+	}
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(b.grantsPath), 0o700); err != nil {
+		return err
+	}
+	tmpPath := b.grantsPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, b.grantsPath)
 }

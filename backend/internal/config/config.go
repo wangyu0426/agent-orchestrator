@@ -125,6 +125,7 @@ type GitHubAppConfig struct {
 	OperatorLogin       string
 	WorkerBrokerEnabled bool
 	WorkerIsolationMode string
+	GrantsPath          string
 }
 
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
@@ -601,6 +602,7 @@ func Load() (Config, error) {
 		default:
 			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_WORKER_ISOLATION %q: must be strict, external-sandbox, or unsafe-same-uid", isoMode)
 		}
+		cfg.GitHubApp.GrantsPath = filepath.Join(cfg.StateDir, "github-broker-grants.json")
 	}
 
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {

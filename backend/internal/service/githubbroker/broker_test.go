@@ -288,3 +288,74 @@ func TestBroker_FailsClosedOnInstallationOwnerMismatch(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo when installation owner mismatches, got %v", err)
 	}
 }
+
+func TestBroker_PersistsGrantVerifiersAcrossDaemonRestart(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	provider, _ := newMockGitHubProvider(t, func() time.Time { return now }, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":        "ghs_restarted_token_1234567890",
+			"expires_at":   now.Add(1 * time.Hour).Format(time.RFC3339),
+			"repositories": []map[string]string{{"full_name": "wangyu0426/agent-orchestrator"}},
+		})
+	})
+
+	grantsPath := filepath.Join(t.TempDir(), "state", "github-broker-grants.json")
+	broker1, err := New(Config{
+		Provider:     provider,
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
+		GrantsPath:   grantsPath,
+	})
+	if err != nil {
+		t.Fatalf("New broker1: %v", err)
+	}
+	sessToken, err := broker1.RegisterSession("sess-surviving", "proj-1", []string{"wangyu0426/agent-orchestrator"})
+	if err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+
+	// Verify raw broker token is never persisted on disk.
+	rawDisk, err := os.ReadFile(grantsPath)
+	if err != nil {
+		t.Fatalf("read grants file: %v", err)
+	}
+	if strings.Contains(string(rawDisk), sessToken) {
+		t.Fatalf("raw broker token leaked to grants file")
+	}
+
+	// Simulate daemon restart by constructing a fresh Broker with the same GrantsPath.
+	broker2, err := New(Config{
+		Provider:     provider,
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
+		GrantsPath:   grantsPath,
+	})
+	if err != nil {
+		t.Fatalf("New broker2: %v", err)
+	}
+	resp, err := broker2.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-surviving",
+		BrokerToken: sessToken,
+		Repository:  "wangyu0426/agent-orchestrator",
+	})
+	if err != nil || resp.Token != "ghs_restarted_token_1234567890" {
+		t.Fatalf("expected surviving session to remain authorized after restart, got resp=%+v err=%v", resp, err)
+	}
+
+	// Revocation persists across restart too.
+	broker2.RevokeSession("sess-surviving")
+	broker3, err := New(Config{
+		Provider:     provider,
+		AllowedRepos: []string{"wangyu0426/agent-orchestrator"},
+		GrantsPath:   grantsPath,
+	})
+	if err != nil {
+		t.Fatalf("New broker3: %v", err)
+	}
+	if _, err := broker3.IssueToken(context.Background(), IssueRequest{
+		SessionID:   "sess-surviving",
+		BrokerToken: sessToken,
+		Repository:  "wangyu0426/agent-orchestrator",
+	}); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected revoked session to stay unauthorized after restart, got %v", err)
+	}
+}
