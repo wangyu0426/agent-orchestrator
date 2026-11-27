@@ -206,6 +206,15 @@ func TestManager_GitHubBrokerLifecycleWiring(t *testing.T) {
 		t.Fatalf("expected ErrForbiddenRepo for plaintext http GitHub origin, got %v", err)
 	}
 
+	// HTTPS GitHub origin with explicit port fails closed.
+	store.projects["proj-https-port"] = domain.ProjectRecord{
+		ID:            "proj-https-port",
+		RepoOriginURL: "https://github.com:443/wangyu0426/agent-orchestrator.git",
+	}
+	if _, _, err := mgr.launchRuntimeEnvForHarness(context.Background(), "sess-https-port", "proj-https-port", "", nil, domain.AgentHarness("codex")); !errors.Is(err, githubbroker.ErrForbiddenRepo) {
+		t.Fatalf("expected ErrForbiddenRepo for https GitHub origin with explicit port, got %v", err)
+	}
+
 	// GitHub project outside allowlist still fails closed.
 	store.projects["proj-unlisted"] = domain.ProjectRecord{
 		ID:            "proj-unlisted",
