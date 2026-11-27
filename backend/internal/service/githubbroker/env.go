@@ -91,6 +91,7 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		{"credential.helper", ""},
 		{"credential.helper", helperCmd},
 		{"credential.useHttpPath", "true"},
+		{"protocol.ssh.allow", "never"},
 		{"http.extraHeader", ""},
 		{fmt.Sprintf("http.https://%s/.extraHeader", host), ""},
 		{fmt.Sprintf("http.https://%s.extraHeader", host), ""},

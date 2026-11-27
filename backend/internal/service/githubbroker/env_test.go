@@ -46,17 +46,20 @@ func TestWorkerEnv_ScrubsPersonalTokensAndRewritesSSH(t *testing.T) {
 	if env["GIT_CONFIG_KEY_2"] != "credential.useHttpPath" || env["GIT_CONFIG_VALUE_2"] != "true" {
 		t.Fatalf("expected credential.useHttpPath=true, got %q=%q", env["GIT_CONFIG_KEY_2"], env["GIT_CONFIG_VALUE_2"])
 	}
-	if env["GIT_CONFIG_KEY_3"] != "http.extraHeader" || env["GIT_CONFIG_VALUE_3"] != "" {
-		t.Fatalf("expected http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_3"], env["GIT_CONFIG_VALUE_3"])
+	if env["GIT_CONFIG_KEY_3"] != "protocol.ssh.allow" || env["GIT_CONFIG_VALUE_3"] != "never" {
+		t.Fatalf("expected protocol.ssh.allow=never, got %q=%q", env["GIT_CONFIG_KEY_3"], env["GIT_CONFIG_VALUE_3"])
 	}
-	if env["GIT_CONFIG_KEY_4"] != "http.https://github.com/.extraHeader" || env["GIT_CONFIG_VALUE_4"] != "" {
-		t.Fatalf("expected host http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_4"], env["GIT_CONFIG_VALUE_4"])
+	if env["GIT_CONFIG_KEY_4"] != "http.extraHeader" || env["GIT_CONFIG_VALUE_4"] != "" {
+		t.Fatalf("expected http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_4"], env["GIT_CONFIG_VALUE_4"])
 	}
-	if env["GIT_CONFIG_KEY_6"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_6"] != "git@github.com:" {
-		t.Fatalf("expected SSH rewrite for git@github.com:, got %q=%q", env["GIT_CONFIG_KEY_6"], env["GIT_CONFIG_VALUE_6"])
+	if env["GIT_CONFIG_KEY_5"] != "http.https://github.com/.extraHeader" || env["GIT_CONFIG_VALUE_5"] != "" {
+		t.Fatalf("expected host http.extraHeader reset, got %q=%q", env["GIT_CONFIG_KEY_5"], env["GIT_CONFIG_VALUE_5"])
 	}
-	if env["GIT_CONFIG_KEY_8"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_8"] != "ssh://git@github.com:22/" {
-		t.Fatalf("expected SSH port-22 rewrite, got %q=%q", env["GIT_CONFIG_KEY_8"], env["GIT_CONFIG_VALUE_8"])
+	if env["GIT_CONFIG_KEY_7"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_7"] != "git@github.com:" {
+		t.Fatalf("expected SSH rewrite for git@github.com:, got %q=%q", env["GIT_CONFIG_KEY_7"], env["GIT_CONFIG_VALUE_7"])
+	}
+	if env["GIT_CONFIG_KEY_9"] != "url.https://github.com/.insteadOf" || env["GIT_CONFIG_VALUE_9"] != "ssh://git@github.com:22/" {
+		t.Fatalf("expected SSH port-22 rewrite, got %q=%q", env["GIT_CONFIG_KEY_9"], env["GIT_CONFIG_VALUE_9"])
 	}
 }
 
