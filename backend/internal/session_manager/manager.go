@@ -3108,7 +3108,6 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 	}
 	ctx, cancelTeardown := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancelTeardown()
-	m.revokeGitHubBrokerSession(id)
 	// Automatic archive must never cancel a worker that is still provisioning.
 	if !archiveOnMerge {
 		if err := m.cancelAsyncChatSpawn(ctx, id); err != nil {
@@ -3152,6 +3151,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 		workspaceProjectRows = rows
 		workspaceProject = true
 	}
+	m.revokeGitHubBrokerSession(id)
 	var releaseArchiveInput func()
 	var stopArchiveChat func(context.Context) error
 	if archiveOnMerge {
