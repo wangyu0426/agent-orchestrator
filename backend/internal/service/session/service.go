@@ -343,15 +343,15 @@ func New(manager *sessionmanager.Manager, store Store) *Service {
 // path keeps existing tests and callers small; daemon wiring uses NewWithDeps
 // to supply SCM observation for PR claiming.
 type Deps struct {
-	Manager   commander
-	Store     Store
+	Manager             commander
+	Store               Store
 	PRClaimer           ports.PRClaimer
 	SCM                 scmProvider
 	AttributionIdentity ports.ScopedIdentityResolver
-	Tracker   ports.Tracker
-	Clock     func() time.Time
-	DataDir   string
-	Telemetry ports.EventSink
+	Tracker             ports.Tracker
+	Clock               func() time.Time
+	DataDir             string
+	Telemetry           ports.EventSink
 	// Milestones durably records the install's first spawned session, so
 	// ao.sessions.spawned carries first_for_install. Left nil, it is omitted.
 	Milestones ports.InstallMilestones
