@@ -7327,6 +7327,8 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 		if err != nil {
 			return err
 		}
+	} else {
+		m.githubBroker.RevokeSession(id)
 	}
 
 	aoBin := "ao"
