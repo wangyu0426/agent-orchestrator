@@ -2032,6 +2032,18 @@ func TestFetchConversationCommentsMissingPaginationMetadataIsPartial(t *testing.
 			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": nil},
 			wantCommentCount: 1,
 		},
+		{
+			name:             "missing hasPreviousPage",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": map[string]any{}},
+			wantCommentCount: 1,
+		},
+		{
+			name:             "non-boolean hasPreviousPage",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": map[string]any{"hasPreviousPage": "false"}},
+			wantCommentCount: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -466,7 +466,14 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 			partial = true
 			break
 		}
-		if !boolv(pi["hasPreviousPage"]) {
+		hasPreviousPage, ok := pi["hasPreviousPage"].(bool)
+		if !ok {
+			p.logger.Warn("github scm: conversation comments page is partial with missing or invalid hasPreviousPage",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
+		if !hasPreviousPage {
 			break
 		}
 		prevCursor := str(pi["startCursor"])
