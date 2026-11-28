@@ -7288,12 +7288,14 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 		return nil
 	}
 	var repos []string
+	var repoDir string
 	if m.store != nil && project != "" {
 		proj, found, err := m.store.GetProject(ctx, string(project))
 		if err != nil {
 			return fmt.Errorf("read project %s for github broker: %w", project, err)
 		}
 		if found {
+			repoDir = strings.TrimSpace(proj.Path)
 			ownerRepo, isGitHub, parseErr := extractOwnerRepoFromOriginURL(proj.RepoOriginURL, m.githubBroker.GitHubHost())
 			if parseErr != nil {
 				return parseErr
@@ -7348,13 +7350,16 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 		}
 	}
 
+	extraHeaderKeys := githubbroker.CollectGitHubExtraHeaderKeys(ctx, repoDir, m.githubBroker.GitHubHost())
 	brokerEnv := githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
-		BrokerToken: brokerToken,
-		GitHubHost:  m.githubBroker.GitHubHost(),
-		AOBinary:    aoBin,
-		GHConfigDir: ghConfigDir,
-		GHShimDir:   ghShimDir,
-		CurrentPATH: env["PATH"],
+		BrokerToken:            brokerToken,
+		GitHubHost:             m.githubBroker.GitHubHost(),
+		AOBinary:               aoBin,
+		GHConfigDir:            ghConfigDir,
+		GHShimDir:              ghShimDir,
+		CurrentPATH:            env["PATH"],
+		AuthorizedRepos:        repos,
+		ExtraHeaderKeysToClear: extraHeaderKeys,
 	})
 	for k, v := range brokerEnv {
 		setProtectedEnv(env, k, v, envKeysCaseInsensitive)

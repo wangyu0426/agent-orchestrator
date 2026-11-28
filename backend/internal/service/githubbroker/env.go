@@ -1,12 +1,18 @@
 package githubbroker
 
 import (
+	"bufio"
+	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 const (
@@ -36,12 +42,14 @@ var InheritedCredentialEnvKeys = []string{
 
 // WorkerEnvOptions configures the worker environment overlays for broker mode.
 type WorkerEnvOptions struct {
-	BrokerToken string
-	GitHubHost  string
-	AOBinary    string
-	GHConfigDir string
-	GHShimDir   string
-	CurrentPATH string
+	BrokerToken            string
+	GitHubHost             string
+	AOBinary               string
+	GHConfigDir            string
+	GHShimDir              string
+	CurrentPATH            string
+	AuthorizedRepos        []string
+	ExtraHeaderKeysToClear []string
 }
 
 // WorkerEnv returns environment variables that bind a worker process to the
@@ -101,6 +109,37 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 		{fmt.Sprintf("http.http://%s/.extraHeader", host), ""},
 		{fmt.Sprintf("http.http://%s.extraHeader", host), ""},
 	}
+	seenKeys := make(map[string]struct{}, len(gitConfigs)+len(opts.AuthorizedRepos)*4+len(opts.ExtraHeaderKeysToClear))
+	for _, kv := range gitConfigs {
+		seenKeys[strings.ToLower(kv[0])] = struct{}{}
+	}
+	addResetKey := func(key string) {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return
+		}
+		lk := strings.ToLower(k)
+		if _, exists := seenKeys[lk]; exists {
+			return
+		}
+		seenKeys[lk] = struct{}{}
+		gitConfigs = append(gitConfigs, [2]string{k, ""})
+	}
+	for _, rawRepo := range opts.AuthorizedRepos {
+		full, _, err := parseOwnerRepo(rawRepo)
+		if err != nil {
+			continue
+		}
+		for _, scheme := range []string{"https", "http"} {
+			addResetKey(fmt.Sprintf("http.%s://%s/%s.extraHeader", scheme, host, full))
+			addResetKey(fmt.Sprintf("http.%s://%s/%s.git.extraHeader", scheme, host, full))
+			addResetKey(fmt.Sprintf("http.%s://%s/%s/.extraHeader", scheme, host, full))
+			addResetKey(fmt.Sprintf("http.%s://%s/%s.git/.extraHeader", scheme, host, full))
+		}
+	}
+	for _, key := range opts.ExtraHeaderKeysToClear {
+		addResetKey(key)
+	}
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(gitConfigs))
 	for i, kv := range gitConfigs {
 		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", i)] = kv[0]
@@ -147,4 +186,57 @@ func EnsureGHShim(dir, aoBinary string) (string, error) {
 
 func shellQuoteForGit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// CollectGitHubExtraHeaderKeys inspects effective Git config (system, global,
+// and repository-local when repoDir is non-empty) and returns every
+// `http.<url>.extraheader` key whose URL targets host (or bare `http.extraheader`
+// when host matches). Non-GitHub hosts (such as GitLab) are untouched.
+func CollectGitHubExtraHeaderKeys(ctx context.Context, repoDir, host string) []string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		h = DefaultGitHubHost
+	}
+	args := []string{"config", "--name-only", "--get-regexp", `^http\..*\.extraheader$`}
+	if strings.TrimSpace(repoDir) != "" {
+		args = append([]string{"-C", repoDir}, args...)
+	}
+	out, err := process.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var keys []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		key := strings.TrimSpace(scanner.Text())
+		if key == "" {
+			continue
+		}
+		if !extraHeaderKeyTargetsHost(key, h) {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func extraHeaderKeyTargetsHost(key, host string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if !strings.HasPrefix(lower, "http.") || !strings.HasSuffix(lower, ".extraheader") {
+		return false
+	}
+	middle := key[len("http.") : len(key)-len(".extraheader")]
+	u, err := url.Parse(middle)
+	if err != nil {
+		return false
+	}
+	uHost := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	uHostPort := strings.ToLower(strings.TrimSpace(u.Host))
+	return uHost == host || uHostPort == host
 }

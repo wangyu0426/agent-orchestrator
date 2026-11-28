@@ -1,9 +1,15 @@
 package githubbroker
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -75,5 +81,93 @@ func TestEnsureGHShim_WritesExecutableShim(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "github-broker gh") {
 		t.Fatalf("unexpected shim contents: %s", string(data))
+	}
+}
+
+func TestWorkerEnv_BlocksRepoSpecificExtraHeaderInRealGitSubprocess(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	var mu sync.Mutex
+	var receivedAuth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			mu.Lock()
+			receivedAuth = append(receivedAuth, auth)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	parsedSrv, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	hostPort := parsedSrv.Host // e.g. 127.0.0.1:xxxxx
+	repoURL := srv.URL + "/owner/repo.git"
+
+	repoDir := t.TempDir()
+	runGit := func(extraEnv map[string]string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = repoDir
+		env := os.Environ()
+		for k, v := range extraEnv {
+			env = append(env, k+"="+v)
+		}
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
+
+	if out, err := runGit(nil, "init"); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	// Configure a repo-specific Authorization extraHeader that would bypass host-level resets.
+	dummyAuth := "Basic ZHVtbXk6ZHVtbXk="
+	if out, err := runGit(nil, "config", "--local", "http."+repoURL+".extraHeader", "Authorization: "+dummyAuth); err != nil {
+		t.Fatalf("git config extraHeader: %v (%s)", err, out)
+	}
+	// Also configure an unrelated non-GitHub host extraHeader and verify it is NOT cleared.
+	if out, err := runGit(nil, "config", "--local", "http.https://gitlab.example.com/group/proj.git.extraHeader", "Authorization: Bearer gl-dummy"); err != nil {
+		t.Fatalf("git config gitlab extraHeader: %v (%s)", err, out)
+	}
+
+	keysToClear := CollectGitHubExtraHeaderKeys(context.Background(), repoDir, hostPort)
+	for _, k := range keysToClear {
+		if strings.Contains(strings.ToLower(k), "gitlab.example.com") {
+			t.Fatalf("CollectGitHubExtraHeaderKeys unexpectedly included non-GitHub key %q", k)
+		}
+	}
+	if len(keysToClear) == 0 {
+		t.Fatalf("expected CollectGitHubExtraHeaderKeys to find repo-specific extraHeader for %s", hostPort)
+	}
+
+	workerEnv := WorkerEnv(WorkerEnvOptions{
+		BrokerToken:            "sess-cap",
+		GitHubHost:             hostPort,
+		AOBinary:               "/nonexistent/ao",
+		AuthorizedRepos:        []string{"owner/repo"},
+		ExtraHeaderKeysToClear: keysToClear,
+	})
+	// Disable the http->https insteadOf for this local httptest.Server HTTP check
+	// so git actually sends the HTTP request to srv.URL.
+	for i := 0; i < 30; i++ {
+		k := "GIT_CONFIG_KEY_" + string(rune('0'+i))
+		if strings.HasPrefix(workerEnv[k], "url.https://") {
+			workerEnv["GIT_CONFIG_VALUE_"+string(rune('0'+i))] = "ssh://unused.invalid/"
+		}
+	}
+
+	// Execute real git ls-remote against the local HTTP server; it will fail with 401,
+	// and must NOT send the repo-local dummy Authorization header.
+	_, _ = runGit(workerEnv, "ls-remote", repoURL)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, got := range receivedAuth {
+		if strings.Contains(got, "ZHVtbXk") {
+			t.Fatalf("repo-specific Authorization extraHeader bypassed WorkerEnv and reached HTTP server: %q", got)
+		}
 	}
 }
