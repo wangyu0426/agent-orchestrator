@@ -7353,15 +7353,17 @@ func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID,
 	}
 
 	extraHeaderKeys := githubbroker.CollectGitHubExtraHeaderKeys(ctx, repoDir, m.githubBroker.GitHubHost())
+	helperKeys := githubbroker.CollectGitHubCredentialHelperKeys(ctx, repoDir, m.githubBroker.GitHubHost())
 	brokerEnv := githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
-		BrokerToken:            brokerToken,
-		GitHubHost:             m.githubBroker.GitHubHost(),
-		AOBinary:               aoBin,
-		GHConfigDir:            ghConfigDir,
-		GHShimDir:              ghShimDir,
-		CurrentPATH:            env["PATH"],
-		AuthorizedRepos:        repos,
-		ExtraHeaderKeysToClear: extraHeaderKeys,
+		BrokerToken:                 brokerToken,
+		GitHubHost:                  m.githubBroker.GitHubHost(),
+		AOBinary:                    aoBin,
+		GHConfigDir:                 ghConfigDir,
+		GHShimDir:                   ghShimDir,
+		CurrentPATH:                 env["PATH"],
+		AuthorizedRepos:             repos,
+		ExtraHeaderKeysToClear:      extraHeaderKeys,
+		CredentialHelperKeysToClear: helperKeys,
 	})
 	for k, v := range brokerEnv {
 		setProtectedEnv(env, k, v, envKeysCaseInsensitive)

@@ -42,14 +42,15 @@ var InheritedCredentialEnvKeys = []string{
 
 // WorkerEnvOptions configures the worker environment overlays for broker mode.
 type WorkerEnvOptions struct {
-	BrokerToken            string
-	GitHubHost             string
-	AOBinary               string
-	GHConfigDir            string
-	GHShimDir              string
-	CurrentPATH            string
-	AuthorizedRepos        []string
-	ExtraHeaderKeysToClear []string
+	BrokerToken                 string
+	GitHubHost                  string
+	AOBinary                    string
+	GHConfigDir                 string
+	GHShimDir                   string
+	CurrentPATH                 string
+	AuthorizedRepos             []string
+	ExtraHeaderKeysToClear      []string
+	CredentialHelperKeysToClear []string
 }
 
 // WorkerEnv returns environment variables that bind a worker process to the
@@ -139,6 +140,36 @@ func WorkerEnv(opts WorkerEnvOptions) map[string]string {
 	}
 	for _, key := range opts.ExtraHeaderKeysToClear {
 		addResetKey(key)
+	}
+	seenHelperKeys := make(map[string]struct{}, 2+len(opts.AuthorizedRepos)*4+len(opts.CredentialHelperKeysToClear))
+	seenHelperKeys[strings.ToLower(fmt.Sprintf("credential.https://%s.helper", host))] = struct{}{}
+	seenHelperKeys[strings.ToLower(fmt.Sprintf("credential.http://%s.helper", host))] = struct{}{}
+	addHelperOverride := func(key string) {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return
+		}
+		lk := strings.ToLower(k)
+		if _, exists := seenHelperKeys[lk]; exists {
+			return
+		}
+		seenHelperKeys[lk] = struct{}{}
+		gitConfigs = append(gitConfigs, [2]string{k, ""}, [2]string{k, helperCmd})
+	}
+	for _, rawRepo := range opts.AuthorizedRepos {
+		full, _, err := parseOwnerRepo(rawRepo)
+		if err != nil {
+			continue
+		}
+		for _, scheme := range []string{"https", "http"} {
+			addHelperOverride(fmt.Sprintf("credential.%s://%s/%s.helper", scheme, host, full))
+			addHelperOverride(fmt.Sprintf("credential.%s://%s/%s.git.helper", scheme, host, full))
+			addHelperOverride(fmt.Sprintf("credential.%s://%s/%s/.helper", scheme, host, full))
+			addHelperOverride(fmt.Sprintf("credential.%s://%s/%s.git/.helper", scheme, host, full))
+		}
+	}
+	for _, key := range opts.CredentialHelperKeysToClear {
+		addHelperOverride(key)
 	}
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(len(gitConfigs))
 	for i, kv := range gitConfigs {
@@ -232,6 +263,59 @@ func extraHeaderKeyTargetsHost(key, host string) bool {
 		return false
 	}
 	middle := key[len("http.") : len(key)-len(".extraheader")]
+	u, err := url.Parse(middle)
+	if err != nil {
+		return false
+	}
+	uHost := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	uHostPort := strings.ToLower(strings.TrimSpace(u.Host))
+	return uHost == host || uHostPort == host
+}
+
+// CollectGitHubCredentialHelperKeys inspects effective Git config (system,
+// global, and repository-local when repoDir is non-empty) and returns every
+// `credential.<url>.helper` key whose URL targets host. Non-GitHub hosts (such
+// as GitLab) are untouched.
+func CollectGitHubCredentialHelperKeys(ctx context.Context, repoDir, host string) []string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		h = DefaultGitHubHost
+	}
+	args := []string{"config", "--name-only", "--get-regexp", `^credential\..*\.helper$`}
+	if strings.TrimSpace(repoDir) != "" {
+		args = append([]string{"-C", repoDir}, args...)
+	}
+	out, err := process.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var keys []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		key := strings.TrimSpace(scanner.Text())
+		if key == "" {
+			continue
+		}
+		if !credentialHelperKeyTargetsHost(key, h) {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func credentialHelperKeyTargetsHost(key, host string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if !strings.HasPrefix(lower, "credential.") || !strings.HasSuffix(lower, ".helper") {
+		return false
+	}
+	middle := key[len("credential.") : len(key)-len(".helper")]
 	u, err := url.Parse(middle)
 	if err != nil {
 		return false

@@ -171,3 +171,77 @@ func TestWorkerEnv_BlocksRepoSpecificExtraHeaderInRealGitSubprocess(t *testing.T
 		}
 	}
 }
+
+func TestWorkerEnv_BlocksRepoSpecificCredentialHelperInRealGitSubprocess(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	parsedSrv, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	hostPort := parsedSrv.Host
+	repoURL := srv.URL + "/owner/repo.git"
+
+	repoDir := t.TempDir()
+	markerFile := filepath.Join(repoDir, "legacy-helper-invoked")
+	runGit := func(extraEnv map[string]string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = repoDir
+		env := os.Environ()
+		for k, v := range extraEnv {
+			env = append(env, k+"="+v)
+		}
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
+
+	if out, err := runGit(nil, "init"); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	// Configure a repo-specific credential helper that creates markerFile if invoked.
+	if out, err := runGit(nil, "config", "--local", "credential."+repoURL+".helper", "!touch "+shellQuoteForGit(markerFile)); err != nil {
+		t.Fatalf("git config credential helper: %v (%s)", err, out)
+	}
+	if out, err := runGit(nil, "config", "--local", "credential.https://gitlab.example.com/group/proj.git.helper", "!echo gitlab"); err != nil {
+		t.Fatalf("git config gitlab helper: %v (%s)", err, out)
+	}
+
+	helperKeys := CollectGitHubCredentialHelperKeys(context.Background(), repoDir, hostPort)
+	for _, k := range helperKeys {
+		if strings.Contains(strings.ToLower(k), "gitlab.example.com") {
+			t.Fatalf("CollectGitHubCredentialHelperKeys unexpectedly included non-GitHub key %q", k)
+		}
+	}
+	if len(helperKeys) == 0 {
+		t.Fatalf("expected CollectGitHubCredentialHelperKeys to find repo-specific helper for %s", hostPort)
+	}
+
+	workerEnv := WorkerEnv(WorkerEnvOptions{
+		BrokerToken:                 "sess-cap",
+		GitHubHost:                  hostPort,
+		AOBinary:                    "/nonexistent/ao",
+		AuthorizedRepos:             []string{"owner/repo"},
+		CredentialHelperKeysToClear: helperKeys,
+	})
+	// Disable http->https insteadOf so git hits our local httptest.Server over HTTP.
+	for i := 0; i < 40; i++ {
+		k := "GIT_CONFIG_KEY_" + string(rune('0'+i))
+		if strings.HasPrefix(workerEnv[k], "url.https://") {
+			workerEnv["GIT_CONFIG_VALUE_"+string(rune('0'+i))] = "ssh://unused.invalid/"
+		}
+	}
+
+	_, _ = runGit(workerEnv, "ls-remote", repoURL)
+
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Fatalf("repo-specific legacy credential helper was invoked despite WorkerEnv override")
+	}
+}
