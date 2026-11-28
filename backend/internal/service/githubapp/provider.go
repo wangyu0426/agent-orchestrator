@@ -133,6 +133,8 @@ type Provider struct {
 	refreshSkew    time.Duration
 	userAgent      string
 	logger         *slog.Logger
+	actorMu        sync.Mutex
+	actorLogin     string
 
 	mu       sync.Mutex
 	cache    map[string]cachedToken
@@ -250,6 +252,57 @@ func (p *Provider) SignJWT(now time.Time) (string, error) {
 	}
 
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// AppActorLogin resolves the effective GitHub account used by installation
+// tokens for this App. GitHub installation tokens act as the App's bot user;
+// comparing App IDs or installation IDs alone would miss two installations of
+// the same App, so callers use this login when validating role separation.
+func (p *Provider) AppActorLogin(ctx context.Context) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("%w: provider is required", ErrInvalidConfig)
+	}
+	p.actorMu.Lock()
+	defer p.actorMu.Unlock()
+	if p.actorLogin != "" {
+		return p.actorLogin, nil
+	}
+	jwt, err := p.SignJWT(p.clock())
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/app", http.NoBody)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: build App identity request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", p.userAgent)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: resolve App identity: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("githubapp: read App identity response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("githubapp: resolve App identity: status %d: %s", resp.StatusCode, Redact(extractGitHubMessage(body)))
+	}
+	var app struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(body, &app); err != nil {
+		return "", fmt.Errorf("githubapp: decode App identity: %w", err)
+	}
+	slug := strings.TrimSpace(app.Slug)
+	if slug == "" || strings.ContainsAny(slug, " /\\\t\r\n") {
+		return "", fmt.Errorf("githubapp: GitHub returned an invalid App slug")
+	}
+	p.actorLogin = strings.ToLower(slug) + "[bot]"
+	return p.actorLogin, nil
 }
 
 // TokenForRepositories returns a cached or freshly exchanged installation access

@@ -26,6 +26,7 @@ type fakeReviewService struct {
 	triggeredMode     domain.ReviewerInterfaceMode
 	triggeredRerun    bool
 	triggerErr        error
+	submitErr         error
 	cancelErr         error
 	trigger           reviewcore.TriggerResult
 	cancel            reviewcore.CancelResult
@@ -154,6 +155,9 @@ func (f *fakeReviewService) SwitchReviewer(_ context.Context, _ domain.SessionID
 
 func (f *fakeReviewService) SubmitMany(_ context.Context, _ domain.SessionID, reviews []reviewsvc.SubmittedReview) ([]domain.ReviewRun, error) {
 	f.submitted = append([]reviewsvc.SubmittedReview(nil), reviews...)
+	if f.submitErr != nil {
+		return nil, f.submitErr
+	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
 	for _, review := range reviews {
 		runs = append(runs, domain.ReviewRun{ID: review.RunID, Verdict: review.Verdict, Body: review.Body, GithubReviewID: review.GithubReviewID})
@@ -378,6 +382,14 @@ func TestReviewsCancelIncludesReviewStates(t *testing.T) {
 	}
 }
 
+func TestReviewsCancelMapsNativeSubmissionConflictTo409(t *testing.T) {
+	srv := newReviewTestServer(t, &fakeReviewService{cancelErr: fmt.Errorf("native review submission in progress: %w", reviewsvc.ErrConflict)})
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/cancel", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusConflict, "REVIEW_CONFLICT")
+}
+
 func TestReviewsKillArchivesReviewerSurface(t *testing.T) {
 	svc := &fakeReviewService{list: reviewcore.SessionReviews{
 		ReviewerHandleID: "review-mer-1",
@@ -458,7 +470,7 @@ func TestReviewsSubmitAcceptsBatchedReviews(t *testing.T) {
 	svc := &fakeReviewService{}
 	srv := newReviewTestServer(t, svc)
 
-	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"reviews":[{"runId":"run-1","verdict":"changes_requested","body":"fix auth","githubReviewId":"101"},{"runId":"run-2","verdict":"approved"}]}`)
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"reviews":[{"runId":"run-1","verdict":"changes_requested","event":"REQUEST_CHANGES","body":"fix auth","comments":[{"path":"auth.go","line":12,"side":"RIGHT","body":"Check this value."}]},{"runId":"run-2","verdict":"approved"}]}`)
 	assertJSON(t, headers)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d body=%s", status, body)
@@ -466,11 +478,32 @@ func TestReviewsSubmitAcceptsBatchedReviews(t *testing.T) {
 	if len(svc.submitted) != 2 || svc.submitted[0].RunID != "run-1" || svc.submitted[1].Verdict != domain.VerdictApproved {
 		t.Fatalf("submitted = %+v", svc.submitted)
 	}
+	if svc.submitted[0].Event != "REQUEST_CHANGES" || len(svc.submitted[0].Comments) != 1 || svc.submitted[0].Comments[0].Side != "RIGHT" {
+		t.Fatalf("native review fields were not forwarded: %+v", svc.submitted[0])
+	}
 	for _, want := range []string{`"reviews"`, `"run-1"`, `"run-2"`} {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
 	}
+}
+
+func TestReviewsSubmitMapsInvalidRequestTo422(t *testing.T) {
+	svc := &fakeReviewService{submitErr: fmt.Errorf("native review request: %w", reviewsvc.ErrInvalid)}
+	srv := newReviewTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"runId":"run-1","verdict":"approved","event":"COMMENT"}`)
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusUnprocessableEntity, "REVIEW_INVALID")
+}
+
+func TestReviewsSubmitMapsConflictTo409(t *testing.T) {
+	svc := &fakeReviewService{submitErr: fmt.Errorf("native review retry: %w", reviewsvc.ErrConflict)}
+	srv := newReviewTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"runId":"run-1","verdict":"changes_requested"}`)
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusConflict, "REVIEW_CONFLICT")
 }
 
 func TestReviewsTriggerForwardsExplicitRerun(t *testing.T) {

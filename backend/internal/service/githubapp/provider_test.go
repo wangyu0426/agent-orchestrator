@@ -175,6 +175,34 @@ func TestProvider_SignJWTAndExchange(t *testing.T) {
 	}
 }
 
+func TestProvider_AppActorLoginUsesAndCachesEffectiveBotSlug(t *testing.T) {
+	_, pkcs1, _ := generateTestRSAKey(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/app" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Errorf("unexpected App identity request: %s %s authorization=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"slug": "Yu-AO-Worker"})
+	}))
+	defer srv.Close()
+	p, err := NewProvider(Config{AppID: 123, InstallationID: 456, PrivateKeyPEM: pkcs1, BaseURL: srv.URL, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		got, err := p.AppActorLogin(context.Background())
+		if err != nil || got != "yu-ao-worker[bot]" {
+			t.Fatalf("AppActorLogin() = %q, err=%v; want normalized bot login", got, err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("GET /app calls = %d, want cached single lookup", calls.Load())
+	}
+}
+
 func TestProvider_CacheExpiryAndInvalidation(t *testing.T) {
 	_, pkcs1, _ := generateTestRSAKey(t)
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)

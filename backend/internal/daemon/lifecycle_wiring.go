@@ -452,11 +452,12 @@ func startSession(ctx context.Context, cfg config.Config, ghAuth githubAuthWirin
 	}
 	reviewEngine := reviewcore.New(reviewcore.Deps{
 		// The manager's installer gate is bound after the installer is built.
-		HarnessUse: mgr,
-		Store:      store,
-		Sessions:   store,
-		PRs:        store,
-		Projects:   store,
+		HarnessUse:              mgr,
+		Store:                   store,
+		Sessions:                store,
+		PRs:                     store,
+		Projects:                store,
+		NativeReviewSubmissions: ghAuth.nativeReviewer != nil,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
 			reviewcore.WithAgentAuth(reviewerAgentAuth{readiness: agentReadiness}),
@@ -470,6 +471,9 @@ func startSession(ctx context.Context, cfg config.Config, ghAuth githubAuthWirin
 		reviewsvc.WithTelemetry(telemetry),
 		reviewsvc.WithNotificationSink(notifications),
 		reviewsvc.WithCodexAccountOperationGate(codexOperationGate),
+	}
+	if ghAuth.nativeReviewer != nil {
+		reviewOpts = append(reviewOpts, reviewsvc.WithNativeReviewSubmitter(ghAuth.nativeReviewer))
 	}
 	if scmProvider != nil {
 		reviewOpts = append(reviewOpts,

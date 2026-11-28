@@ -6648,6 +6648,16 @@ export interface components {
         ControllersSetSessionAutoReviewRequest: {
             enabled: boolean;
         };
+        ControllersSubmitReviewComment: {
+            /** @description Inline review finding. */
+            body: string;
+            /** @description Positive changed-file line number. */
+            line: number;
+            /** @description Repository-relative file path. */
+            path: string;
+            /** @description Diff side: LEFT for the old version, RIGHT for the new version. */
+            side: string;
+        };
         ConversationAccountPayload: {
             authFailureId?: string;
             authMode?: string;
@@ -8215,7 +8225,11 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             deliveredAt?: null | string;
+            githubReviewAuthor?: string;
+            githubReviewCommitSha?: string;
+            githubReviewError?: string;
             githubReviewId: string;
+            githubReviewState?: string;
             harness: string;
             id: string;
             prUrl: string;
@@ -9274,6 +9288,10 @@ export interface components {
         SubmitReviewInput: {
             /** @description Review body recorded by AO. Required for changes_requested. */
             body?: string;
+            /** @description Inline comments submitted through AO's scoped provider path. */
+            comments?: components["schemas"]["ControllersSubmitReviewComment"][];
+            /** @description Optional native GitHub review event: APPROVE, REQUEST_CHANGES, or COMMENT. */
+            event?: string;
             /** @description Id of the GitHub PR review the reviewer posted, if any. */
             githubReviewId?: string;
             /** @description Batched review results recorded by one reviewer CLI command. */
@@ -9286,11 +9304,15 @@ export interface components {
         SubmitReviewItem: {
             /** @description Review body recorded by AO. Required for changes_requested. */
             body?: string;
+            /** @description Inline comments submitted through AO's scoped provider path. */
+            comments?: components["schemas"]["ControllersSubmitReviewComment"][];
+            /** @description Optional native GitHub review event: APPROVE, REQUEST_CHANGES, or COMMENT. */
+            event?: string;
             /** @description Id of the GitHub PR review the reviewer posted, if any. */
             githubReviewId?: string;
             /** @description Review run id being completed. */
             runId: string;
-            /** @description Review verdict: approved or changes_requested. */
+            /** @description AO review verdict: approved or changes_requested. */
             verdict: string;
         };
         SwitchSessionAgentAccountRequest: {

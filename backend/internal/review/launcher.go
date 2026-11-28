@@ -91,6 +91,9 @@ type LaunchSpec struct {
 	ReviewQueue            []ports.ReviewTask
 	ReviewIndex            int
 	InterfaceMode          domain.ReviewerInterfaceMode
+	// NativeReviewSubmission routes the structured result through AO's daemon
+	// GitHub App path instead of asking the reviewer harness to call gh api.
+	NativeReviewSubmission bool
 	// DeferInitialMessage starts the reviewer without dispatching its review
 	// prompt. The engine uses this while replacing a live reviewer so the old
 	// process can be stopped before the replacement receives executable work.
@@ -394,7 +397,11 @@ func (l *agentLauncher) prepareInvocation(ctx context.Context, spec LaunchSpec) 
 func (l *agentLauncher) prepareIdleInvocation(spec LaunchSpec) (ports.ReviewInvocation, error) {
 	promptRoot := filepath.Join(l.dataDir, "prompts", string(spec.WorkerID), "reviewer")
 	systemPath := filepath.Join(promptRoot, "system.md")
-	systemPrompt := reviewSystemPrompt() + "\n\n" +
+	systemPromptBase := reviewSystemPrompt()
+	if spec.NativeReviewSubmission {
+		systemPromptBase = nativeReviewSystemPrompt()
+	}
+	systemPrompt := systemPromptBase + "\n\n" +
 		"Orchestrator may restore your terminal before a new review task exists. In that state, wait for Orchestrator to send a review task file path before reviewing or submitting results.\n"
 	if err := os.MkdirAll(promptRoot, 0o700); err != nil {
 		return ports.ReviewInvocation{}, fmt.Errorf("create reviewer prompt directory: %w", err)

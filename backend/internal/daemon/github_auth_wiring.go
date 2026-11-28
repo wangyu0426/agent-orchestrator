@@ -12,19 +12,22 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubreview"
 )
 
 // githubAuthWiring carries the daemon's resolved GitHub authentication mode.
 // When appEnabled is true, all daemon GitHub SCM, Tracker, and resolver paths
 // use appTokens exclusively and fail closed (never falling back to PAT/env/gh).
 type githubAuthWiring struct {
-	appEnabled    bool
-	appProvider   *githubapp.Provider
-	appTokens     *githubapp.ScopedTokenSource
-	workerBroker  *githubbroker.Broker
-	apiBaseURL    string
-	graphqlURL    string
-	operatorLogin string
+	appEnabled        bool
+	appProvider       *githubapp.Provider
+	appTokens         *githubapp.ScopedTokenSource
+	workerAppProvider *githubapp.Provider
+	workerBroker      *githubbroker.Broker
+	nativeReviewer    *githubreview.Submitter
+	apiBaseURL        string
+	graphqlURL        string
+	operatorLogin     string
 }
 
 func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githubAuthWiring, error) {
@@ -46,6 +49,25 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 	if err != nil {
 		return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app auth: %w", err)
 	}
+	workerProvider := provider
+	var distinctWorkerProvider *githubapp.Provider
+	if cfg.WorkerAppEnabled {
+		workerBaseURL := strings.TrimRight(strings.TrimSpace(cfg.WorkerAPIBaseURL), "/")
+		if workerBaseURL == "" {
+			workerBaseURL = baseURL
+		}
+		distinctWorkerProvider, err = githubapp.NewProvider(githubapp.Config{
+			AppID:          cfg.WorkerAppID,
+			InstallationID: cfg.WorkerInstallationID,
+			PrivateKeyPath: cfg.WorkerPrivateKeyPath,
+			BaseURL:        workerBaseURL,
+			Logger:         logger,
+		})
+		if err != nil {
+			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github worker app auth: %w", err)
+		}
+		workerProvider = distinctWorkerProvider
+	}
 	var broker *githubbroker.Broker
 	if cfg.WorkerBrokerEnabled {
 		brokerHost, hostErr := resolveBrokerGitHubHost(baseURL, cfg.GitHubHost)
@@ -57,11 +79,15 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 		for _, r := range repos {
 			ownerQualifiedRepos = append(ownerQualifiedRepos, owner+"/"+r)
 		}
+		workerKeyPath := cfg.PrivateKeyPath
+		if cfg.WorkerAppEnabled {
+			workerKeyPath = cfg.WorkerPrivateKeyPath
+		}
 		broker, err = githubbroker.New(githubbroker.Config{
-			Provider:       provider,
+			Provider:       workerProvider,
 			AllowedRepos:   ownerQualifiedRepos,
 			GitHubHost:     brokerHost,
-			PrivateKeyPath: cfg.PrivateKeyPath,
+			PrivateKeyPath: workerKeyPath,
 			IsolationMode:  cfg.WorkerIsolationMode,
 			GrantsPath:     cfg.GrantsPath,
 			Logger:         logger,
@@ -70,14 +96,38 @@ func newGitHubAuthWiring(cfg config.GitHubAppConfig, logger *slog.Logger) (githu
 			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github app worker broker: %w", err)
 		}
 	}
+	var nativeReviewer *githubreview.Submitter
+	if broker != nil && cfg.WorkerAppEnabled {
+		host, hostErr := resolveBrokerGitHubHost(baseURL, cfg.GitHubHost)
+		if hostErr != nil {
+			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github native reviewer: %w", hostErr)
+		}
+		allowedRepositories := make([]string, 0, len(repos))
+		owner := strings.TrimSpace(cfg.InstallationOwner)
+		for _, repository := range repos {
+			allowedRepositories = append(allowedRepositories, owner+"/"+repository)
+		}
+		nativeReviewer, err = githubreview.New(githubreview.Config{
+			ReviewerApp:  provider,
+			WorkerApp:    distinctWorkerProvider,
+			APIBaseURL:   baseURL,
+			GitHubHost:   host,
+			Repositories: allowedRepositories,
+		})
+		if err != nil {
+			return githubAuthWiring{appEnabled: true}, fmt.Errorf("github native reviewer: %w", err)
+		}
+	}
 	return githubAuthWiring{
-		appEnabled:    true,
-		appProvider:   provider,
-		appTokens:     provider.TokenSource(repos...),
-		workerBroker:  broker,
-		apiBaseURL:    baseURL,
-		graphqlURL:    deriveGitHubGraphQLURL(baseURL),
-		operatorLogin: strings.TrimSpace(strings.TrimPrefix(cfg.OperatorLogin, "@")),
+		appEnabled:        true,
+		appProvider:       provider,
+		appTokens:         provider.TokenSource(repos...),
+		workerAppProvider: distinctWorkerProvider,
+		workerBroker:      broker,
+		nativeReviewer:    nativeReviewer,
+		apiBaseURL:        baseURL,
+		graphqlURL:        deriveGitHubGraphQLURL(baseURL),
+		operatorLogin:     strings.TrimSpace(strings.TrimPrefix(cfg.OperatorLogin, "@")),
 	}, nil
 }
 

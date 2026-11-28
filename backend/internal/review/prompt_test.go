@@ -65,3 +65,24 @@ func TestReviewPromptRequiresInlineCommentsForRequiredChanges(t *testing.T) {
 		t.Fatalf("review prompt still makes inline comments optional:\n%s", prompt)
 	}
 }
+
+func TestNativeReviewPromptRoutesOnlyStructuredAOResult(t *testing.T) {
+	spec := launchSpec()
+	spec.NativeReviewSubmission = true
+	prompt, system := reviewTexts(spec)
+	for _, want := range []string{
+		"Never call gh, gh api, git credential helpers, or any provider mutation API",
+		"pair approved with APPROVE and changes_requested with REQUEST_CHANGES",
+		`"side": "RIGHT"`,
+		"AO-REVIEW: REQUEST_CHANGES",
+		"Automated approvals are not human approval",
+		"ao review submit --session mer-1 --reviews -",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("native review prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(system, "Never post a provider review or comment yourself") || strings.Contains(system, "Post your review as a comment on the pull request") {
+		t.Fatalf("native reviewer system prompt retains provider-post instruction:\n%s", system)
+	}
+}
