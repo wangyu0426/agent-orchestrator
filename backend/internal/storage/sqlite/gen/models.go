@@ -587,6 +587,28 @@ type PRComment struct {
 	ReviewID         string
 }
 
+type PRConversationFeedback struct {
+	PRURL             string
+	CommentID         string
+	SessionID         string
+	SourceType        string
+	Author            string
+	Body              string
+	BodyHash          string
+	URL               string
+	State             string
+	AutoInjectReview  int64
+	CreatedAtProvider sql.NullTime
+	UpdatedAtProvider sql.NullTime
+	ObservedAt        time.Time
+	Unverified        int64
+}
+
+type PRConversationFeedbackState struct {
+	PRURL         string
+	InitializedAt time.Time
+}
+
 type PRDetail struct {
 	PRURL                string
 	Description          string

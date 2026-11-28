@@ -198,6 +198,24 @@ func (m *Provider) FetchFailedCheckLogTail(ctx context.Context, repo ports.SCMRe
 	return p.FetchFailedCheckLogTail(ctx, repo, check)
 }
 
+type conversationCommentFetcher interface {
+	FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error)
+}
+
+// FetchConversationComments delegates to the sub-provider matching
+// ref.Repo.Provider when it supports paginated conversation comment retrieval.
+func (m *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
+	p, err := m.resolve(ref.Repo.Provider)
+	if err != nil {
+		return ports.SCMConversationCommentsResult{}, err
+	}
+	f, ok := p.(conversationCommentFetcher)
+	if !ok {
+		return ports.SCMConversationCommentsResult{}, fmt.Errorf("%w: conversation comments for provider %q", ports.ErrSCMUnsupported, ref.Repo.Provider)
+	}
+	return f.FetchConversationComments(ctx, ref)
+}
+
 // FetchReviewThreads delegates to the sub-provider matching ref.Repo.Provider.
 func (m *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (ports.SCMReviewObservation, error) {
 	p, err := m.resolve(ref.Repo.Provider)

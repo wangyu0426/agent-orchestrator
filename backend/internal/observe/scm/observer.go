@@ -198,6 +198,8 @@ type ObserverCache struct {
 	CommitChecksETag map[string]string
 	// LastReviewPollAt maps PR keys to the last review-thread fetch timestamp.
 	LastReviewPollAt map[string]time.Time
+	// LastConversationPollAt maps PR keys to the last conversation-comment fetch timestamp.
+	LastConversationPollAt map[string]time.Time
 	// ReviewRefreshFailed marks PRs whose review-thread refresh failed; the
 	// next poll retries regardless of the normal review cadence/status rules.
 	ReviewRefreshFailed map[string]bool
@@ -216,6 +218,8 @@ type ObserverCache struct {
 	commitOrder []string
 	// lastReviewPollOrder tracks FIFO eviction order for LastReviewPollAt.
 	lastReviewPollOrder []string
+	// lastConversationPollOrder tracks FIFO eviction order for LastConversationPollAt.
+	lastConversationPollOrder []string
 	// reviewFailedOrder tracks FIFO eviction order for ReviewRefreshFailed.
 	reviewFailedOrder []string
 	// max is the maximum number of entries each cache map retains.
@@ -227,13 +231,14 @@ func newCache(maxEntries int) ObserverCache {
 		maxEntries = DefaultCacheMax
 	}
 	return ObserverCache{
-		RepoPRListETag:      map[string]string{},
-		CommitChecksETag:    map[string]string{},
-		LastReviewPollAt:    map[string]time.Time{},
-		ReviewRefreshFailed: map[string]bool{},
-		LastPRFetchAt:       map[string]time.Time{},
-		LastSyncCursor:      map[string]time.Time{},
-		max:                 maxEntries,
+		RepoPRListETag:         map[string]string{},
+		CommitChecksETag:       map[string]string{},
+		LastReviewPollAt:       map[string]time.Time{},
+		LastConversationPollAt: map[string]time.Time{},
+		ReviewRefreshFailed:    map[string]bool{},
+		LastPRFetchAt:          map[string]time.Time{},
+		LastSyncCursor:         map[string]time.Time{},
+		max:                    maxEntries,
 	}
 }
 
@@ -676,6 +681,10 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	conversationFeedbackActive := o.refreshConversationFeedback(ctx, subjects, observations, selection.subjectsByPR, forced, localOnlyObservations, now)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	for _, key := range dispatchOrder(observations, selection.subjectsByPR) {
 		if err := ctx.Err(); err != nil {
@@ -703,7 +712,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 			preserveLocalReviewDecision: reviewStale[key],
 		}
 		prepared := o.prepareForPersistence(obs, local, opts, now)
-		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review {
+		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review && !conversationFeedbackActive[key] {
 			// Details are left out of the hashes, and a provider reads them only
 			// when none are stored or the PR's updatedAt moved, so details here
 			// with no other change are ones the store lacks (a PR stored before

@@ -38,6 +38,12 @@ const (
 	// githubCheckRunsMaxPages bounds the pagination when fetching all check runs
 	// for a commit. This prevents unbounded pagination on malformed responses.
 	githubCheckRunsMaxPages = 10
+	// githubConversationCommentPageSize is the per-page size for paginated
+	// top-level PR conversation comment retrieval.
+	githubConversationCommentPageSize = 100
+	// githubConversationCommentMaxPages bounds paginated conversation comment
+	// retrieval (up to 1,000 comments per PR).
+	githubConversationCommentMaxPages = 10
 )
 
 // ParseRepository normalizes a GitHub remote/origin URL into a provider-neutral
@@ -397,6 +403,119 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 		}
 	}
 	return ports.SCMReviewObservation{Decision: decision, Reviews: reviews, Threads: out, Partial: true}, nil
+}
+
+// FetchConversationComments fetches top-level PR conversation comments using
+// backward-paginated GraphQL retrieval (newest page first, up to
+// githubConversationCommentMaxPages pages) so recent explicit operator
+// feedback commands are always inside the fetched window even on PRs with more
+// than 1,000 comments. Results are returned in chronological order. If
+// pagination stops before the oldest page (unusable cursor, missing
+// pagination metadata, or page cap), Partial is set to true.
+func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
+	var pages [][]ports.SCMConversationCommentObservation
+	cursor := ""
+	partial := false
+	prMerged := false
+	prClosed := false
+	for page := 1; page <= githubConversationCommentMaxPages; page++ {
+		query := buildConversationCommentsQuery(ref, cursor)
+		data, err := p.client.doGraphQL(ctx, query, nil)
+		if err != nil {
+			return ports.SCMConversationCommentsResult{}, fmt.Errorf("github scm: fetch conversation comments for %s#%d: %w", repoFullName(ref.Repo), ref.Number, err)
+		}
+		repoData, _ := data["repo"].(map[string]any)
+		pr, _ := repoData["pullRequest"].(map[string]any)
+		if pr == nil {
+			return ports.SCMConversationCommentsResult{}, fmt.Errorf("%w: pull request %s#%d not found in conversation comments response", ErrNotFound, repoFullName(ref.Repo), ref.Number)
+		}
+		if page == 1 {
+			prMerged = boolv(pr["merged"])
+			prClosed = boolv(pr["closed"]) && !prMerged
+		}
+		conn, _ := pr["comments"].(map[string]any)
+		if conn == nil {
+			p.logger.Warn("github scm: conversation comments page is partial with missing connection",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
+		var pageNodes []ports.SCMConversationCommentObservation
+		for _, n := range nodes(conn["nodes"]) {
+			id := str(n["id"])
+			if id == "" {
+				continue
+			}
+			authorMap, _ := n["author"].(map[string]any)
+			body, _ := truncateUTF8(str(n["body"]), domain.MaxPullRequestCommentBodyBytes)
+			pageNodes = append(pageNodes, ports.SCMConversationCommentObservation{
+				ID:        id,
+				Author:    authorLogin(n["author"]),
+				IsBot:     isBotAuthor(authorMap),
+				Body:      body,
+				URL:       str(n["url"]),
+				CreatedAt: parseGitHubTime(str(n["createdAt"])),
+				UpdatedAt: parseGitHubTime(str(n["updatedAt"])),
+			})
+		}
+		pages = append(pages, pageNodes)
+		pi, _ := conn["pageInfo"].(map[string]any)
+		if pi == nil {
+			p.logger.Warn("github scm: conversation comments page is partial with missing page info",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
+		hasPreviousPage, ok := pi["hasPreviousPage"].(bool)
+		if !ok {
+			p.logger.Warn("github scm: conversation comments page is partial with missing or invalid hasPreviousPage",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
+		if !hasPreviousPage {
+			break
+		}
+		prevCursor := str(pi["startCursor"])
+		if prevCursor == "" || prevCursor == cursor {
+			p.logger.Warn("github scm: conversation comments page is partial with unusable cursor",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
+		cursor = prevCursor
+		if page == githubConversationCommentMaxPages {
+			p.logger.Warn("github scm: conversation comments page limit reached",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "max_pages", githubConversationCommentMaxPages)
+			partial = true
+		}
+	}
+	// Pages were collected newest-first; flatten in chronological (oldest-first) order.
+	total := 0
+	for _, pg := range pages {
+		total += len(pg)
+	}
+	out := make([]ports.SCMConversationCommentObservation, 0, total)
+	for i := len(pages) - 1; i >= 0; i-- {
+		out = append(out, pages[i]...)
+	}
+	return ports.SCMConversationCommentsResult{Comments: out, Partial: partial, PRMerged: prMerged, PRClosed: prClosed}, nil
+}
+
+func buildConversationCommentsQuery(ref ports.SCMPRRef, beforeCursor string) string {
+	beforeClause := ""
+	if beforeCursor != "" {
+		beforeClause = fmt.Sprintf(", before:%s", graphQLString(beforeCursor))
+	}
+	return fmt.Sprintf(`query{
+repo: repository(owner:%s,name:%s){ pullRequest(number:%d){
+  merged closed
+  comments(last:%d%s){
+    nodes{ id body url createdAt updatedAt author{ login __typename } }
+    pageInfo{ hasPreviousPage startCursor }
+  }
+} }
+}`, graphQLString(ref.Repo.Owner), graphQLString(ref.Repo.Name), ref.Number, githubConversationCommentPageSize, beforeClause)
 }
 
 type restListPull struct {

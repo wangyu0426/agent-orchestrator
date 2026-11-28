@@ -200,6 +200,29 @@ type PullRequestComment struct {
 	AutoInjectReview bool
 }
 
+// PullRequestConversationFeedback is one durable, actionable top-level PR
+// conversation feedback command (`/ao review-feedback`), kept separate from
+// view-only conversation comments and formal review threads.
+type PullRequestConversationFeedback struct {
+	PRURL      string
+	CommentID  string
+	SessionID  SessionID
+	SourceType string
+	Author     string
+	Body       string
+	BodyHash   string
+	URL        string
+	State      PRConversationFeedbackState
+	// Unverified is true when a partial provider scan could not confirm that
+	// this active command still exists. Such rows must not be delivered until
+	// the command is observed again or a complete scan reconciles it.
+	Unverified        bool
+	AutoInjectReview  bool
+	CreatedAtProvider time.Time
+	UpdatedAtProvider time.Time
+	ObservedAt        time.Time
+}
+
 // IsActionableReviewComment reports whether a review comment should block
 // ready-to-merge state and be surfaced to the agent. Human comments are always
 // actionable; bot comments need a concrete file and line anchor so status

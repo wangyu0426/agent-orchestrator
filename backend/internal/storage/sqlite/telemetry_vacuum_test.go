@@ -94,8 +94,10 @@ func TestTelemetryIncrementalVacuumUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := pages()
-	if reclaimed := before - after; reclaimed <= 0 || reclaimed > 256 {
-		t.Fatalf("reclaimed %d pages, want 1..256", reclaimed)
+	// PRAGMA incremental_vacuum(N) reclaims up to N freelist pages plus any
+	// pointer-map (ptrmap) page freed when truncation crosses a ptrmap boundary.
+	if reclaimed := before - after; reclaimed <= 0 || reclaimed > 257 {
+		t.Fatalf("reclaimed %d pages, want 1..257", reclaimed)
 	}
 	bytesAfter := fileSize()
 	if bytesAfter >= bytesBefore {

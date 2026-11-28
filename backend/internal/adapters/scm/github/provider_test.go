@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -1948,6 +1949,134 @@ func TestFetchReviewThreadsUsesLatestWindowWithoutFallbackWhenOldestResolved(t *
 	}
 	if len(review.Threads[0].Comments) != 1 || review.Threads[0].Comments[0].ReviewID != "4876751117" || review.Threads[0].Comments[0].URL != "https://github.com/o/r/pull/1#discussion_r1" {
 		t.Fatalf("thread comments = %#v", review.Threads[0].Comments)
+	}
+}
+
+func TestFetchConversationCommentsTruncatesOversizedBodies(t *testing.T) {
+	rawBody := domain.PRCommentFeedbackMarker + " " + strings.Repeat("é", domain.MaxPullRequestCommentBodyBytes)
+	fake := newFakeGH(t)
+	fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"repo": map[string]any{
+					"pullRequest": map[string]any{
+						"merged": false,
+						"closed": false,
+						"comments": map[string]any{
+							"nodes": []any{map[string]any{
+								"id":        "IC_oversized",
+								"body":      rawBody,
+								"url":       "https://github.com/o/r/pull/1#issuecomment-1",
+								"createdAt": "2026-11-28T00:00:00Z",
+								"updatedAt": "2026-11-28T00:00:00Z",
+								"author":    map[string]any{"login": "alice", "__typename": "User"},
+							}},
+							"pageInfo": map[string]any{"hasPreviousPage": false, "startCursor": "cursor"},
+						},
+					},
+				},
+			},
+		})
+	})
+	p := newProviderForTest(t, fake)
+	result, err := p.FetchConversationComments(ctx(), ports.SCMPRRef{
+		Repo:   ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "r", Repo: "o/r"},
+		Number: 1,
+	})
+	if err != nil {
+		t.Fatalf("FetchConversationComments: %v", err)
+	}
+	if len(result.Comments) != 1 {
+		t.Fatalf("comments = %#v, want one fetched comment", result.Comments)
+	}
+	body := result.Comments[0].Body
+	if len(body) > domain.MaxPullRequestCommentBodyBytes {
+		t.Fatalf("body length = %d, want at most %d bytes", len(body), domain.MaxPullRequestCommentBodyBytes)
+	}
+	if !utf8.ValidString(body) || !strings.HasPrefix(rawBody, body) {
+		t.Fatalf("body is not a valid UTF-8 prefix of the provider body: %q", body)
+	}
+	parsed, ok, reason := domain.ParsePRFeedbackCommand(body)
+	if !ok || len(parsed.Body) > domain.MaxPullRequestCommentBodyBytes {
+		t.Fatalf("parsed actionable body length = %d, ok=%v reason=%q", len(parsed.Body), ok, reason)
+	}
+}
+
+func TestFetchConversationCommentsMissingPaginationMetadataIsPartial(t *testing.T) {
+	comment := map[string]any{
+		"id":        "IC_existing",
+		"body":      domain.PRCommentFeedbackMarker + " keep this instruction",
+		"url":       "https://github.com/o/r/pull/1#issuecomment-1",
+		"createdAt": "2026-11-28T00:00:00Z",
+		"updatedAt": "2026-11-28T00:00:00Z",
+		"author":    map[string]any{"login": "alice", "__typename": "User"},
+	}
+	tests := []struct {
+		name             string
+		includeConn      bool
+		connection       any
+		wantCommentCount int
+	}{
+		{name: "missing connection"},
+		{name: "null connection", includeConn: true, connection: nil},
+		{
+			name:             "missing pageInfo",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}},
+			wantCommentCount: 1,
+		},
+		{
+			name:             "null pageInfo",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": nil},
+			wantCommentCount: 1,
+		},
+		{
+			name:             "missing hasPreviousPage",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": map[string]any{}},
+			wantCommentCount: 1,
+		},
+		{
+			name:             "non-boolean hasPreviousPage",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": map[string]any{"hasPreviousPage": "false"}},
+			wantCommentCount: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGH(t)
+			fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				pr := map[string]any{"merged": false, "closed": false}
+				if tt.includeConn {
+					pr["comments"] = tt.connection
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"repo": map[string]any{
+							"pullRequest": pr,
+						},
+					},
+				})
+			})
+			p := newProviderForTest(t, fake)
+			result, err := p.FetchConversationComments(ctx(), ports.SCMPRRef{
+				Repo:   ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "r", Repo: "o/r"},
+				Number: 1,
+			})
+			if err != nil {
+				t.Fatalf("FetchConversationComments: %v", err)
+			}
+			if !result.Partial {
+				t.Fatal("Partial = false, want incomplete connection metadata to fail closed")
+			}
+			if len(result.Comments) != tt.wantCommentCount {
+				t.Fatalf("comments = %#v, want %d comments retained from the response", result.Comments, tt.wantCommentCount)
+			}
+		})
 	}
 }
 

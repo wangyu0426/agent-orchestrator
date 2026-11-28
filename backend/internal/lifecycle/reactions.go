@@ -206,6 +206,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	ident := prIdentity(o)
 	var nudges []pendingNudge
 	var ciPolicyErr error
+	var conversationFeedbackErr error
 
 	if !needsInput {
 		reviews, err := m.store.ListPRReviews(ctx, o.URL)
@@ -309,6 +310,57 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 				})
 			}
 		}
+
+		if fbStore, ok := m.store.(conversationFeedbackStore); ok && !o.ConversationFeedbackUnverified {
+			proj, found, err := fbStore.GetProject(ctx, string(rec.ProjectID))
+			if err != nil {
+				conversationFeedbackErr = fmt.Errorf("load project %s for conversation feedback: %w", rec.ProjectID, err)
+			} else if found && proj.Config.PRCommentFeedback.Enabled {
+				fbItems, err := fbStore.ListActivePRConversationFeedback(ctx, o.URL)
+				if err != nil {
+					conversationFeedbackErr = fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
+				} else {
+					for _, item := range fbItems {
+						if allowed, reason := domain.AuthorizePRCommentFeedback(proj.Config.PRCommentFeedback, item.Author, false); !allowed {
+							slog.Default().Info("lifecycle: conversation feedback ignored",
+								"event", "ignored",
+								"session", id,
+								"pr", o.URL,
+								"comment_id", item.CommentID,
+								"author", item.Author,
+								"reason", reason,
+							)
+							continue
+						}
+						if !rec.AutoInjectReview || !item.AutoInjectReview {
+							slog.Default().Info("lifecycle: conversation feedback ignored",
+								"event", "ignored",
+								"session", id,
+								"pr", o.URL,
+								"comment_id", item.CommentID,
+								"author", item.Author,
+								"reason", "auto_inject_review_disabled",
+							)
+							continue
+						}
+						msg := formatConversationFeedbackMessage(item, ident, o.URL)
+						slog.Default().Info("lifecycle: conversation feedback queued",
+							"event", "queued",
+							"session", id,
+							"pr", o.URL,
+							"comment_id", item.CommentID,
+							"author", item.Author,
+							"body_hash", item.BodyHash,
+						)
+						nudges = append(nudges, pendingNudge{
+							key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
+							sig: item.BodyHash,
+							msg: msg,
+						})
+					}
+				}
+			}
+		}
 	}
 
 	// Only the merge-conflict nudge needs a store read (the parent-stack check).
@@ -366,6 +418,9 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	}
 	// Surface deferred policy/parent-stack read errors only after independent
 	// nudges have been sent, so one failed lookup cannot hide another reaction.
+	if conversationFeedbackErr != nil {
+		return conversationFeedbackErr
+	}
 	if ciPolicyErr != nil {
 		return ciPolicyErr
 	}
@@ -445,6 +500,37 @@ func commentNudgeKey(prURL string, comment ports.PRCommentObservation) string {
 		id = strings.TrimSpace(comment.ThreadID)
 	}
 	return "comment:" + prURL + ":" + id
+}
+
+type conversationFeedbackStore interface {
+	ListActivePRConversationFeedback(ctx context.Context, prURL string) ([]domain.PullRequestConversationFeedback, error)
+	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
+}
+
+func conversationFeedbackNudgeKey(prURL, commentID string) string {
+	return "conv-feedback:" + prURL + ":" + strings.TrimSpace(commentID)
+}
+
+func formatConversationFeedbackMessage(item domain.PullRequestConversationFeedback, ident, prURL string) string {
+	var b strings.Builder
+	b.WriteString("Operator review feedback on ")
+	b.WriteString(ident)
+	if author := strings.TrimSpace(item.Author); author != "" {
+		b.WriteString(" (from @")
+		b.WriteString(domain.SanitizeControlChars(author))
+		b.WriteString(")")
+	}
+	b.WriteString(":\n")
+	b.WriteString(domain.SanitizeControlChars(item.Body))
+	if item.URL != "" {
+		b.WriteString("\nComment: ")
+		b.WriteString(domain.SanitizeControlChars(item.URL))
+	}
+	if prURL != "" {
+		b.WriteString("\nPR: ")
+		b.WriteString(domain.SanitizeControlChars(prURL))
+	}
+	return b.String()
 }
 
 // mergeConflictKey is the reaction-dedup key for a PR's merge-conflict nudge.
@@ -694,18 +780,19 @@ func hasUnresolvedSCMComments(threads []ports.SCMReviewThreadObservation) bool {
 
 func scmToPRObservation(o ports.SCMObservation) ports.PRObservation {
 	pr := ports.PRObservation{
-		Fetched:      o.Fetched,
-		URL:          firstSCMNonEmpty(o.PR.URL, o.PR.HTMLURL),
-		Number:       o.PR.Number,
-		Title:        o.PR.Title,
-		SourceBranch: o.PR.SourceBranch,
-		TargetBranch: o.PR.TargetBranch,
-		Draft:        o.PR.Draft,
-		Merged:       o.PR.Merged,
-		Closed:       o.PR.Closed,
-		CI:           domain.CIState(o.CI.Summary),
-		Review:       domain.ReviewDecision(o.Review.Decision),
-		Mergeability: domain.Mergeability(o.Mergeability.State),
+		Fetched:                        o.Fetched,
+		URL:                            firstSCMNonEmpty(o.PR.URL, o.PR.HTMLURL),
+		Number:                         o.PR.Number,
+		Title:                          o.PR.Title,
+		SourceBranch:                   o.PR.SourceBranch,
+		TargetBranch:                   o.PR.TargetBranch,
+		Draft:                          o.PR.Draft,
+		Merged:                         o.PR.Merged,
+		Closed:                         o.PR.Closed,
+		CI:                             domain.CIState(o.CI.Summary),
+		Review:                         domain.ReviewDecision(o.Review.Decision),
+		Mergeability:                   domain.Mergeability(o.Mergeability.State),
+		ConversationFeedbackUnverified: o.ConversationFeedbackUnverified,
 	}
 	if pr.CI == "" {
 		pr.CI = domain.CIUnknown

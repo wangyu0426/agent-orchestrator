@@ -277,6 +277,8 @@ var shippedMigrations = map[int64]string{
 	20261124225346234: "20261124225346234_terminal_turn_provider_id.sql",
 	20261126073848851: "20261126073848851_session_sandbox.sql",
 	20261127132043999: "20261127132043999_review_run_completed_at.sql",
+	20261127173952793: "20261127173952793_pr_conversation_feedback.sql",
+	20261128071216331: "20261128071216331_pr_conversation_feedback_unverified.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

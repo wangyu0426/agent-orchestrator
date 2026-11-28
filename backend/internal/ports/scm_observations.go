@@ -92,6 +92,11 @@ type SCMObservation struct {
 
 	// Changed marks which semantic buckets changed compared with the DB snapshot.
 	Changed SCMChanged
+
+	// ConversationFeedbackUnverified is set when the latest conversation-comment
+	// scan was partial and did not verify an active command in the fetched
+	// window, so lifecycle must not deliver unverified persisted active rows.
+	ConversationFeedbackUnverified bool `json:"-"`
 }
 
 // SCMChanged marks which semantic state buckets changed in the successful poll.
@@ -358,6 +363,37 @@ type SCMReviewCommentObservation struct {
 	IsBot bool
 	// CreatedAt is the provider's comment creation time; zero when unknown.
 	CreatedAt time.Time
+}
+
+// SCMConversationCommentObservation is one normalized top-level PR conversation
+// comment fetched via complete/paginated retrieval for explicit operator
+// feedback command evaluation.
+type SCMConversationCommentObservation struct {
+	// ID is the provider's stable comment identifier.
+	ID string
+	// Author is the provider login/name of the commenter.
+	Author string
+	// IsBot is true when the provider identifies the author as a bot.
+	IsBot bool
+	// Body is the raw comment body text.
+	Body string
+	// URL is a provider link to the comment.
+	URL string
+	// CreatedAt is the provider's comment creation time; zero when unknown.
+	CreatedAt time.Time
+	// UpdatedAt is the provider's comment last-edit time; zero when unknown.
+	UpdatedAt time.Time
+}
+
+// SCMConversationCommentsResult carries paginated top-level PR conversation
+// comments together with a Partial flag indicating whether retrieval stopped
+// before the last page (page cap or unusable cursor). When Partial is true,
+// callers must not treat comments absent from Comments as deleted.
+type SCMConversationCommentsResult struct {
+	Comments []SCMConversationCommentObservation
+	Partial  bool
+	PRMerged bool
+	PRClosed bool
 }
 
 // SCMMergeabilityObservation is the normalized mergeability verdict.
