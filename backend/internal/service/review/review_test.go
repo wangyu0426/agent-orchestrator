@@ -128,7 +128,7 @@ func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status d
 	return true, nil
 }
 
-func (f *fakeStore) UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError string, autoInjectReview bool) (bool, error) {
+func (f *fakeStore) UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, githubReviewRequestFingerprint string, autoInjectReview bool) (bool, error) {
 	updated, err := f.UpdateReviewRunResult(ctx, id, status, verdict, body, githubReviewID, autoInjectReview)
 	if !updated || err != nil {
 		return updated, err
@@ -138,6 +138,7 @@ func (f *fakeStore) UpdateReviewRunOutcome(ctx context.Context, id string, statu
 		run.GithubReviewAuthor = githubReviewAuthor
 		run.GithubReviewCommitSHA = githubReviewCommitSHA
 		run.GithubReviewError = githubReviewError
+		run.GithubReviewRequestFingerprint = githubReviewRequestFingerprint
 	}
 	for i := range f.batchRuns {
 		if f.batchRuns[i].ID == id {
@@ -185,8 +186,67 @@ func TestSubmitNativeReviewBindsStoredRunAndPersistsVerifiedProviderOutcome(t *t
 	if native.calls != 1 || native.request.RunID != "run-native" || native.request.PRURL != prURL || native.request.ExpectedHeadSHA != targetSHA || native.request.PRAuthor != "worker-app[bot]" || native.request.Event != githubreview.EventRequestChanges {
 		t.Fatalf("native request calls=%d request=%+v", native.calls, native.request)
 	}
-	if len(runs) != 1 || runs[0].Verdict != domain.VerdictChangesRequested || runs[0].GithubReviewID != "456" || runs[0].GithubReviewState != domain.GithubReviewStateChangesRequested || runs[0].GithubReviewAuthor != "reviewer-app[bot]" || runs[0].GithubReviewCommitSHA != targetSHA {
+	if len(runs) != 1 || runs[0].Verdict != domain.VerdictChangesRequested || runs[0].GithubReviewID != "456" || runs[0].GithubReviewState != domain.GithubReviewStateChangesRequested || runs[0].GithubReviewAuthor != "reviewer-app[bot]" || runs[0].GithubReviewCommitSHA != targetSHA || runs[0].GithubReviewRequestFingerprint == "" {
 		t.Fatalf("submitted review outcome = %+v, want independent AO verdict and verified provider state", runs)
+	}
+}
+
+func TestSubmitCompletedNativeReviewRejectsChangedInlineComments(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{result: githubreview.Result{
+		ID: "456", Author: "reviewer-app[bot]", State: "CHANGES_REQUESTED", CommitSHA: targetSHA,
+	}}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	request := SubmittedReview{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.", Comments: []githubreview.Comment{{Path: "main.go", Line: 14, Side: "RIGHT", Body: "Guard this dereference."}},
+	}
+	first, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request})
+	if err != nil || len(first) != 1 || native.calls != 1 {
+		t.Fatalf("first submission = %+v err=%v calls=%d", first, err, native.calls)
+	}
+
+	duplicate, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request})
+	if err != nil || len(duplicate) != 1 || duplicate[0].GithubReviewRequestFingerprint != first[0].GithubReviewRequestFingerprint || native.calls != 1 {
+		t.Fatalf("same-payload retry = %+v err=%v calls=%d; want idempotent completed result", duplicate, err, native.calls)
+	}
+
+	request.Comments[0].Body = "A different inline finding."
+	if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request}); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "different native review request") || native.calls != 1 {
+		t.Fatalf("changed inline comments err=%v calls=%d; want rejection without another provider call", err, native.calls)
+	}
+}
+
+func TestSubmitCompletedNativeReviewRejectsMissingRequestFingerprint(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok: true,
+		run: domain.ReviewRun{
+			ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA,
+			Status: domain.ReviewRunComplete, Verdict: domain.VerdictChangesRequested,
+			Body: "Please fix the nil guard.", GithubReviewID: "456",
+			GithubReviewState: domain.GithubReviewStateChangesRequested,
+		},
+	}
+	native := &capturingNativeReviewer{}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	_, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested,
+		Event: githubreview.EventRequestChanges, Body: "Please fix the nil guard.",
+	}})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "no stored request fingerprint") || native.calls != 0 {
+		t.Fatalf("completed native retry err=%v provider calls=%d; want unverifiable retry rejected without another submission", err, native.calls)
 	}
 }
 

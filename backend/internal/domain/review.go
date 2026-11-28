@@ -97,13 +97,16 @@ type ReviewRun struct {
 	// populated only from a provider response AO verified. The AO verdict above
 	// remains independent; DEGRADED and LEGACY_UNVERIFIED never imply a native
 	// GitHub decision.
-	GithubReviewState     string     `json:"githubReviewState,omitempty"`
-	GithubReviewAuthor    string     `json:"githubReviewAuthor,omitempty"`
-	GithubReviewCommitSHA string     `json:"githubReviewCommitSha,omitempty"`
-	GithubReviewError     string     `json:"githubReviewError,omitempty"`
-	CreatedAt             time.Time  `json:"createdAt"`
-	CompletedAt           *time.Time `json:"completedAt,omitempty"`
-	DeliveredAt           *time.Time `json:"deliveredAt,omitempty"`
+	GithubReviewState     string `json:"githubReviewState,omitempty"`
+	GithubReviewAuthor    string `json:"githubReviewAuthor,omitempty"`
+	GithubReviewCommitSHA string `json:"githubReviewCommitSha,omitempty"`
+	GithubReviewError     string `json:"githubReviewError,omitempty"`
+	// GithubReviewRequestFingerprint is an internal idempotency key for the
+	// exact native event, body, and inline comments submitted for this run.
+	GithubReviewRequestFingerprint string     `json:"-"`
+	CreatedAt                      time.Time  `json:"createdAt"`
+	CompletedAt                    *time.Time `json:"completedAt,omitempty"`
+	DeliveredAt                    *time.Time `json:"deliveredAt,omitempty"`
 	// AutoInjectReview snapshots the session policy when this result is first
 	// recorded. Later toggle changes must not rewrite or deliver this run.
 	AutoInjectReview bool `json:"autoInjectReview"`

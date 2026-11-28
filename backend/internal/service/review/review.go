@@ -6,6 +6,9 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -124,7 +127,7 @@ type Store interface {
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
-	UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError string, autoInjectReview bool) (bool, error)
+	UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, githubReviewRequestFingerprint string, autoInjectReview bool) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
 	ListPRReviews(ctx context.Context, prURL string) ([]domain.PullRequestReview, error)
 	ListPRComments(ctx context.Context, prURL string) ([]domain.PullRequestComment, error)
@@ -851,6 +854,22 @@ type SubmittedReview struct {
 	Comments       []githubreview.Comment
 }
 
+func nativeReviewRequestFingerprint(run domain.ReviewRun, verdict domain.ReviewVerdict, event, body string, comments []githubreview.Comment) string {
+	payload := struct {
+		Version  int                    `json:"version"`
+		RunID    string                 `json:"runId"`
+		PRURL    string                 `json:"prUrl"`
+		HeadSHA  string                 `json:"headSha"`
+		Verdict  domain.ReviewVerdict   `json:"verdict"`
+		Event    string                 `json:"event"`
+		Body     string                 `json:"body"`
+		Comments []githubreview.Comment `json:"comments,omitempty"`
+	}{Version: 1, RunID: run.ID, PRURL: run.PRURL, HeadSHA: run.TargetSHA, Verdict: verdict, Event: event, Body: body, Comments: comments}
+	encoded, _ := json.Marshal(payload)
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
 // Submit records a reviewer's result for a specific worker review pass.
 func (s *Service) Submit(ctx context.Context, workerID domain.SessionID, runID string, verdict domain.ReviewVerdict, body, githubReviewID string) (domain.ReviewRun, error) {
 	runs, err := s.SubmitMany(ctx, workerID, []SubmittedReview{{
@@ -928,6 +947,10 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		return domain.ReviewRun{}, fmt.Errorf("%w: provider event is supported only when daemon native GitHub reviews are configured", ErrInvalid)
 	}
 	if s.nativeReviewer != nil {
+		review.Comments = append([]githubreview.Comment(nil), review.Comments...)
+		for i := range review.Comments {
+			review.Comments[i].Side = strings.ToUpper(strings.TrimSpace(review.Comments[i].Side))
+		}
 		if providerEvent == "" {
 			if verdict == domain.VerdictApproved {
 				providerEvent = githubreview.EventApprove
@@ -965,6 +988,10 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 	}
 	if run.SessionID != workerID {
 		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q does not belong to worker %q", ErrInvalid, runID, workerID)
+	}
+	requestFingerprint := ""
+	if s.nativeReviewer != nil {
+		requestFingerprint = nativeReviewRequestFingerprint(run, verdict, providerEvent, body, review.Comments)
 	}
 
 	switch run.Status {
@@ -1015,7 +1042,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			githubReviewState = domain.GithubReviewStateLegacyUnverified
 		}
 		updated, err := s.store.UpdateReviewRunOutcome(ctx, run.ID, domain.ReviewRunComplete, verdict, body, githubReviewID,
-			githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, session.AutoInjectReview)
+			githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, requestFingerprint, session.AutoInjectReview)
 		if err != nil {
 			return domain.ReviewRun{}, err
 		}
@@ -1030,6 +1057,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		run.GithubReviewAuthor = githubReviewAuthor
 		run.GithubReviewCommitSHA = githubReviewCommitSHA
 		run.GithubReviewError = githubReviewError
+		run.GithubReviewRequestFingerprint = requestFingerprint
 		run.AutoInjectReview = session.AutoInjectReview
 		if githubReviewID != "" && s.reviewRefresher != nil {
 			s.reviewRefresher.RequestReviewRefresh(run.PRURL)
@@ -1064,6 +1092,16 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		}
 		if githubReviewID != "" && githubReviewID != run.GithubReviewID {
 			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded GitHub review id %q", ErrInvalid, runID, run.GithubReviewID)
+		}
+		if s.nativeReviewer != nil && run.GithubReviewRequestFingerprint == "" {
+			switch run.GithubReviewState {
+			case domain.GithubReviewStateApproved, domain.GithubReviewStateChangesRequested,
+				domain.GithubReviewStateCommented, domain.GithubReviewStateDegraded:
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q has a native GitHub outcome but no stored request fingerprint; refusing to retry an unverifiable request", ErrInvalid, runID)
+			}
+		}
+		if s.nativeReviewer != nil && run.GithubReviewRequestFingerprint != "" && run.GithubReviewRequestFingerprint != requestFingerprint {
+			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded a different native review request", ErrInvalid, runID)
 		}
 		if s.nativeReviewer != nil && run.GithubReviewState != "" && run.GithubReviewState != domain.GithubReviewStateDegraded {
 			wantState := map[string]string{githubreview.EventApprove: domain.GithubReviewStateApproved, githubreview.EventRequestChanges: domain.GithubReviewStateChangesRequested, githubreview.EventComment: domain.GithubReviewStateCommented}[providerEvent]

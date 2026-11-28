@@ -280,6 +280,7 @@ var shippedMigrations = map[int64]string{
 	20261127173952793: "20261127173952793_pr_conversation_feedback.sql",
 	20261128071216331: "20261128071216331_pr_conversation_feedback_unverified.sql",
 	20261128104859986: "20261128104859986_github_review_provider_state.sql",
+	20261128123128853: "20261128123128853_github_review_request_fingerprint.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

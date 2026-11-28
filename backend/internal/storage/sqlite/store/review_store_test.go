@@ -376,6 +376,43 @@ func TestInsertReviewRunAllowsRerunAfterChangesRequested(t *testing.T) {
 	}
 }
 
+func TestUpdateReviewRunOutcomePersistsNativeRequestFingerprint(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "native-review-fingerprint")
+	rec, err := s.CreateSession(ctx, sampleRecord("native-review-fingerprint"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertReview(ctx, domain.Review{
+		ID: "review-1", SessionID: rec.ID, ProjectID: rec.ProjectID,
+		Harness: domain.ReviewerClaudeCode, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert review: %v", err)
+	}
+	if err := s.InsertReviewRun(ctx, domain.ReviewRun{
+		ID: "run-1", ReviewID: "review-1", SessionID: rec.ID, Harness: domain.ReviewerClaudeCode,
+		PRURL: "https://github.com/org/repo/pull/7", TargetSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status: domain.ReviewRunRunning, Verdict: domain.VerdictNone, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert review run: %v", err)
+	}
+	const fingerprint = "d7e7cb8869cb4af379e593778a9c8f6f7e8a32c00e99b67ba6b21e8eb247009d"
+	if ok, err := s.UpdateReviewRunOutcome(ctx, "run-1", domain.ReviewRunComplete, domain.VerdictApproved,
+		"Looks good.", "review-456", domain.GithubReviewStateApproved, "reviewer-app[bot]",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", fingerprint, true); err != nil || !ok {
+		t.Fatalf("update review outcome: ok=%v err=%v", ok, err)
+	}
+	got, ok, err := s.GetReviewRun(ctx, "run-1")
+	if err != nil || !ok {
+		t.Fatalf("get review run: ok=%v err=%v", ok, err)
+	}
+	if got.GithubReviewRequestFingerprint != fingerprint || got.GithubReviewState != domain.GithubReviewStateApproved {
+		t.Fatalf("review outcome = %+v; want persisted native request fingerprint and state", got)
+	}
+}
+
 func TestInsertReviewRunAllowsRerunAfterTerminalEmptyVerdict(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
