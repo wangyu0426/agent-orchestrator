@@ -67,14 +67,15 @@ type mockCommentNode struct {
 }
 
 type mockPRServer struct {
-	mu           sync.Mutex
-	prState      string
-	merged       bool
-	closed       bool
-	headSHA      string
-	prAuthor     string
-	commentPages [][]mockCommentNode
-	server       *httptest.Server
+	mu                  sync.Mutex
+	prState             string
+	merged              bool
+	closed              bool
+	headSHA             string
+	prAuthor            string
+	commentPages        [][]mockCommentNode
+	failCommentRequests bool
+	server              *httptest.Server
 }
 
 func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
@@ -112,10 +113,16 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 			headSHA := m.headSHA
 			prAuthor := m.prAuthor
 			pages := m.commentPages
+			failComments := m.failCommentRequests
 			m.mu.Unlock()
 
 			// Backward-paginated conversation comments query (newest page first).
 			if strings.Contains(payload.Query, "comments(last:") {
+				if failComments {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"message":"simulated graphql failure"}`))
+					return
+				}
 				pageIdx := len(pages) - 1
 				if strings.Contains(payload.Query, `before:"cursor-page-1"`) {
 					pageIdx = 0
@@ -210,6 +217,12 @@ func (m *mockPRServer) setPRState(state string, merged, closed bool) {
 	m.prState = state
 	m.merged = merged
 	m.closed = closed
+}
+
+func (m *mockPRServer) setFailCommentRequests(fail bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failCommentRequests = fail
 }
 
 func generateTestRSAKeyFile(t *testing.T) string {
@@ -774,5 +787,114 @@ func TestPRCommentFeedback_DisableRollbackSuppressesDeferredDelivery(t *testing.
 	}
 	if len(messenger.snapshot()) != 0 {
 		t.Fatalf("disabled prCommentFeedback must not deliver deferred feedback, got %+v", messenger.snapshot())
+	}
+}
+
+func TestPRCommentFeedback_DisableAutoInjectReviewDuringFetchFailureSuppressesDelivery(t *testing.T) {
+	mockSrv := newMockPRServer(t, "wangyu0426", "deadbeef9999")
+	mockSrv.setComments([]mockCommentNode{
+		{ID: "IC_deferred_policy", Author: "wangyu0426", Body: "/ao review-feedback Check policy at delivery", CreatedAt: "2026-11-27T17:10:00Z"},
+	})
+
+	st, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Date(2026, 11, 27, 17, 15, 0, 0, time.UTC)
+	if err := st.UpsertProject(context.Background(), domain.ProjectRecord{
+		ID:            "webpob",
+		Path:          t.TempDir(),
+		RepoOriginURL: "https://github.com/wangyu0426/WebPoB.git",
+		RegisteredAt:  now,
+		Config: domain.ProjectConfig{
+			PRCommentFeedback: domain.PRCommentFeedbackConfig{
+				Enabled:        true,
+				TrustedAuthors: []string{"wangyu0426"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+
+	rec, err := st.CreateSession(context.Background(), domain.SessionRecord{
+		ProjectID:        "webpob",
+		Kind:             domain.KindWorker,
+		Metadata:         domain.SessionMetadata{Branch: "feat/webpob-9"},
+		Activity:         domain.Activity{State: domain.ActivityWaitingInput, LastActivityAt: now},
+		AutoInjectReview: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	if _, err := st.ClaimPR(context.Background(), domain.PullRequest{
+		URL:       prURL,
+		SessionID: rec.ID,
+		Number:    9,
+		HeadSHA:   "deadbeef9999",
+		Author:    "wangyu0426",
+		Provider:  "github",
+		Host:      "github.com",
+		Repo:      "wangyu0426/WebPoB",
+		UpdatedAt: now,
+	}, nil, nil, nil, nil, ports.ReviewWriteReplace, true); err != nil {
+		t.Fatalf("ClaimPR: %v", err)
+	}
+
+	scmProv, err := scmgithub.NewProvider(scmgithub.ProviderOptions{
+		RESTBase:   mockSrv.server.URL,
+		GraphQLURL: mockSrv.server.URL + "/graphql",
+		Token:      scmgithub.StaticTokenSource("ghp_legacy_test_token"),
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("scmgithub.NewProvider: %v", err)
+	}
+	messenger := &fakeFeedbackMessenger{}
+	lcm := lifecycle.New(st, messenger, lifecycle.WithClock(func() time.Time { return now }))
+	multi := scmmulti.New(scmmulti.NamedProvider{Key: "github", Provider: scmProv})
+	obs := scmobserve.New(multi, st, lcm, scmobserve.Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Clock:  func() time.Time { return now },
+	})
+
+	// 1. Accept authorized command while worker is waiting_input (deferred, persisted with auto_inject_review=1).
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatalf("initial poll: %v", err)
+	}
+	if len(messenger.snapshot()) != 0 {
+		t.Fatalf("expected 0 deliveries while waiting_input, got %d", len(messenger.snapshot()))
+	}
+
+	// 2. Disable session AutoInjectReview, make comment fetch fail, and let worker become idle.
+	mockSrv.setFailCommentRequests(true)
+	rec.AutoInjectReview = false
+	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
+	if err := st.UpdateSession(context.Background(), rec); err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+
+	now = now.Add(time.Minute)
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatalf("poll with disabled AutoInjectReview and failing comment fetch: %v", err)
+	}
+	if len(messenger.snapshot()) != 0 {
+		t.Fatalf("disabled session AutoInjectReview must suppress persisted feedback during fetch failure, got %+v", messenger.snapshot())
+	}
+
+	// 3. Re-enable session AutoInjectReview while comment fetch still fails: durable retry still delivers.
+	rec.AutoInjectReview = true
+	if err := st.UpdateSession(context.Background(), rec); err != nil {
+		t.Fatalf("UpdateSession re-enable: %v", err)
+	}
+	now = now.Add(time.Minute)
+	if err := obs.Poll(context.Background()); err != nil {
+		t.Fatalf("poll after re-enabling AutoInjectReview: %v", err)
+	}
+	msgs := messenger.snapshot()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].message, "Check policy at delivery") {
+		t.Fatalf("expected durable delivery once AutoInjectReview is re-enabled, got %+v", msgs)
 	}
 }

@@ -332,7 +332,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 						)
 						continue
 					}
-					if !item.AutoInjectReview {
+					if !rec.AutoInjectReview || !item.AutoInjectReview {
 						slog.Default().Info("lifecycle: conversation feedback ignored",
 							"event", "ignored",
 							"session", id,
