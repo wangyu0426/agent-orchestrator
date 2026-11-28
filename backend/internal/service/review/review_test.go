@@ -225,6 +225,70 @@ func TestSubmitCompletedNativeReviewRejectsChangedInlineComments(t *testing.T) {
 	}
 }
 
+func TestSubmitDeliveredNativeReviewValidatesRetryPayload(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{result: githubreview.Result{
+		ID: "456", Author: "reviewer-app[bot]", State: "CHANGES_REQUESTED", CommitSHA: targetSHA,
+	}}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	request := SubmittedReview{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.", Comments: []githubreview.Comment{{Path: "main.go", Line: 14, Side: "RIGHT", Body: "Guard this dereference."}},
+	}
+	if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request}); err != nil {
+		t.Fatalf("first submission: %v", err)
+	}
+	store.run.Status = domain.ReviewRunDelivered
+
+	duplicate, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request})
+	if err != nil || len(duplicate) != 1 || duplicate[0].Status != domain.ReviewRunDelivered || native.calls != 1 {
+		t.Fatalf("same-payload delivered retry = %+v err=%v calls=%d; want idempotent result", duplicate, err, native.calls)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*SubmittedReview)
+	}{
+		{
+			name: "changed inline findings",
+			mutate: func(review *SubmittedReview) {
+				review.Comments[0].Body = "A different inline finding."
+			},
+		},
+		{
+			name: "changed event",
+			mutate: func(review *SubmittedReview) {
+				review.Event = githubreview.EventComment
+			},
+		},
+		{
+			name: "changed verdict",
+			mutate: func(review *SubmittedReview) {
+				review.Verdict = domain.VerdictApproved
+				review.Event = githubreview.EventApprove
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := request
+			changed.Comments = append([]githubreview.Comment(nil), request.Comments...)
+			tc.mutate(&changed)
+			if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{changed}); !errors.Is(err, ErrInvalid) || native.calls != 1 {
+				t.Fatalf("changed delivered retry err=%v provider calls=%d; want rejection without another submission", err, native.calls)
+			}
+		})
+	}
+}
+
 func TestSubmitCompletedNativeReviewRejectsMissingRequestFingerprint(t *testing.T) {
 	const (
 		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -1083,7 +1083,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			// all, recorded at the moment it is snapshotted onto the run.
 			"auto_inject": session.AutoInjectReview,
 		})
-	case domain.ReviewRunComplete:
+	case domain.ReviewRunComplete, domain.ReviewRunDelivered:
 		if run.Verdict != verdict {
 			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded verdict %q", ErrInvalid, runID, run.Verdict)
 		}
@@ -1109,8 +1109,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded provider state %q", ErrInvalid, runID, run.GithubReviewState)
 			}
 		}
-	case domain.ReviewRunDelivered:
-		return run, nil
+		if run.Status == domain.ReviewRunDelivered {
+			return run, nil
+		}
 	default:
 		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", errRunSuperseded, runID)
 	}
