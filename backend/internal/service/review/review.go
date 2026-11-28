@@ -128,6 +128,8 @@ type Store interface {
 	SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
 	UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, githubReviewRequestFingerprint string, autoInjectReview bool) (bool, error)
+	ClaimReviewRunForNativeSubmission(ctx context.Context, id, fingerprint string) (bool, error)
+	ReleaseReviewRunNativeSubmissionClaim(ctx context.Context, id, fingerprint string) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
 	ListPRReviews(ctx context.Context, prURL string) ([]domain.PullRequestReview, error)
 	ListPRComments(ctx context.Context, prURL string) ([]domain.PullRequestComment, error)
@@ -996,6 +998,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 
 	switch run.Status {
 	case domain.ReviewRunRunning:
+		if s.nativeReviewer != nil && run.GithubReviewRequestFingerprint != "" && run.GithubReviewRequestFingerprint != requestFingerprint {
+			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already claimed a different native review request", ErrConflict, runID)
+		}
 		session, found, err := s.store.GetSession(ctx, workerID)
 		if err != nil {
 			return domain.ReviewRun{}, err
@@ -1021,16 +1026,39 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			if !foundPR {
 				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q PR is no longer tracked by worker %q", ErrNotFound, run.ID, workerID)
 			}
+			claimed, claimErr := s.store.ClaimReviewRunForNativeSubmission(ctx, run.ID, requestFingerprint)
+			if claimErr != nil {
+				return domain.ReviewRun{}, claimErr
+			}
+			if !claimed {
+				current, currentOK, getErr := s.store.GetReviewRun(ctx, run.ID)
+				if getErr != nil {
+					return domain.ReviewRun{}, getErr
+				}
+				if !currentOK {
+					return domain.ReviewRun{}, fmt.Errorf("%w: review run %q", ErrNotFound, run.ID)
+				}
+				if current.Status != domain.ReviewRunRunning {
+					return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is no longer running", errRunSuperseded, run.ID)
+				}
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q could not claim its native review request", ErrConflict, run.ID)
+			}
 			result, submitErr := s.nativeReviewer.Submit(ctx, githubreview.Request{
 				RunID: run.ID, PRURL: run.PRURL, PRAuthor: prAuthor,
 				ExpectedHeadSHA: run.TargetSHA, Event: providerEvent, Body: body, Comments: review.Comments,
 			})
 			if submitErr != nil {
 				if errors.Is(submitErr, githubreview.ErrInvalidRequest) {
-					return domain.ReviewRun{}, fmt.Errorf("%w: %w", ErrInvalid, submitErr)
+					return domain.ReviewRun{}, errors.Join(
+						fmt.Errorf("%w: %w", ErrInvalid, submitErr),
+						releaseNativeReviewClaim(ctx, s.store, run.ID, requestFingerprint),
+					)
 				}
 				if errors.Is(submitErr, githubreview.ErrConflictingRetry) {
-					return domain.ReviewRun{}, fmt.Errorf("%w: %w", ErrConflict, submitErr)
+					return domain.ReviewRun{}, errors.Join(
+						fmt.Errorf("%w: %w", ErrConflict, submitErr),
+						releaseNativeReviewClaim(ctx, s.store, run.ID, requestFingerprint),
+					)
 				}
 				if !degradedNativeReviewError(submitErr) {
 					return domain.ReviewRun{}, submitErr
@@ -1135,6 +1163,13 @@ func (s *Service) lockSubmission(runID string) func() {
 	s.submitLockMu.Unlock()
 	mu.Lock()
 	return mu.Unlock
+}
+
+func releaseNativeReviewClaim(ctx context.Context, store Store, runID, fingerprint string) error {
+	if _, err := store.ReleaseReviewRunNativeSubmissionClaim(ctx, runID, fingerprint); err != nil {
+		return fmt.Errorf("release native review submission claim: %w", err)
+	}
+	return nil
 }
 
 func degradedNativeReviewError(err error) bool {

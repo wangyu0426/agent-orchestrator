@@ -1717,6 +1717,11 @@ func (e *Engine) Cancel(ctx stdctx.Context, workerID domain.SessionID) (CancelRe
 	if err != nil {
 		return CancelResult{}, err
 	}
+	for _, run := range running {
+		if run.GithubReviewRequestFingerprint != "" {
+			return CancelResult{}, fmt.Errorf("%w: native GitHub review submission for run %q is in progress; retry cancellation after it completes", ErrConflict, run.ID)
+		}
+	}
 	if len(running) == 0 {
 		review, ok, err := e.currentReviewForSession(ctx, workerID, harness)
 		if err != nil {

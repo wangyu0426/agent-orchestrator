@@ -413,6 +413,137 @@ func TestUpdateReviewRunOutcomePersistsNativeRequestFingerprint(t *testing.T) {
 	}
 }
 
+func TestNativeReviewSubmissionClaimWinsAgainstTerminalTransitions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "native-review-claim")
+	rec, err := s.CreateSession(ctx, sampleRecord("native-review-claim"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertReview(ctx, domain.Review{
+		ID: "review-claim", SessionID: rec.ID, ProjectID: rec.ProjectID,
+		Harness: domain.ReviewerClaudeCode, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert review: %v", err)
+	}
+	if err := s.InsertReviewRun(ctx, domain.ReviewRun{
+		ID: "run-claimed", ReviewID: "review-claim", SessionID: rec.ID, Harness: domain.ReviewerClaudeCode,
+		PRURL: "https://github.com/org/repo/pull/7", TargetSHA: "old-sha",
+		Status: domain.ReviewRunRunning, Verdict: domain.VerdictNone, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert claimed run: %v", err)
+	}
+	const fingerprint = "d7e7cb8869cb4af379e593778a9c8f6f7e8a32c00e99b67ba6b21e8eb247009d"
+	if claimed, err := s.ClaimReviewRunForNativeSubmission(ctx, "run-claimed", fingerprint); err != nil || !claimed {
+		t.Fatalf("claim native submission: claimed=%v err=%v", claimed, err)
+	}
+	if claimed, err := s.ClaimReviewRunForNativeSubmission(ctx, "run-claimed", fingerprint); err != nil || !claimed {
+		t.Fatalf("reclaim same native submission: claimed=%v err=%v; want idempotent recovery", claimed, err)
+	}
+	if n, err := s.SupersedeStaleRunningReviewRuns(ctx, rec.ID, "https://github.com/org/repo/pull/7", "new-sha", "superseded"); err != nil || n != 0 {
+		t.Fatalf("supersede claimed run: updated=%d err=%v; want claim to prevent superseding", n, err)
+	}
+	if n, err := s.CancelRunningReviewRunsBySession(ctx, rec.ID, "cancelled"); err != nil || n != 0 {
+		t.Fatalf("cancel claimed run by session: updated=%d err=%v; want claim to prevent cancellation", n, err)
+	}
+	if n, err := s.CancelRunningReviewRunsBySessionAndHarness(ctx, rec.ID, domain.ReviewerClaudeCode, "cancelled"); err != nil || n != 0 {
+		t.Fatalf("cancel claimed run by harness: updated=%d err=%v; want claim to prevent cancellation", n, err)
+	}
+	if updated, err := s.UpdateReviewRunResult(ctx, "run-claimed", domain.ReviewRunFailed, domain.VerdictNone, "failed", "", true); err != nil || updated {
+		t.Fatalf("fail claimed run: updated=%v err=%v; want claim to prevent terminal failure", updated, err)
+	}
+	got, ok, err := s.GetReviewRun(ctx, "run-claimed")
+	if err != nil || !ok {
+		t.Fatalf("get claimed run: ok=%v err=%v", ok, err)
+	}
+	if got.Status != domain.ReviewRunRunning || got.GithubReviewRequestFingerprint != fingerprint {
+		t.Fatalf("claimed run = %+v; want running with durable request fingerprint", got)
+	}
+	if updated, err := s.UpdateReviewRunOutcome(ctx, "run-claimed", domain.ReviewRunComplete, domain.VerdictApproved,
+		"Looks good.", "review-456", domain.GithubReviewStateApproved, "reviewer-app[bot]", "old-sha", "", fingerprint, true); err != nil || !updated {
+		t.Fatalf("complete claimed run: updated=%v err=%v", updated, err)
+	}
+}
+
+func TestCancellationWinningBeforeNativeReviewClaimPreventsClaim(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "native-review-claim-cancel")
+	rec, err := s.CreateSession(ctx, sampleRecord("native-review-claim-cancel"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertReview(ctx, domain.Review{
+		ID: "review-cancel", SessionID: rec.ID, ProjectID: rec.ProjectID,
+		Harness: domain.ReviewerClaudeCode, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert review: %v", err)
+	}
+	if err := s.InsertReviewRun(ctx, domain.ReviewRun{
+		ID: "run-cancel-first", ReviewID: "review-cancel", SessionID: rec.ID, Harness: domain.ReviewerClaudeCode,
+		PRURL: "https://github.com/org/repo/pull/8", TargetSHA: "head-sha",
+		Status: domain.ReviewRunRunning, Verdict: domain.VerdictNone, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert running run: %v", err)
+	}
+	if n, err := s.CancelRunningReviewRunsBySessionAndHarness(ctx, rec.ID, domain.ReviewerClaudeCode, "cancelled"); err != nil || n != 1 {
+		t.Fatalf("cancel before claim: updated=%d err=%v", n, err)
+	}
+	const fingerprint = "d7e7cb8869cb4af379e593778a9c8f6f7e8a32c00e99b67ba6b21e8eb247009d"
+	if claimed, err := s.ClaimReviewRunForNativeSubmission(ctx, "run-cancel-first", fingerprint); err != nil || claimed {
+		t.Fatalf("claim cancelled run: claimed=%v err=%v; want provider submission refused", claimed, err)
+	}
+	got, ok, err := s.GetReviewRun(ctx, "run-cancel-first")
+	if err != nil || !ok {
+		t.Fatalf("get cancelled run: ok=%v err=%v", ok, err)
+	}
+	if got.Status != domain.ReviewRunCancelled || got.GithubReviewRequestFingerprint != "" {
+		t.Fatalf("cancelled run = %+v; want no native submission claim", got)
+	}
+}
+
+func TestSupersedeWinningBeforeNativeReviewClaimPreventsClaim(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "native-review-claim-supersede")
+	rec, err := s.CreateSession(ctx, sampleRecord("native-review-claim-supersede"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertReview(ctx, domain.Review{
+		ID: "review-supersede", SessionID: rec.ID, ProjectID: rec.ProjectID,
+		Harness: domain.ReviewerClaudeCode, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert review: %v", err)
+	}
+	const prURL = "https://github.com/org/repo/pull/9"
+	if err := s.InsertReviewRun(ctx, domain.ReviewRun{
+		ID: "run-supersede-first", ReviewID: "review-supersede", SessionID: rec.ID, Harness: domain.ReviewerClaudeCode,
+		PRURL: prURL, TargetSHA: "old-sha", Status: domain.ReviewRunRunning,
+		Verdict: domain.VerdictNone, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert running run: %v", err)
+	}
+	if n, err := s.SupersedeStaleRunningReviewRuns(ctx, rec.ID, prURL, "new-sha", "superseded"); err != nil || n != 1 {
+		t.Fatalf("supersede before claim: updated=%d err=%v", n, err)
+	}
+	const fingerprint = "d7e7cb8869cb4af379e593778a9c8f6f7e8a32c00e99b67ba6b21e8eb247009d"
+	if claimed, err := s.ClaimReviewRunForNativeSubmission(ctx, "run-supersede-first", fingerprint); err != nil || claimed {
+		t.Fatalf("claim superseded run: claimed=%v err=%v; want provider submission refused", claimed, err)
+	}
+	got, ok, err := s.GetReviewRun(ctx, "run-supersede-first")
+	if err != nil || !ok {
+		t.Fatalf("get superseded run: ok=%v err=%v", ok, err)
+	}
+	if got.Status != domain.ReviewRunFailed || got.GithubReviewRequestFingerprint != "" {
+		t.Fatalf("superseded run = %+v; want no native submission claim", got)
+	}
+}
+
 func TestInsertReviewRunAllowsRerunAfterTerminalEmptyVerdict(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

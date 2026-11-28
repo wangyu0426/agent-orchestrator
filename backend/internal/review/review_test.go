@@ -1296,6 +1296,26 @@ func TestCancelInterruptsReviewerAndCancelsRunningRuns(t *testing.T) {
 	}
 }
 
+func TestCancelReturnsConflictWhileNativeReviewSubmissionIsClaimed(t *testing.T) {
+	store := &fakeStore{
+		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex, ReviewerHandleID: "review-mer-1"},
+		runs: []domain.ReviewRun{{
+			ID: "run-claimed", ReviewID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex,
+			PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Status: domain.ReviewRunRunning,
+			GithubReviewRequestFingerprint: "native-request-fingerprint",
+		}},
+	}
+	launcher := &fakeLauncher{}
+	eng := newEngineForTest(store, fakeSessions{rec: liveWorker(), ok: true}, prAt("sha1"), fakeProjects{}, launcher)
+
+	if _, err := eng.Cancel(context.Background(), "mer-1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Cancel err=%v; want conflict while native submission is claimed", err)
+	}
+	if launcher.cancelled || store.runs[0].Status != domain.ReviewRunRunning {
+		t.Fatalf("cancelled=%v run=%+v; want running submission untouched", launcher.cancelled, store.runs[0])
+	}
+}
+
 func TestCancelTargetsRunningReviewerHarness(t *testing.T) {
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerCodex, ReviewerHandleID: "codex-pane"},

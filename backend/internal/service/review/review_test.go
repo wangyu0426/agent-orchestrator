@@ -29,6 +29,9 @@ type fakeStore struct {
 	autoInjectSets          []bool
 
 	updateCalls       int
+	claimCalls        int
+	releaseCalls      int
+	beforeNativeClaim func(*fakeStore)
 	activityUpdates   int
 	resolvedThreadIDs []string
 }
@@ -98,10 +101,48 @@ func (f *fakeStore) SetSessionAutoInjectReview(_ context.Context, _ domain.Sessi
 	return true, nil
 }
 
+func (f *fakeStore) ClaimReviewRunForNativeSubmission(_ context.Context, id, fingerprint string) (bool, error) {
+	f.claimCalls++
+	if f.beforeNativeClaim != nil {
+		f.beforeNativeClaim(f)
+	}
+	for i := range f.batchRuns {
+		if f.batchRuns[i].ID != id {
+			continue
+		}
+		run := &f.batchRuns[i]
+		if run.Status != domain.ReviewRunRunning || (run.GithubReviewRequestFingerprint != "" && run.GithubReviewRequestFingerprint != fingerprint) {
+			return false, nil
+		}
+		run.GithubReviewRequestFingerprint = fingerprint
+		return true, nil
+	}
+	if f.run.ID != id || f.run.Status != domain.ReviewRunRunning || (f.run.GithubReviewRequestFingerprint != "" && f.run.GithubReviewRequestFingerprint != fingerprint) {
+		return false, nil
+	}
+	f.run.GithubReviewRequestFingerprint = fingerprint
+	return true, nil
+}
+
+func (f *fakeStore) ReleaseReviewRunNativeSubmissionClaim(_ context.Context, id, fingerprint string) (bool, error) {
+	f.releaseCalls++
+	for i := range f.batchRuns {
+		if f.batchRuns[i].ID == id && f.batchRuns[i].Status == domain.ReviewRunRunning && f.batchRuns[i].GithubReviewRequestFingerprint == fingerprint {
+			f.batchRuns[i].GithubReviewRequestFingerprint = ""
+			return true, nil
+		}
+	}
+	if f.run.ID != id || f.run.Status != domain.ReviewRunRunning || f.run.GithubReviewRequestFingerprint != fingerprint {
+		return false, nil
+	}
+	f.run.GithubReviewRequestFingerprint = ""
+	return true, nil
+}
+
 func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error) {
 	for i := range f.batchRuns {
 		if f.batchRuns[i].ID == id {
-			if f.batchRuns[i].Status != domain.ReviewRunRunning {
+			if f.batchRuns[i].Status != domain.ReviewRunRunning || f.batchRuns[i].GithubReviewRequestFingerprint != "" {
 				return false, nil
 			}
 			f.updateCalls++
@@ -116,7 +157,7 @@ func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status d
 			return true, nil
 		}
 	}
-	if f.run.Status != domain.ReviewRunRunning {
+	if f.run.ID != id || f.run.Status != domain.ReviewRunRunning || f.run.GithubReviewRequestFingerprint != "" {
 		return false, nil
 	}
 	f.updateCalls++
@@ -128,27 +169,43 @@ func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status d
 	return true, nil
 }
 
-func (f *fakeStore) UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, githubReviewRequestFingerprint string, autoInjectReview bool) (bool, error) {
-	updated, err := f.UpdateReviewRunResult(ctx, id, status, verdict, body, githubReviewID, autoInjectReview)
-	if !updated || err != nil {
-		return updated, err
-	}
-	apply := func(run *domain.ReviewRun) {
+func (f *fakeStore) UpdateReviewRunOutcome(_ context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, githubReviewRequestFingerprint string, autoInjectReview bool) (bool, error) {
+	apply := func(run *domain.ReviewRun) bool {
+		if run.Status != domain.ReviewRunRunning || (run.GithubReviewRequestFingerprint != "" && run.GithubReviewRequestFingerprint != githubReviewRequestFingerprint) {
+			return false
+		}
+		run.Status = status
+		run.Verdict = verdict
+		run.Body = body
+		run.GithubReviewID = githubReviewID
+		run.AutoInjectReview = autoInjectReview
 		run.GithubReviewState = githubReviewState
 		run.GithubReviewAuthor = githubReviewAuthor
 		run.GithubReviewCommitSHA = githubReviewCommitSHA
 		run.GithubReviewError = githubReviewError
 		run.GithubReviewRequestFingerprint = githubReviewRequestFingerprint
+		return true
 	}
 	for i := range f.batchRuns {
 		if f.batchRuns[i].ID == id {
-			apply(&f.batchRuns[i])
+			if !apply(&f.batchRuns[i]) {
+				return false, nil
+			}
+			f.updateCalls++
+			if f.run.ID == id {
+				f.run = f.batchRuns[i]
+			}
+			return true, nil
 		}
 	}
 	if f.run.ID == id {
-		apply(&f.run)
+		if !apply(&f.run) {
+			return false, nil
+		}
+		f.updateCalls++
+		return true, nil
 	}
-	return true, nil
+	return false, nil
 }
 
 type capturingNativeReviewer struct {
@@ -183,8 +240,8 @@ func TestSubmitNativeReviewBindsStoredRunAndPersistsVerifiedProviderOutcome(t *t
 	if err != nil {
 		t.Fatalf("SubmitMany: %v", err)
 	}
-	if native.calls != 1 || native.request.RunID != "run-native" || native.request.PRURL != prURL || native.request.ExpectedHeadSHA != targetSHA || native.request.PRAuthor != "worker-app[bot]" || native.request.Event != githubreview.EventRequestChanges {
-		t.Fatalf("native request calls=%d request=%+v", native.calls, native.request)
+	if native.calls != 1 || store.claimCalls != 1 || native.request.RunID != "run-native" || native.request.PRURL != prURL || native.request.ExpectedHeadSHA != targetSHA || native.request.PRAuthor != "worker-app[bot]" || native.request.Event != githubreview.EventRequestChanges {
+		t.Fatalf("native request calls=%d claim calls=%d request=%+v", native.calls, store.claimCalls, native.request)
 	}
 	if len(runs) != 1 || runs[0].Verdict != domain.VerdictChangesRequested || runs[0].GithubReviewID != "456" || runs[0].GithubReviewState != domain.GithubReviewStateChangesRequested || runs[0].GithubReviewAuthor != "reviewer-app[bot]" || runs[0].GithubReviewCommitSHA != targetSHA || runs[0].GithubReviewRequestFingerprint == "" {
 		t.Fatalf("submitted review outcome = %+v, want independent AO verdict and verified provider state", runs)
@@ -209,8 +266,37 @@ func TestSubmitMapsNativeRequestValidationToInvalid(t *testing.T) {
 	if !errors.Is(err, ErrInvalid) || !errors.Is(err, githubreview.ErrInvalidRequest) {
 		t.Fatalf("SubmitMany err=%v; want review ErrInvalid wrapping native request validation", err)
 	}
-	if native.calls != 1 || store.updateCalls != 0 {
-		t.Fatalf("native calls=%d run outcome updates=%d; want one validation call and no completed outcome", native.calls, store.updateCalls)
+	if native.calls != 1 || store.claimCalls != 1 || store.releaseCalls != 1 || store.updateCalls != 0 || store.run.GithubReviewRequestFingerprint != "" {
+		t.Fatalf("native calls=%d claims=%d releases=%d run outcome updates=%d fingerprint=%q; want rejected request claim released without completing", native.calls, store.claimCalls, store.releaseCalls, store.updateCalls, store.run.GithubReviewRequestFingerprint)
+	}
+}
+
+func TestSubmitDoesNotPostWhenCancellationWinsNativeClaim(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+		beforeNativeClaim: func(store *fakeStore) {
+			store.run.Status = domain.ReviewRunCancelled
+		},
+	}
+	native := &capturingNativeReviewer{result: githubreview.Result{
+		ID: "456", Author: "reviewer-app[bot]", State: "CHANGES_REQUESTED", CommitSHA: targetSHA,
+	}}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	_, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.",
+	}})
+	if err == nil || native.calls != 0 || store.claimCalls != 1 {
+		t.Fatalf("SubmitMany err=%v native calls=%d claim calls=%d; want a lost claim to prevent the provider POST", err, native.calls, store.claimCalls)
+	}
+	if store.run.Status != domain.ReviewRunCancelled || store.run.GithubReviewRequestFingerprint != "" {
+		t.Fatalf("cancelled run after failed claim = %+v", store.run)
 	}
 }
 
@@ -233,10 +319,10 @@ func TestSubmitConflictingNativeRetryDoesNotCompleteRun(t *testing.T) {
 	if !errors.Is(err, ErrConflict) || !errors.Is(err, githubreview.ErrConflictingRetry) {
 		t.Fatalf("SubmitMany err=%v; want conflict preserving the native retry cause", err)
 	}
-	if native.calls != 1 || store.updateCalls != 0 {
-		t.Fatalf("native calls=%d run outcome updates=%d; want one provider check and no completed outcome", native.calls, store.updateCalls)
+	if native.calls != 1 || store.claimCalls != 1 || store.releaseCalls != 1 || store.updateCalls != 0 {
+		t.Fatalf("native calls=%d claims=%d releases=%d run outcome updates=%d; want conflict without completing the run", native.calls, store.claimCalls, store.releaseCalls, store.updateCalls)
 	}
-	if store.run.Status != domain.ReviewRunRunning || store.run.Verdict != domain.VerdictNone || store.run.Body != "" {
+	if store.run.Status != domain.ReviewRunRunning || store.run.Verdict != domain.VerdictNone || store.run.Body != "" || store.run.GithubReviewRequestFingerprint != "" {
 		t.Fatalf("run was overwritten after provider conflict: %+v", store.run)
 	}
 }

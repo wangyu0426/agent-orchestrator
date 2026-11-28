@@ -382,6 +382,14 @@ func TestReviewsCancelIncludesReviewStates(t *testing.T) {
 	}
 }
 
+func TestReviewsCancelMapsNativeSubmissionConflictTo409(t *testing.T) {
+	srv := newReviewTestServer(t, &fakeReviewService{cancelErr: fmt.Errorf("native review submission in progress: %w", reviewsvc.ErrConflict)})
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/cancel", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusConflict, "REVIEW_CONFLICT")
+}
+
 func TestReviewsKillArchivesReviewerSurface(t *testing.T) {
 	svc := &fakeReviewService{list: reviewcore.SessionReviews{
 		ReviewerHandleID: "review-mer-1",
