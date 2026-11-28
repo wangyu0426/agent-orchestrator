@@ -109,14 +109,20 @@ func (o *Observer) refreshConversationFeedback(
 				continue
 			} else {
 				freshOpen = true
-				o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
 				hasActive, err = o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
 				if err != nil {
-					o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
-					hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
-				} else if comments.Partial && !hasActive && hasObs {
-					obs.ConversationFeedbackUnverified = true
-					observations[pkey] = obs
+					o.logger.Error("scm observer: reconcile conversation feedback failed; suppressing delivery until next reconcile", "pr", prURL, "session", s.session.ID, "err", err)
+					hasActive = false
+					if hasObs {
+						obs.ConversationFeedbackUnverified = true
+						observations[pkey] = obs
+					}
+				} else {
+					o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
+					if comments.Partial && !hasActive && hasObs {
+						obs.ConversationFeedbackUnverified = true
+						observations[pkey] = obs
+					}
 				}
 			}
 		}
