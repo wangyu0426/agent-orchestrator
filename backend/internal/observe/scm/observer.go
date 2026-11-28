@@ -231,14 +231,14 @@ func newCache(maxEntries int) ObserverCache {
 		maxEntries = DefaultCacheMax
 	}
 	return ObserverCache{
-		RepoPRListETag:      map[string]string{},
+		RepoPRListETag:         map[string]string{},
 		CommitChecksETag:       map[string]string{},
 		LastReviewPollAt:       map[string]time.Time{},
 		LastConversationPollAt: map[string]time.Time{},
 		ReviewRefreshFailed:    map[string]bool{},
-		LastPRFetchAt:       map[string]time.Time{},
-		LastSyncCursor:      map[string]time.Time{},
-		max:                 maxEntries,
+		LastPRFetchAt:          map[string]time.Time{},
+		LastSyncCursor:         map[string]time.Time{},
+		max:                    maxEntries,
 	}
 }
 
