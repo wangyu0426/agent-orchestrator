@@ -95,6 +95,23 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectReco
 	return rec, ok, nil
 }
 
+type conversationFeedbackReadErrorStore struct {
+	*fakeStore
+	projectErr  error
+	feedbackErr error
+}
+
+func (f *conversationFeedbackReadErrorStore) GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error) {
+	if f.projectErr != nil {
+		return domain.ProjectRecord{}, false, f.projectErr
+	}
+	return f.fakeStore.GetProject(ctx, id)
+}
+
+func (f *conversationFeedbackReadErrorStore) ListActivePRConversationFeedback(context.Context, string) ([]domain.PullRequestConversationFeedback, error) {
+	return nil, f.feedbackErr
+}
+
 func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.PullRequestComment, error) {
 	return append([]domain.PullRequestComment(nil), f.comments[prURL]...), nil
 }
@@ -2672,6 +2689,69 @@ func TestPRObservation_MergeConflictReadErrorStillSendsCIAndReview(t *testing.T)
 	}
 	if !strings.Contains(msg.msgs[2], "merge conflicts") {
 		t.Fatalf("third nudge should be the merge-conflict nudge, got %q", msg.msgs[2])
+	}
+}
+
+func TestPRObservation_ConversationFeedbackReadErrorsStillSendCIAndReview(t *testing.T) {
+	projectErr := errors.New("transient project read failure")
+	feedbackErr := errors.New("transient conversation feedback read failure")
+	tests := []struct {
+		name        string
+		projectErr  error
+		feedbackErr error
+		wantErr     string
+	}{
+		{name: "project config read", projectErr: projectErr, wantErr: "load project mer for conversation feedback"},
+		{name: "active feedback read", feedbackErr: feedbackErr, wantErr: "list persisted conversation feedback for pr1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseStore := newFakeStore()
+			store := &conversationFeedbackReadErrorStore{
+				fakeStore:   baseStore,
+				projectErr:  tt.projectErr,
+				feedbackErr: tt.feedbackErr,
+			}
+			baseStore.projects["mer"] = domain.ProjectRecord{
+				ID: "mer",
+				Config: domain.ProjectConfig{PRCommentFeedback: domain.PRCommentFeedbackConfig{
+					Enabled:        true,
+					TrustedAuthors: []string{"alice"},
+				}},
+			}
+			baseStore.reviews["pr1"] = []domain.PullRequestReview{{
+				ID:               "review-1",
+				Author:           "alice",
+				State:            domain.ReviewChangesRequest,
+				Body:             "please update this",
+				AutoInjectReview: true,
+			}}
+			rec := working("mer-1")
+			baseStore.sessions[rec.ID] = rec
+			messenger := &fakeMessenger{}
+			m := New(store, messenger)
+			o := ports.PRObservation{
+				Fetched: true,
+				URL:     "pr1",
+				CI:      domain.CIFailing,
+				Checks:  []ports.PRCheckObservation{{Name: "build", Status: domain.PRCheckFailed, LogTail: "boom"}},
+				Review:  domain.ReviewChangesRequest,
+			}
+
+			err := m.ApplyPRObservation(ctx, rec.ID, o)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ApplyPRObservation error = %v, want error containing %q", err, tt.wantErr)
+			}
+			if len(messenger.msgs) != 2 {
+				t.Fatalf("messages = %v, want CI and formal-review nudges despite conversation feedback read failure", messenger.msgs)
+			}
+			if !strings.Contains(messenger.msgs[0], "boom") {
+				t.Fatalf("first nudge should be CI failure, got %q", messenger.msgs[0])
+			}
+			if !strings.Contains(messenger.msgs[1], "please update this") {
+				t.Fatalf("second nudge should be formal review, got %q", messenger.msgs[1])
+			}
+		})
 	}
 }
 

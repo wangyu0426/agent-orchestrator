@@ -206,6 +206,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	ident := prIdentity(o)
 	var nudges []pendingNudge
 	var ciPolicyErr error
+	var conversationFeedbackErr error
 
 	if !needsInput {
 		reviews, err := m.store.ListPRReviews(ctx, o.URL)
@@ -313,50 +314,50 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		if fbStore, ok := m.store.(conversationFeedbackStore); ok && !o.ConversationFeedbackUnverified {
 			proj, found, err := fbStore.GetProject(ctx, string(rec.ProjectID))
 			if err != nil {
-				return fmt.Errorf("load project %s for conversation feedback: %w", rec.ProjectID, err)
-			}
-			if found && proj.Config.PRCommentFeedback.Enabled {
+				conversationFeedbackErr = fmt.Errorf("load project %s for conversation feedback: %w", rec.ProjectID, err)
+			} else if found && proj.Config.PRCommentFeedback.Enabled {
 				fbItems, err := fbStore.ListActivePRConversationFeedback(ctx, o.URL)
 				if err != nil {
-					return fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
-				}
-				for _, item := range fbItems {
-					if allowed, reason := domain.AuthorizePRCommentFeedback(proj.Config.PRCommentFeedback, item.Author, false); !allowed {
-						slog.Default().Info("lifecycle: conversation feedback ignored",
-							"event", "ignored",
+					conversationFeedbackErr = fmt.Errorf("list persisted conversation feedback for %s: %w", o.URL, err)
+				} else {
+					for _, item := range fbItems {
+						if allowed, reason := domain.AuthorizePRCommentFeedback(proj.Config.PRCommentFeedback, item.Author, false); !allowed {
+							slog.Default().Info("lifecycle: conversation feedback ignored",
+								"event", "ignored",
+								"session", id,
+								"pr", o.URL,
+								"comment_id", item.CommentID,
+								"author", item.Author,
+								"reason", reason,
+							)
+							continue
+						}
+						if !rec.AutoInjectReview || !item.AutoInjectReview {
+							slog.Default().Info("lifecycle: conversation feedback ignored",
+								"event", "ignored",
+								"session", id,
+								"pr", o.URL,
+								"comment_id", item.CommentID,
+								"author", item.Author,
+								"reason", "auto_inject_review_disabled",
+							)
+							continue
+						}
+						msg := formatConversationFeedbackMessage(item, ident, o.URL)
+						slog.Default().Info("lifecycle: conversation feedback queued",
+							"event", "queued",
 							"session", id,
 							"pr", o.URL,
 							"comment_id", item.CommentID,
 							"author", item.Author,
-							"reason", reason,
+							"body_hash", item.BodyHash,
 						)
-						continue
+						nudges = append(nudges, pendingNudge{
+							key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
+							sig: item.BodyHash,
+							msg: msg,
+						})
 					}
-					if !rec.AutoInjectReview || !item.AutoInjectReview {
-						slog.Default().Info("lifecycle: conversation feedback ignored",
-							"event", "ignored",
-							"session", id,
-							"pr", o.URL,
-							"comment_id", item.CommentID,
-							"author", item.Author,
-							"reason", "auto_inject_review_disabled",
-						)
-						continue
-					}
-					msg := formatConversationFeedbackMessage(item, ident, o.URL)
-					slog.Default().Info("lifecycle: conversation feedback queued",
-						"event", "queued",
-						"session", id,
-						"pr", o.URL,
-						"comment_id", item.CommentID,
-						"author", item.Author,
-						"body_hash", item.BodyHash,
-					)
-					nudges = append(nudges, pendingNudge{
-						key: conversationFeedbackNudgeKey(o.URL, item.CommentID),
-						sig: item.BodyHash,
-						msg: msg,
-					})
 				}
 			}
 		}
@@ -417,6 +418,9 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	}
 	// Surface deferred policy/parent-stack read errors only after independent
 	// nudges have been sent, so one failed lookup cannot hide another reaction.
+	if conversationFeedbackErr != nil {
+		return conversationFeedbackErr
+	}
 	if ciPolicyErr != nil {
 		return ciPolicyErr
 	}
