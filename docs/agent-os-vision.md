@@ -75,6 +75,10 @@ The reference scenario is an explicitly authorized disposable project with an in
 
 Validate with deterministic fake-provider fault injection, race/restart tests and opt-in live smoke tests. For supported workloads, track delivery success, human interventions, recovery success, duplicate/lost events and writes, time to ready-to-merge, resource consumption and cost per accepted task. Establish baselines before selecting numerical targets. A sustained unattended soak with intentional failures should precede broader promotion; safety stops and required human decisions are correct behavior, not failures of autonomy.
 
+## Community research
+
+See [agent runtime landscape](research/agent-runtime-landscape.md) for comparative research, the distinction between agent-led delegation and durable control-plane ownership, firsthand operator observations, and future evaluation criteria.
+
 ## Non-goals
 
 No mandatory role-based multi-agent team, new general-purpose OS, inference engine, universal cross-provider conversation migration, separate workflow engine, wholesale rewrite, or replacement of Git/CI/tracker systems. No change to deployed configuration, privileges, review/merge authority or upstream compatibility is authorized by this document. Implementation remains independently scoped, tested and reviewed.
