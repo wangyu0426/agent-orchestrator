@@ -16,6 +16,31 @@ type memConversationFeedbackStore struct {
 	rows        map[string]map[string]domain.PullRequestConversationFeedback
 }
 
+type conversationFeedbackTestProvider struct {
+	Provider
+	result ports.SCMConversationCommentsResult
+	calls  int
+}
+
+func (p *conversationFeedbackTestProvider) FetchConversationComments(context.Context, ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
+	p.calls++
+	return p.result, nil
+}
+
+type conversationFeedbackTestStore struct {
+	Store
+	*memConversationFeedbackStore
+	project domain.ProjectRecord
+}
+
+func (s *conversationFeedbackTestStore) GetProject(context.Context, string) (domain.ProjectRecord, bool, error) {
+	return s.project, true, nil
+}
+
+func (s *conversationFeedbackTestStore) ListChecks(context.Context, string) ([]domain.PullRequestCheck, error) {
+	return nil, nil
+}
+
 func newMemConversationFeedbackStore() *memConversationFeedbackStore {
 	return &memConversationFeedbackStore{
 		initialized: map[string]time.Time{},
@@ -110,7 +135,141 @@ func TestReconcileConversationFeedback_PartialWindowExcludesDeletedCommand(t *te
 	if err != nil {
 		t.Fatalf("ListPRConversationFeedback: %v", err)
 	}
-	if len(rows) != 1 || rows[0].State != domain.PRConversationFeedbackActive {
-		t.Fatalf("expected IC_old_cmd to be preserved as active on partial scan (not falsely deleted), got %+v", rows)
+	if len(rows) != 1 || rows[0].State != domain.PRConversationFeedbackActive || !rows[0].Unverified {
+		t.Fatalf("expected IC_old_cmd to be preserved but marked unverified on partial scan, got %+v", rows)
+	}
+}
+
+func TestRefreshConversationFeedback_PartialScanBlocksCachedDelivery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 5, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	repo := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "wangyu0426", Name: "WebPoB", Repo: "wangyu0426/WebPoB"}
+	subj := &subject{
+		session: domain.SessionRecord{ID: "webpob-1", ProjectID: "project-1", AutoInjectReview: true},
+		repo:    repo,
+		known:   domain.PullRequest{URL: prURL, Number: 9},
+		hasPR:   true,
+	}
+	pkey := keyForTrackedPR(subj.known, repo)
+	fbStore := newMemConversationFeedbackStore()
+	if err := fbStore.UpsertPRConversationFeedback(ctx, domain.PullRequestConversationFeedback{
+		PRURL:             prURL,
+		CommentID:         "IC_old_cmd",
+		SessionID:         subj.session.ID,
+		Author:            "wangyu0426",
+		Body:              "Fix edge case",
+		BodyHash:          "old-hash",
+		State:             domain.PRConversationFeedbackActive,
+		AutoInjectReview:  true,
+		CreatedAtProvider: now.Add(-time.Hour),
+		ObservedAt:        now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed active feedback: %v", err)
+	}
+	provider := &conversationFeedbackTestProvider{result: ports.SCMConversationCommentsResult{
+		Comments: []ports.SCMConversationCommentObservation{{
+			ID:        "IC_newer_unmarked",
+			Author:    "wangyu0426",
+			Body:      "Unmarked chatter",
+			CreatedAt: now.Add(-time.Minute),
+		}},
+		Partial: true,
+	}}
+	store := &conversationFeedbackTestStore{
+		memConversationFeedbackStore: fbStore,
+		project: domain.ProjectRecord{ID: "project-1", Config: domain.ProjectConfig{PRCommentFeedback: domain.PRCommentFeedbackConfig{
+			Enabled:        true,
+			TrustedAuthors: []string{"wangyu0426"},
+		}}},
+	}
+	observer := New(provider, store, nil, Config{
+		Clock:          func() time.Time { return now },
+		ReviewInterval: 5 * time.Minute,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	subjects := map[string]*subject{"webpob-1": subj}
+	subjectsByPR := map[string]*subject{pkey: subj}
+	forced := map[string]bool{}
+	localOnly := map[string]bool{}
+
+	// A partial comment scan omits the older persisted command and must make it
+	// ineligible until a complete scan or a visible command verifies it.
+	observations := map[string]ports.SCMObservation{pkey: {
+		Fetched:  true,
+		Provider: "github",
+		Host:     "github.com",
+		Repo:     repo.Repo,
+		PR:       ports.SCMPRObservation{URL: prURL, Number: 9},
+	}}
+	active := observer.refreshConversationFeedback(ctx, subjects, observations, subjectsByPR, forced, localOnly, now)
+	if active[pkey] {
+		t.Fatal("partial scan made omitted persisted feedback eligible for delivery")
+	}
+	if !observations[pkey].ConversationFeedbackUnverified {
+		t.Fatal("partial scan did not mark the current PR observation unverified")
+	}
+	rows, err := fbStore.ListPRConversationFeedback(ctx, prURL)
+	if err != nil {
+		t.Fatalf("list persisted feedback after partial scan: %v", err)
+	}
+	if len(rows) != 1 || !rows[0].Unverified {
+		t.Fatalf("partial scan did not persist unverified state: %+v", rows)
+	}
+
+	// The PR can be freshly observed while its comment scan remains a cache hit.
+	// The new observation starts with the zero-value flag; persisted verification
+	// state must still suppress the old command without another comment fetch.
+	observations[pkey] = ports.SCMObservation{
+		Fetched:  true,
+		Provider: "github",
+		Host:     "github.com",
+		Repo:     repo.Repo,
+		PR:       ports.SCMPRObservation{URL: prURL, Number: 9},
+	}
+	active = observer.refreshConversationFeedback(ctx, subjects, observations, subjectsByPR, forced, localOnly, now.Add(time.Minute))
+	if active[pkey] {
+		t.Fatal("cached partial-scan state re-enabled delivery of omitted persisted feedback")
+	}
+	if !observations[pkey].ConversationFeedbackUnverified {
+		t.Fatal("cached PR observation lost the persisted unverified state")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("comment fetches = %d, want one partial fetch followed by a cache hit", provider.calls)
+	}
+
+	// Seeing the command again verifies that row and makes it deliverable.
+	provider.result = ports.SCMConversationCommentsResult{
+		Comments: []ports.SCMConversationCommentObservation{{
+			ID:        "IC_old_cmd",
+			Author:    "wangyu0426",
+			Body:      "/ao review-feedback Fix edge case",
+			CreatedAt: now.Add(-time.Hour),
+		}},
+		Partial: true,
+	}
+	observations[pkey] = ports.SCMObservation{
+		Fetched:  true,
+		Provider: "github",
+		Host:     "github.com",
+		Repo:     repo.Repo,
+		PR:       ports.SCMPRObservation{URL: prURL, Number: 9},
+	}
+	active = observer.refreshConversationFeedback(ctx, subjects, observations, subjectsByPR, forced, localOnly, now.Add(6*time.Minute))
+	if !active[pkey] {
+		t.Fatal("visible command did not re-enable verified feedback delivery")
+	}
+	if observations[pkey].ConversationFeedbackUnverified {
+		t.Fatal("visible command left the PR observation unverified")
+	}
+	rows, err = fbStore.ListPRConversationFeedback(ctx, prURL)
+	if err != nil {
+		t.Fatalf("list persisted feedback after visible command: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Unverified {
+		t.Fatalf("visible command did not clear persisted unverified state: %+v", rows)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("comment fetches = %d, want second fetch after review interval", provider.calls)
 	}
 }

@@ -204,15 +204,19 @@ type PullRequestComment struct {
 // conversation feedback command (`/ao review-feedback`), kept separate from
 // view-only conversation comments and formal review threads.
 type PullRequestConversationFeedback struct {
-	PRURL             string
-	CommentID         string
-	SessionID         SessionID
-	SourceType        string
-	Author            string
-	Body              string
-	BodyHash          string
-	URL               string
-	State             PRConversationFeedbackState
+	PRURL      string
+	CommentID  string
+	SessionID  SessionID
+	SourceType string
+	Author     string
+	Body       string
+	BodyHash   string
+	URL        string
+	State      PRConversationFeedbackState
+	// Unverified is true when a partial provider scan could not confirm that
+	// this active command still exists. Such rows must not be delivered until
+	// the command is observed again or a complete scan reconciles it.
+	Unverified        bool
 	AutoInjectReview  bool
 	CreatedAtProvider time.Time
 	UpdatedAtProvider time.Time

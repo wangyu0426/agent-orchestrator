@@ -601,6 +601,7 @@ type PRConversationFeedback struct {
 	CreatedAtProvider sql.NullTime
 	UpdatedAtProvider sql.NullTime
 	ObservedAt        time.Time
+	Unverified        int64
 }
 
 type PRConversationFeedbackState struct {

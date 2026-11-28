@@ -45,9 +45,9 @@ func (q *Queries) GetPRConversationFeedbackState(ctx context.Context, prUrl stri
 const listActivePRConversationFeedback = `-- name: ListActivePRConversationFeedback :many
 SELECT
     pr_url, comment_id, session_id, source_type, author, body, body_hash,
-    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at, unverified
 FROM pr_conversation_feedback
-WHERE pr_url = ? AND state = 'active'
+WHERE pr_url = ? AND state = 'active' AND unverified = 0
 ORDER BY COALESCE(created_at_provider, observed_at) ASC, comment_id ASC
 `
 
@@ -74,6 +74,7 @@ func (q *Queries) ListActivePRConversationFeedback(ctx context.Context, prUrl st
 			&i.CreatedAtProvider,
 			&i.UpdatedAtProvider,
 			&i.ObservedAt,
+			&i.Unverified,
 		); err != nil {
 			return nil, err
 		}
@@ -91,7 +92,7 @@ func (q *Queries) ListActivePRConversationFeedback(ctx context.Context, prUrl st
 const listPRConversationFeedback = `-- name: ListPRConversationFeedback :many
 SELECT
     pr_url, comment_id, session_id, source_type, author, body, body_hash,
-    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at, unverified
 FROM pr_conversation_feedback
 WHERE pr_url = ?
 ORDER BY COALESCE(created_at_provider, observed_at) ASC, comment_id ASC
@@ -120,6 +121,7 @@ func (q *Queries) ListPRConversationFeedback(ctx context.Context, prUrl string) 
 			&i.CreatedAtProvider,
 			&i.UpdatedAtProvider,
 			&i.ObservedAt,
+			&i.Unverified,
 		); err != nil {
 			return nil, err
 		}
@@ -137,11 +139,11 @@ func (q *Queries) ListPRConversationFeedback(ctx context.Context, prUrl string) 
 const movePRAliasConversationFeedback = `-- name: MovePRAliasConversationFeedback :exec
 INSERT OR IGNORE INTO pr_conversation_feedback (
     pr_url, comment_id, session_id, source_type, author, body, body_hash,
-    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+    url, state, unverified, auto_inject_review, created_at_provider, updated_at_provider, observed_at
 )
 SELECT
     ?1, src.comment_id, src.session_id, src.source_type, src.author, src.body, src.body_hash,
-    src.url, src.state, src.auto_inject_review, src.created_at_provider, src.updated_at_provider, src.observed_at
+    src.url, src.state, src.unverified, src.auto_inject_review, src.created_at_provider, src.updated_at_provider, src.observed_at
 FROM pr_conversation_feedback AS src
 WHERE src.pr_url = ?2
 `
@@ -176,9 +178,9 @@ func (q *Queries) MovePRAliasConversationFeedbackState(ctx context.Context, arg 
 const upsertPRConversationFeedback = `-- name: UpsertPRConversationFeedback :exec
 INSERT INTO pr_conversation_feedback (
     pr_url, comment_id, session_id, source_type, author, body, body_hash,
-    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+    url, state, unverified, auto_inject_review, created_at_provider, updated_at_provider, observed_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pr_url, comment_id) DO UPDATE SET
     session_id = excluded.session_id,
     source_type = excluded.source_type,
@@ -187,6 +189,7 @@ ON CONFLICT (pr_url, comment_id) DO UPDATE SET
     body_hash = excluded.body_hash,
     url = excluded.url,
     state = excluded.state,
+    unverified = excluded.unverified,
     auto_inject_review = excluded.auto_inject_review,
     created_at_provider = COALESCE(excluded.created_at_provider, pr_conversation_feedback.created_at_provider),
     updated_at_provider = COALESCE(excluded.updated_at_provider, pr_conversation_feedback.updated_at_provider),
@@ -203,6 +206,7 @@ type UpsertPRConversationFeedbackParams struct {
 	BodyHash          string
 	URL               string
 	State             string
+	Unverified        int64
 	AutoInjectReview  int64
 	CreatedAtProvider sql.NullTime
 	UpdatedAtProvider sql.NullTime
@@ -220,6 +224,7 @@ func (q *Queries) UpsertPRConversationFeedback(ctx context.Context, arg UpsertPR
 		arg.BodyHash,
 		arg.URL,
 		arg.State,
+		arg.Unverified,
 		arg.AutoInjectReview,
 		arg.CreatedAtProvider,
 		arg.UpdatedAtProvider,

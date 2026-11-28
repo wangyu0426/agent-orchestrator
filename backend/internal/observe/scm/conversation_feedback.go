@@ -76,14 +76,14 @@ func (o *Observer) refreshConversationFeedback(
 		if !found || !proj.Config.PRCommentFeedback.Enabled {
 			continue
 		}
-		var hasActive bool
+		var hasActive, hasUnverified bool
 		freshOpen := false
 		obs, hasObs := observations[pkey]
 		if hasObs && obs.Fetched && !obs.PR.Merged && !obs.PR.Closed {
 			freshOpen = true
 		}
 		if o.inRateLimitCooldown(now, s.repo.Provider) || !o.needsConversationFeedbackRefresh(pkey, s.known, obs, hasObs, forced, now) {
-			hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+			hasActive, hasUnverified = o.persistedConversationFeedbackStatus(ctx, fbStore, prURL)
 		} else {
 			started := time.Now()
 			comments, err := ccProvider.FetchConversationComments(ctx, ports.SCMPRRef{
@@ -103,7 +103,7 @@ func (o *Observer) refreshConversationFeedback(
 				} else {
 					o.logger.Warn("scm observer: conversation comments refresh failed; preserving persisted active rows for retry", "pr", prURL, "err", err)
 				}
-				hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+				hasActive, hasUnverified = o.persistedConversationFeedbackStatus(ctx, fbStore, prURL)
 			} else if comments.PRMerged || comments.PRClosed {
 				o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
 				continue
@@ -113,18 +113,16 @@ func (o *Observer) refreshConversationFeedback(
 				if err != nil {
 					o.logger.Error("scm observer: reconcile conversation feedback failed; suppressing delivery until next reconcile", "pr", prURL, "session", s.session.ID, "err", err)
 					hasActive = false
-					if hasObs {
-						obs.ConversationFeedbackUnverified = true
-						observations[pkey] = obs
-					}
+					hasUnverified = true
 				} else {
 					o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
-					if comments.Partial && !hasActive && hasObs {
-						obs.ConversationFeedbackUnverified = true
-						observations[pkey] = obs
-					}
+					hasUnverified = comments.Partial && !hasActive
 				}
 			}
+		}
+		if hasObs && (hasActive || hasUnverified) {
+			obs.ConversationFeedbackUnverified = hasUnverified && !hasActive
+			observations[pkey] = obs
 		}
 		if !hasActive || !freshOpen {
 			continue
@@ -161,18 +159,23 @@ func (o *Observer) needsConversationFeedbackRefresh(key string, local domain.Pul
 	return now.Sub(last) >= o.reviewInterval
 }
 
-func (o *Observer) hasPersistedActiveConversationFeedback(ctx context.Context, fbStore conversationFeedbackStore, prURL string) bool {
+func (o *Observer) persistedConversationFeedbackStatus(ctx context.Context, fbStore conversationFeedbackStore, prURL string) (hasActive, hasUnverified bool) {
 	rows, err := fbStore.ListPRConversationFeedback(ctx, prURL)
 	if err != nil {
 		o.logger.Warn("scm observer: check persisted active conversation feedback failed", "pr", prURL, "err", err)
-		return false
+		return false, false
 	}
 	for _, r := range rows {
-		if r.State == domain.PRConversationFeedbackActive {
-			return true
+		if r.State != domain.PRConversationFeedbackActive {
+			continue
+		}
+		if r.Unverified {
+			hasUnverified = true
+		} else {
+			hasActive = true
 		}
 	}
-	return false
+	return hasActive, hasUnverified
 }
 
 func (o *Observer) reconcileConversationFeedback(
@@ -235,6 +238,7 @@ func (o *Observer) reconcileConversationFeedback(
 			// mark it deleted so pending retries stop.
 			if prev, exists := existingByID[c.ID]; exists && prev.State == domain.PRConversationFeedbackActive {
 				prev.State = domain.PRConversationFeedbackDeleted
+				prev.Unverified = false
 				prev.UpdatedAtProvider = c.UpdatedAt
 				prev.ObservedAt = now
 				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
@@ -292,6 +296,7 @@ func (o *Observer) reconcileConversationFeedback(
 		if !allowed {
 			if prev, exists := existingByID[c.ID]; exists && prev.State == domain.PRConversationFeedbackActive {
 				prev.State = domain.PRConversationFeedbackDeleted
+				prev.Unverified = false
 				prev.UpdatedAtProvider = c.UpdatedAt
 				prev.ObservedAt = now
 				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
@@ -327,22 +332,32 @@ func (o *Observer) reconcileConversationFeedback(
 		})
 	}
 
-	// Mark any previously active command absent from the fetched comments as
-	// deleted ONLY on a complete scan. On a partial scan (newest 1,000 comments),
-	// preserve absent active rows in storage (do not falsely mark them deleted)
-	// while keeping hasActive=false so unverified rows are not delivered blindly.
+	// Mark previously active commands absent from a partial window unverified:
+	// their durable rows cannot be delivered until a complete scan or a visible
+	// command verifies their state. A complete scan can safely delete absent rows.
 	if result.Partial {
-		o.logger.Warn("scm observer: conversation comments listing is partial; preserving absent active rows without delivery",
+		o.logger.Warn("scm observer: conversation comments listing is partial; marking absent active rows unverified",
 			"pr", prURL,
 			"session", s.session.ID,
 			"fetched_count", len(comments),
 		)
+		for _, prev := range existingRows {
+			if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] || prev.Unverified {
+				continue
+			}
+			prev.Unverified = true
+			prev.ObservedAt = now
+			if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+				return false, err
+			}
+		}
 	} else {
 		for _, prev := range existingRows {
 			if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
 				continue
 			}
 			prev.State = domain.PRConversationFeedbackDeleted
+			prev.Unverified = false
 			prev.ObservedAt = now
 			if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
 				return false, err
@@ -375,7 +390,7 @@ func (o *Observer) reconcileConversationFeedback(
 			hasActive = true
 		}
 		prev, exists := existingByID[item.CommentID]
-		if !exists || prev.State != item.State || prev.BodyHash != item.BodyHash || prev.AutoInjectReview != item.AutoInjectReview || prev.SessionID != item.SessionID {
+		if !exists || prev.State != item.State || prev.Unverified || prev.BodyHash != item.BodyHash || prev.AutoInjectReview != item.AutoInjectReview || prev.SessionID != item.SessionID {
 			if err := fbStore.UpsertPRConversationFeedback(ctx, item); err != nil {
 				return false, err
 			}
@@ -404,6 +419,7 @@ func (o *Observer) reconcileConversationFeedback(
 				(prev.CreatedAtProvider.Equal(newest.CreatedAtProvider) && prev.CommentID < newest.CommentID)
 			if older {
 				prev.State = domain.PRConversationFeedbackSuperseded
+				prev.Unverified = false
 				prev.ObservedAt = now
 				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
 					return false, err
