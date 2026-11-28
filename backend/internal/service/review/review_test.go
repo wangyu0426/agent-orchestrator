@@ -271,6 +271,66 @@ func TestSubmitMapsNativeRequestValidationToInvalid(t *testing.T) {
 	}
 }
 
+func TestSubmitReleasesNewNativeClaimOnPrePostFailure(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{err: fmt.Errorf("token service unavailable: %w", githubreview.ErrPrePostFailure)}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	_, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.",
+	}})
+	if !errors.Is(err, githubreview.ErrPrePostFailure) {
+		t.Fatalf("SubmitMany err=%v; want confirmed pre-POST error", err)
+	}
+	if native.calls != 1 || store.claimCalls != 1 || store.releaseCalls != 1 || store.updateCalls != 0 {
+		t.Fatalf("native calls=%d claims=%d releases=%d outcome updates=%d; want to release the new claim without recording an outcome", native.calls, store.claimCalls, store.releaseCalls, store.updateCalls)
+	}
+	if store.run.Status != domain.ReviewRunRunning || store.run.GithubReviewRequestFingerprint != "" {
+		t.Fatalf("run after pre-POST failure = %+v; want running with no claim", store.run)
+	}
+}
+
+func TestSubmitPreservesClaimOnPrePostFailureAfterAmbiguousRetry(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{err: githubreview.ErrReviewLookupUncertain}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	request := SubmittedReview{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.",
+	}
+	if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request}); !errors.Is(err, githubreview.ErrReviewLookupUncertain) {
+		t.Fatalf("first SubmitMany err=%v; want an ambiguous delivery", err)
+	}
+	claimedFingerprint := store.run.GithubReviewRequestFingerprint
+	if claimedFingerprint == "" || store.releaseCalls != 0 {
+		t.Fatalf("run after ambiguous delivery = %+v releases=%d; want retained claim", store.run, store.releaseCalls)
+	}
+
+	native.err = fmt.Errorf("reviewer identity service unavailable: %w", githubreview.ErrPrePostFailure)
+	if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{request}); !errors.Is(err, githubreview.ErrPrePostFailure) {
+		t.Fatalf("retry SubmitMany err=%v; want pre-POST retry failure", err)
+	}
+	if native.calls != 2 || store.claimCalls != 2 || store.releaseCalls != 0 || store.run.GithubReviewRequestFingerprint != claimedFingerprint {
+		t.Fatalf("native calls=%d claims=%d releases=%d run=%+v; want earlier ambiguous claim preserved", native.calls, store.claimCalls, store.releaseCalls, store.run)
+	}
+}
+
 func TestSubmitDoesNotPostWhenCancellationWinsNativeClaim(t *testing.T) {
 	const (
 		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

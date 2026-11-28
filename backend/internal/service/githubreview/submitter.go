@@ -40,6 +40,10 @@ var (
 	ErrConflictingRetry = errors.New("github review: run already has a different provider submission")
 	// ErrReviewLookupUncertain reports that an ambiguous delivery could not be reconciled.
 	ErrReviewLookupUncertain = errors.New("github review: could not prove whether a previous submission exists")
+	// ErrPrePostFailure marks a failure known to have occurred before this attempt
+	// sent a review POST. The service may release a newly acquired run claim for
+	// this error, while preserving an existing claim from an earlier ambiguous try.
+	ErrPrePostFailure = errors.New("github review: failed before review POST")
 )
 
 const (
@@ -202,7 +206,7 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 
 	reviewerActor, err := s.reviewerApp.AppActorLogin(ctx)
 	if err != nil {
-		return Result{}, fmt.Errorf("resolve reviewer App actor: %w", err)
+		return Result{}, fmt.Errorf("%w: resolve reviewer App actor: %w", ErrPrePostFailure, err)
 	}
 	reviewerActor = normalizeActor(reviewerActor)
 	if reviewerActor == "" {
@@ -211,7 +215,7 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 	if s.workerApp != nil {
 		workerActor, actorErr := s.workerApp.AppActorLogin(ctx)
 		if actorErr != nil {
-			return Result{}, fmt.Errorf("resolve worker App actor: %w", actorErr)
+			return Result{}, fmt.Errorf("%w: resolve worker App actor: %w", ErrPrePostFailure, actorErr)
 		}
 		if sameActor(reviewerActor, workerActor) {
 			return Result{}, fmt.Errorf("%w: both configured Apps resolve to %q; use different GitHub Apps, not different installations", ErrSameActor, reviewerActor)
@@ -225,7 +229,7 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 	tokenReq := githubapp.ScopedTokenRequest{Repositories: []string{repositoryName}, Permissions: clonePermissions(reviewPermission)}
 	token, err := s.reviewerApp.MintScopedToken(ctx, tokenReq)
 	if err != nil {
-		return Result{}, fmt.Errorf("mint reviewer token for %s: %w", fullRepo, err)
+		return Result{}, fmt.Errorf("%w: mint reviewer token for %s: %w", ErrPrePostFailure, fullRepo, err)
 	}
 	if len(token.FullNames) != 1 || !strings.EqualFold(token.FullNames[0], fullRepo) {
 		s.reviewerApp.InvalidateScopedToken(tokenReq)
@@ -235,7 +239,7 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 	marker := requestMarker(in.RunID, event, in.Body, in.Comments)
 	apiPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
 	if existing, found, findErr := s.findRunReview(ctx, token.Token, tokenReq, apiPath, marker, in, event, reviewerActor); findErr != nil {
-		return Result{}, findErr
+		return Result{}, fmt.Errorf("%w: inspect prior review marker: %w", ErrPrePostFailure, findErr)
 	} else if found {
 		return existing, nil
 	}
@@ -249,7 +253,7 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 		} `json:"user"`
 	}
 	if err := s.doJSON(ctx, token.Token, tokenReq, http.MethodGet, apiPath, nil, &pull, http.StatusOK); err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: read pull request head: %w", ErrPrePostFailure, err)
 	}
 	if !strings.EqualFold(pull.Head.SHA, in.ExpectedHeadSHA) {
 		return Result{}, fmt.Errorf("%w: expected %s, provider reports %s", ErrStaleHead, in.ExpectedHeadSHA, pull.Head.SHA)
@@ -273,6 +277,9 @@ func (s *Submitter) Submit(ctx context.Context, in Request) (Result, error) {
 	}
 	var created reviewResponse
 	if err := s.doJSON(ctx, token.Token, tokenReq, http.MethodPost, apiPath+"/reviews", payload, &created, http.StatusOK, http.StatusCreated); err != nil {
+		if errors.Is(err, ErrPrePostFailure) {
+			return Result{}, err
+		}
 		if errors.Is(err, ErrProviderRejected) || errors.Is(err, ErrStaleHead) {
 			return Result{}, err
 		}
@@ -345,14 +352,14 @@ func (s *Submitter) doJSON(ctx context.Context, token string, tokenReq githubapp
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("encode GitHub review request: %w", err)
+			return fmt.Errorf("%w: encode GitHub review request: %w", ErrPrePostFailure, err)
 		}
 		reader = bytes.NewReader(b)
 	}
 	u := s.apiBaseURL + endpoint
 	req, err := http.NewRequestWithContext(ctx, method, u, reader)
 	if err != nil {
-		return fmt.Errorf("build GitHub review request: %w", err)
+		return fmt.Errorf("%w: build GitHub review request: %w", ErrPrePostFailure, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")

@@ -1001,6 +1001,10 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		if s.nativeReviewer != nil && run.GithubReviewRequestFingerprint != "" && run.GithubReviewRequestFingerprint != requestFingerprint {
 			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already claimed a different native review request", ErrConflict, runID)
 		}
+		// A pre-existing same-fingerprint claim may represent an earlier POST
+		// whose delivery was ambiguous. Keep it until a retry reconciles that
+		// provider outcome; only release claims first acquired by this attempt.
+		claimAlreadyHeld := s.nativeReviewer != nil && run.GithubReviewRequestFingerprint == requestFingerprint
 		session, found, err := s.store.GetSession(ctx, workerID)
 		if err != nil {
 			return domain.ReviewRun{}, err
@@ -1059,6 +1063,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 						fmt.Errorf("%w: %w", ErrConflict, submitErr),
 						releaseNativeReviewClaim(ctx, s.store, run.ID, requestFingerprint),
 					)
+				}
+				if errors.Is(submitErr, githubreview.ErrPrePostFailure) && !claimAlreadyHeld {
+					submitErr = errors.Join(submitErr, releaseNativeReviewClaim(ctx, s.store, run.ID, requestFingerprint))
 				}
 				if !degradedNativeReviewError(submitErr) {
 					return domain.ReviewRun{}, submitErr

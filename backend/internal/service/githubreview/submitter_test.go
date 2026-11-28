@@ -20,15 +20,20 @@ const (
 type testApp struct {
 	actor       string
 	fullNames   []string
+	identityErr error
+	mintErr     error
 	mintCalls   int
 	lastReq     githubapp.ScopedTokenRequest
 	invalidated int
 }
 
-func (a *testApp) AppActorLogin(context.Context) (string, error) { return a.actor, nil }
+func (a *testApp) AppActorLogin(context.Context) (string, error) { return a.actor, a.identityErr }
 func (a *testApp) MintScopedToken(_ context.Context, req githubapp.ScopedTokenRequest) (githubapp.ScopedToken, error) {
 	a.mintCalls++
 	a.lastReq = req
+	if a.mintErr != nil {
+		return githubapp.ScopedToken{}, a.mintErr
+	}
 	return githubapp.ScopedToken{Token: "scoped-review-token", FullNames: append([]string(nil), a.fullNames...)}, nil
 }
 func (a *testApp) InvalidateScopedToken(githubapp.ScopedTokenRequest) { a.invalidated++ }
@@ -58,6 +63,7 @@ type reviewServer struct {
 	losePostResponse      bool
 	rejectLookupAfterPost bool
 	rejectLookup          bool
+	rejectHead            bool
 }
 
 func (s *reviewServer) handler(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +73,10 @@ func (s *reviewServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/pulls/7":
+		if s.rejectHead {
+			http.Error(w, `{"message":"temporary head lookup failure"}`, http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"head": map[string]string{"sha": s.headSHA},
 			"user": map[string]string{"login": "worker[bot]"},
@@ -232,6 +242,49 @@ func TestSubmitRejectsStaleHeadAndProviderPermissionFailure(t *testing.T) {
 	})
 }
 
+func TestSubmitMarksPrePostFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*reviewServer, *testApp)
+	}{
+		{
+			name: "reviewer identity lookup",
+			configure: func(_ *reviewServer, app *testApp) {
+				app.identityErr = errors.New("identity service unavailable")
+			},
+		},
+		{
+			name: "token mint",
+			configure: func(_ *reviewServer, app *testApp) {
+				app.mintErr = errors.New("token service unavailable")
+			},
+		},
+		{
+			name: "prior marker lookup",
+			configure: func(server *reviewServer, _ *testApp) {
+				server.rejectLookup = true
+			},
+		},
+		{
+			name: "pull request head lookup",
+			configure: func(server *reviewServer, _ *testApp) {
+				server.rejectHead = true
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &reviewServer{headSHA: testHead, actor: "reviewer-app[bot]"}
+			submitter, app := makeSubmitter(t, server, "worker-app[bot]")
+			tc.configure(server, app)
+			_, err := submitter.Submit(context.Background(), submitRequest(EventRequestChanges))
+			if !errors.Is(err, ErrPrePostFailure) || server.posts != 0 {
+				t.Fatalf("Submit err=%v posts=%d; want a confirmed pre-POST failure", err, server.posts)
+			}
+		})
+	}
+}
+
 func TestSubmitRecoversAmbiguousDeliveryAndRejectsContradictoryRetry(t *testing.T) {
 	server := &reviewServer{headSHA: testHead, actor: "reviewer-app[bot]", losePostResponse: true}
 	submitter, _ := makeSubmitter(t, server, "worker-app[bot]")
@@ -252,7 +305,7 @@ func TestSubmitRecoversAmbiguousDeliveryAndRejectsContradictoryRetry(t *testing.
 func TestSubmitAmbiguousDeliveryWithFailedLookupRemainsRetryable(t *testing.T) {
 	server := &reviewServer{headSHA: testHead, actor: "reviewer-app[bot]", losePostResponse: true, rejectLookupAfterPost: true}
 	submitter, _ := makeSubmitter(t, server, "worker-app[bot]")
-	if _, err := submitter.Submit(context.Background(), submitRequest(EventRequestChanges)); !errors.Is(err, ErrReviewLookupUncertain) || errors.Is(err, ErrProviderRejected) {
+	if _, err := submitter.Submit(context.Background(), submitRequest(EventRequestChanges)); !errors.Is(err, ErrReviewLookupUncertain) || errors.Is(err, ErrProviderRejected) || errors.Is(err, ErrPrePostFailure) {
 		t.Fatalf("ambiguous result err=%v, want lookup-uncertain without permanent provider rejection", err)
 	}
 	server.rejectLookupAfterPost = false
