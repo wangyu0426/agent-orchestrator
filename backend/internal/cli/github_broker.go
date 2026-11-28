@@ -109,8 +109,9 @@ func sshResolvedHostnameTargetsHost(ctx context.Context, args []string, host str
 		// Fail closed if ssh -G cannot resolve the target.
 		return true
 	}
-	resolved := parseSSHConfigHostname(string(out))
-	if resolved == "" || strings.EqualFold(resolved, h) {
+	resolved := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parseSSHConfigHostname(string(out))), "."))
+	hClean := strings.TrimSuffix(h, ".")
+	if resolved == "" || resolved == hClean || strings.HasSuffix(resolved, "."+hClean) {
 		return true
 	}
 	// Fail closed on direct-IP SSH destinations (including aliases resolving to
