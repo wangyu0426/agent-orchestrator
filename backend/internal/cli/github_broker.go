@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -109,7 +110,16 @@ func sshResolvedHostnameTargetsHost(ctx context.Context, args []string, host str
 		return true
 	}
 	resolved := parseSSHConfigHostname(string(out))
-	return resolved == "" || strings.EqualFold(resolved, h)
+	if resolved == "" || strings.EqualFold(resolved, h) {
+		return true
+	}
+	// Fail closed on direct-IP SSH destinations (including aliases resolving to
+	// an IP such as GitHub's 140.82.112.3) so workers cannot bypass the broker
+	// by connecting to the GitHub host by IP.
+	if net.ParseIP(strings.Trim(resolved, "[]")) != nil {
+		return true
+	}
+	return false
 }
 
 func parseSSHConfigHostname(output string) string {

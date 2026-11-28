@@ -131,11 +131,17 @@ func TestGitHubBroker_GitCredentialGetStoreErase(t *testing.T) {
 		t.Fatalf("parseSSHConfigHostname = %q, want github.com", got)
 	}
 	sshCfgPath := filepath.Join(tmp, "ssh_config")
-	if err := os.WriteFile(sshCfgPath, []byte("Host gh\n  HostName github.com\n  User git\nHost gl\n  HostName gitlab.com\n  User git\n"), 0o600); err != nil {
+	if err := os.WriteFile(sshCfgPath, []byte("Host gh\n  HostName github.com\n  User git\nHost ghip\n  HostName 140.82.112.3\n  User git\nHost gl\n  HostName gitlab.com\n  User git\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "gh"}, "github.com") {
 		t.Fatalf("expected SSH alias 'gh' -> github.com to be blocked")
+	}
+	if !sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "ghip"}, "github.com") {
+		t.Fatalf("expected SSH alias 'ghip' -> direct IP 140.82.112.3 to be blocked")
+	}
+	if !sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "git@140.82.112.3"}, "github.com") {
+		t.Fatalf("expected direct-IP SSH destination 140.82.112.3 to be blocked")
 	}
 	if sshResolvedHostnameTargetsHost(t.Context(), []string{"-F", sshCfgPath, "gl"}, "github.com") {
 		t.Fatalf("expected SSH alias 'gl' -> gitlab.com to be allowed")
