@@ -64,6 +64,8 @@ type reviewServer struct {
 	rejectLookupAfterPost bool
 	rejectLookup          bool
 	rejectHead            bool
+	unauthorizedPost      bool
+	reviewLookups         int
 }
 
 func (s *reviewServer) handler(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +84,17 @@ func (s *reviewServer) handler(w http.ResponseWriter, r *http.Request) {
 			"user": map[string]string{"login": "worker[bot]"},
 		})
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/pulls/7/reviews":
+		s.reviewLookups++
 		if s.rejectLookup || (s.rejectLookupAfterPost && s.posts > 0) {
 			http.Error(w, `{"message":"Pull request reviews permission is missing"}`, http.StatusForbidden)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(s.reviews)
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/pulls/7/reviews":
+		if s.unauthorizedPost {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
 		s.posts++
 		var in struct {
 			CommitID string    `json:"commit_id"`
@@ -282,6 +289,18 @@ func TestSubmitMarksPrePostFailures(t *testing.T) {
 				t.Fatalf("Submit err=%v posts=%d; want a confirmed pre-POST failure", err, server.posts)
 			}
 		})
+	}
+}
+
+func TestSubmitTreatsUnauthorizedPostAsKnownNotPosted(t *testing.T) {
+	server := &reviewServer{headSHA: testHead, actor: "reviewer-app[bot]", unauthorizedPost: true}
+	submitter, app := makeSubmitter(t, server, "worker-app[bot]")
+	_, err := submitter.Submit(context.Background(), submitRequest(EventRequestChanges))
+	if !errors.Is(err, ErrPrePostFailure) || errors.Is(err, ErrReviewLookupUncertain) {
+		t.Fatalf("Submit err=%v; want known not-posted error without ambiguous lookup", err)
+	}
+	if server.posts != 0 || server.reviewLookups != 1 || app.invalidated != 1 {
+		t.Fatalf("posts=%d review lookups=%d invalidated tokens=%d; want no created review, no retry with rejected token, and token invalidation", server.posts, server.reviewLookups, app.invalidated)
 	}
 }
 

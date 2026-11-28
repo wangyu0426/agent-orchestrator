@@ -40,9 +40,9 @@ var (
 	ErrConflictingRetry = errors.New("github review: run already has a different provider submission")
 	// ErrReviewLookupUncertain reports that an ambiguous delivery could not be reconciled.
 	ErrReviewLookupUncertain = errors.New("github review: could not prove whether a previous submission exists")
-	// ErrPrePostFailure marks a failure known to have occurred before this attempt
-	// sent a review POST. The service may release a newly acquired run claim for
-	// this error, while preserving an existing claim from an earlier ambiguous try.
+	// ErrPrePostFailure marks an attempt known not to have created a provider
+	// review, either during preflight or through a definitive rejection. The
+	// service may release a new claim while preserving one from an ambiguous try.
 	ErrPrePostFailure = errors.New("github review: failed before review POST")
 )
 
@@ -390,6 +390,9 @@ func (s *Submitter) doJSON(ctx context.Context, token string, tokenReq githubapp
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		s.reviewerApp.InvalidateScopedToken(tokenReq)
+		if method == http.MethodPost {
+			return fmt.Errorf("%w: GitHub rejected the scoped reviewer token before creating a review", ErrPrePostFailure)
+		}
 		return fmt.Errorf("GitHub rejected the scoped reviewer token; token cache invalidated")
 	}
 	message := githubMessage(b)
