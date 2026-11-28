@@ -35,6 +35,7 @@ func (o *Observer) refreshConversationFeedback(
 	subjects map[string]*subject,
 	observations map[string]ports.SCMObservation,
 	subjectsByPR map[string]*subject,
+	forced map[string]bool,
 	localOnlyObservations map[string]bool,
 	now time.Time,
 ) map[string]bool {
@@ -77,10 +78,11 @@ func (o *Observer) refreshConversationFeedback(
 		}
 		var hasActive bool
 		freshOpen := false
-		if obs, hasObs := observations[pkey]; hasObs && obs.Fetched && !obs.PR.Merged && !obs.PR.Closed {
+		obs, hasObs := observations[pkey]
+		if hasObs && obs.Fetched && !obs.PR.Merged && !obs.PR.Closed {
 			freshOpen = true
 		}
-		if o.inRateLimitCooldown(now, s.repo.Provider) {
+		if o.inRateLimitCooldown(now, s.repo.Provider) || !o.needsConversationFeedbackRefresh(pkey, s.known, obs, hasObs, forced, now) {
 			hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
 		} else {
 			started := time.Now()
@@ -103,9 +105,11 @@ func (o *Observer) refreshConversationFeedback(
 				}
 				hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
 			} else if comments.PRMerged || comments.PRClosed {
+				o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
 				continue
 			} else {
 				freshOpen = true
+				o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
 				hasActive, err = o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
 				if err != nil {
 					o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
@@ -132,6 +136,20 @@ func (o *Observer) refreshConversationFeedback(
 	}
 
 	return activePRKeys
+}
+
+func (o *Observer) needsConversationFeedbackRefresh(key string, local domain.PullRequest, obs ports.SCMObservation, hasObs bool, forced map[string]bool, now time.Time) bool {
+	if forcedFor(forced, local) {
+		return true
+	}
+	last := o.Cache.LastConversationPollAt[key]
+	if last.IsZero() {
+		return true
+	}
+	if hasObs && obs.Fetched && !obs.PR.UpdatedAtProvider.IsZero() && obs.PR.UpdatedAtProvider.After(last) {
+		return true
+	}
+	return now.Sub(last) >= o.reviewInterval
 }
 
 func (o *Observer) hasPersistedActiveConversationFeedback(ctx context.Context, fbStore conversationFeedbackStore, prURL string) bool {

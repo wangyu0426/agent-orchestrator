@@ -198,6 +198,8 @@ type ObserverCache struct {
 	CommitChecksETag map[string]string
 	// LastReviewPollAt maps PR keys to the last review-thread fetch timestamp.
 	LastReviewPollAt map[string]time.Time
+	// LastConversationPollAt maps PR keys to the last conversation-comment fetch timestamp.
+	LastConversationPollAt map[string]time.Time
 	// ReviewRefreshFailed marks PRs whose review-thread refresh failed; the
 	// next poll retries regardless of the normal review cadence/status rules.
 	ReviewRefreshFailed map[string]bool
@@ -216,6 +218,8 @@ type ObserverCache struct {
 	commitOrder []string
 	// lastReviewPollOrder tracks FIFO eviction order for LastReviewPollAt.
 	lastReviewPollOrder []string
+	// lastConversationPollOrder tracks FIFO eviction order for LastConversationPollAt.
+	lastConversationPollOrder []string
 	// reviewFailedOrder tracks FIFO eviction order for ReviewRefreshFailed.
 	reviewFailedOrder []string
 	// max is the maximum number of entries each cache map retains.
@@ -228,9 +232,10 @@ func newCache(maxEntries int) ObserverCache {
 	}
 	return ObserverCache{
 		RepoPRListETag:      map[string]string{},
-		CommitChecksETag:    map[string]string{},
-		LastReviewPollAt:    map[string]time.Time{},
-		ReviewRefreshFailed: map[string]bool{},
+		CommitChecksETag:       map[string]string{},
+		LastReviewPollAt:       map[string]time.Time{},
+		LastConversationPollAt: map[string]time.Time{},
+		ReviewRefreshFailed:    map[string]bool{},
 		LastPRFetchAt:       map[string]time.Time{},
 		LastSyncCursor:      map[string]time.Time{},
 		max:                 maxEntries,
@@ -676,7 +681,7 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	conversationFeedbackActive := o.refreshConversationFeedback(ctx, subjects, observations, selection.subjectsByPR, localOnlyObservations, now)
+	conversationFeedbackActive := o.refreshConversationFeedback(ctx, subjects, observations, selection.subjectsByPR, forced, localOnlyObservations, now)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

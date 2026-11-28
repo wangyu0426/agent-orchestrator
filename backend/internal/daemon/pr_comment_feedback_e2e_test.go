@@ -524,7 +524,7 @@ func TestPRCommentFeedback_Pagination_Edit_Supersession_Delete_And_BackoffRecove
 	}
 
 	// 3. Edit policy: editing the comment body delivers the updated feedback.
-	now = now.Add(time.Minute)
+	now = now.Add(2 * time.Minute)
 	mockSrv.setComments([]mockCommentNode{
 		{ID: "IC_p2_1", Author: "wangyu0426", Body: "/ao review-feedback Fix pagination bug (updated)", CreatedAt: "2026-11-27T17:10:00Z", UpdatedAt: "2026-11-27T17:20:00Z"},
 	})
@@ -536,7 +536,7 @@ func TestPRCommentFeedback_Pagination_Edit_Supersession_Delete_And_BackoffRecove
 	}
 
 	// 4. Supersession: posting a newer command supersedes the older one.
-	now = now.Add(time.Minute)
+	now = now.Add(2 * time.Minute)
 	mockSrv.setComments([]mockCommentNode{
 		{ID: "IC_p2_1", Author: "wangyu0426", Body: "/ao review-feedback Fix pagination bug (updated)", CreatedAt: "2026-11-27T17:10:00Z"},
 		{ID: "IC_p2_2", Author: "wangyu0426", Body: "/ao review-feedback Actually just revert commit 2", CreatedAt: "2026-11-27T17:25:00Z"},
@@ -562,7 +562,7 @@ func TestPRCommentFeedback_Pagination_Edit_Supersession_Delete_And_BackoffRecove
 	}
 
 	// 5. Deletion: removing IC_p2_2 marks it deleted.
-	now = now.Add(time.Minute)
+	now = now.Add(2 * time.Minute)
 	mockSrv.setComments([]mockCommentNode{})
 	if err := restartedObs.Poll(context.Background()); err != nil {
 		t.Fatalf("poll after deletion: %v", err)
