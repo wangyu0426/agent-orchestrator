@@ -106,6 +106,11 @@ func (o *Observer) refreshConversationFeedback(
 				hasActive, hasUnverified = o.persistedConversationFeedbackStatus(ctx, fbStore, prURL)
 			} else if comments.PRMerged || comments.PRClosed {
 				o.cacheSetTime(o.Cache.LastConversationPollAt, &o.Cache.lastConversationPollOrder, pkey, now)
+				if hasObs {
+					obs.PR.Merged = obs.PR.Merged || comments.PRMerged
+					obs.PR.Closed = obs.PR.Closed || comments.PRClosed
+					observations[pkey] = obs
+				}
 				continue
 			} else {
 				freshOpen = true

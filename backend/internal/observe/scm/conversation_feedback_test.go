@@ -12,8 +12,9 @@ import (
 )
 
 type memConversationFeedbackStore struct {
-	initialized map[string]time.Time
-	rows        map[string]map[string]domain.PullRequestConversationFeedback
+	initialized       map[string]time.Time
+	rows              map[string]map[string]domain.PullRequestConversationFeedback
+	feedbackListCalls int
 }
 
 type conversationFeedbackTestProvider struct {
@@ -61,6 +62,7 @@ func (m *memConversationFeedbackStore) MarkPRConversationFeedbackInitialized(_ c
 }
 
 func (m *memConversationFeedbackStore) ListPRConversationFeedback(_ context.Context, prURL string) ([]domain.PullRequestConversationFeedback, error) {
+	m.feedbackListCalls++
 	byID := m.rows[prURL]
 	out := make([]domain.PullRequestConversationFeedback, 0, len(byID))
 	for _, r := range byID {
@@ -271,5 +273,92 @@ func TestRefreshConversationFeedback_PartialScanBlocksCachedDelivery(t *testing.
 	}
 	if provider.calls != 2 {
 		t.Fatalf("comment fetches = %d, want second fetch after review interval", provider.calls)
+	}
+}
+
+func TestRefreshConversationFeedback_TerminalResponseSuppressesVerifiedFeedback(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 8, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	repo := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "wangyu0426", Name: "WebPoB", Repo: "wangyu0426/WebPoB"}
+	tests := []struct {
+		name   string
+		merged bool
+		closed bool
+	}{
+		{name: "merged response", merged: true},
+		{name: "closed response", closed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			makeSubject := func(id string) *subject {
+				return &subject{
+					session: domain.SessionRecord{ID: domain.SessionID(id), ProjectID: "project-1", AutoInjectReview: true},
+					repo:    repo,
+					known:   domain.PullRequest{URL: prURL, Number: 9},
+					hasPR:   true,
+				}
+			}
+			subject1 := makeSubject("webpob-1")
+			subject2 := makeSubject("webpob-2")
+			pkey := keyForTrackedPR(subject1.known, repo)
+			fbStore := newMemConversationFeedbackStore()
+			if err := fbStore.UpsertPRConversationFeedback(ctx, domain.PullRequestConversationFeedback{
+				PRURL:             prURL,
+				CommentID:         "IC_verified_cmd",
+				SessionID:         subject1.session.ID,
+				Author:            "wangyu0426",
+				Body:              "Fix edge case",
+				BodyHash:          "verified-hash",
+				State:             domain.PRConversationFeedbackActive,
+				AutoInjectReview:  true,
+				CreatedAtProvider: now.Add(-time.Hour),
+				ObservedAt:        now.Add(-time.Hour),
+			}); err != nil {
+				t.Fatalf("seed active feedback: %v", err)
+			}
+			provider := &conversationFeedbackTestProvider{result: ports.SCMConversationCommentsResult{
+				PRMerged: tt.merged,
+				PRClosed: tt.closed,
+			}}
+			store := &conversationFeedbackTestStore{
+				memConversationFeedbackStore: fbStore,
+				project: domain.ProjectRecord{ID: "project-1", Config: domain.ProjectConfig{PRCommentFeedback: domain.PRCommentFeedbackConfig{
+					Enabled:        true,
+					TrustedAuthors: []string{"wangyu0426"},
+				}}},
+			}
+			observer := New(provider, store, nil, Config{
+				Clock:          func() time.Time { return now },
+				ReviewInterval: 5 * time.Minute,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			subjects := map[string]*subject{"webpob-1": subject1, "webpob-2": subject2}
+			observations := map[string]ports.SCMObservation{pkey: {
+				Fetched:  true,
+				Provider: "github",
+				Host:     "github.com",
+				Repo:     repo.Repo,
+				PR:       ports.SCMPRObservation{URL: prURL, Number: 9, Title: "changed since prior poll"},
+			}}
+			active := observer.refreshConversationFeedback(ctx, subjects, observations, map[string]*subject{pkey: subject1}, map[string]bool{}, map[string]bool{}, now)
+			if active[pkey] {
+				t.Fatal("terminal conversation response left verified feedback eligible for delivery")
+			}
+			got := observations[pkey]
+			if got.PR.Merged != tt.merged || got.PR.Closed != tt.closed {
+				t.Fatalf("PR terminal state = merged:%v closed:%v, want merged:%v closed:%v", got.PR.Merged, got.PR.Closed, tt.merged, tt.closed)
+			}
+			if provider.calls != 1 {
+				t.Fatalf("conversation fetches = %d, want one before the shared observation becomes terminal", provider.calls)
+			}
+			if fbStore.feedbackListCalls != 0 {
+				t.Fatalf("persisted feedback status reads = %d, want none after the terminal response", fbStore.feedbackListCalls)
+			}
+			row := fbStore.rows[prURL]["IC_verified_cmd"]
+			if row.State != domain.PRConversationFeedbackActive || row.Unverified {
+				t.Fatalf("terminal response changed the verified active row: %+v", row)
+			}
+		})
 	}
 }
