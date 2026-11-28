@@ -482,7 +482,19 @@ func movePRAliasRows(ctx context.Context, q *gen.Queries, previousURL, canonical
 	if err := q.MovePRAliasReviewRuns(ctx, gen.MovePRAliasReviewRunsParams{CanonicalURL: canonicalURL, PreviousURL: previousURL}); err != nil {
 		return err
 	}
-	return q.DeletePRAliasReviewRuns(ctx, previousURL)
+	if err := q.DeletePRAliasReviewRuns(ctx, previousURL); err != nil {
+		return err
+	}
+	if err := q.MovePRAliasConversationFeedback(ctx, gen.MovePRAliasConversationFeedbackParams{CanonicalURL: canonicalURL, PreviousURL: previousURL}); err != nil {
+		return err
+	}
+	if err := q.DeletePRAliasConversationFeedback(ctx, previousURL); err != nil {
+		return err
+	}
+	if err := q.MovePRAliasConversationFeedbackState(ctx, gen.MovePRAliasConversationFeedbackStateParams{CanonicalURL: canonicalURL, PreviousURL: previousURL}); err != nil {
+		return err
+	}
+	return q.DeletePRAliasConversationFeedbackState(ctx, previousURL)
 }
 
 func reviewThreadIDs(threads []domain.PullRequestReviewThread, comments []domain.PullRequestComment) []string {

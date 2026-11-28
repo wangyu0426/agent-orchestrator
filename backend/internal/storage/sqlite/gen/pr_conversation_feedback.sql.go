@@ -11,6 +11,24 @@ import (
 	"time"
 )
 
+const deletePRAliasConversationFeedback = `-- name: DeletePRAliasConversationFeedback :exec
+DELETE FROM pr_conversation_feedback WHERE pr_url = ?
+`
+
+func (q *Queries) DeletePRAliasConversationFeedback(ctx context.Context, prUrl string) error {
+	_, err := q.db.ExecContext(ctx, deletePRAliasConversationFeedback, prUrl)
+	return err
+}
+
+const deletePRAliasConversationFeedbackState = `-- name: DeletePRAliasConversationFeedbackState :exec
+DELETE FROM pr_conversation_feedback_state WHERE pr_url = ?
+`
+
+func (q *Queries) DeletePRAliasConversationFeedbackState(ctx context.Context, prUrl string) error {
+	_, err := q.db.ExecContext(ctx, deletePRAliasConversationFeedbackState, prUrl)
+	return err
+}
+
 const getPRConversationFeedbackState = `-- name: GetPRConversationFeedbackState :one
 SELECT pr_url, initialized_at
 FROM pr_conversation_feedback_state
@@ -114,6 +132,45 @@ func (q *Queries) ListPRConversationFeedback(ctx context.Context, prUrl string) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const movePRAliasConversationFeedback = `-- name: MovePRAliasConversationFeedback :exec
+INSERT OR IGNORE INTO pr_conversation_feedback (
+    pr_url, comment_id, session_id, source_type, author, body, body_hash,
+    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+)
+SELECT
+    ?1, src.comment_id, src.session_id, src.source_type, src.author, src.body, src.body_hash,
+    src.url, src.state, src.auto_inject_review, src.created_at_provider, src.updated_at_provider, src.observed_at
+FROM pr_conversation_feedback AS src
+WHERE src.pr_url = ?2
+`
+
+type MovePRAliasConversationFeedbackParams struct {
+	CanonicalURL string
+	PreviousURL  string
+}
+
+func (q *Queries) MovePRAliasConversationFeedback(ctx context.Context, arg MovePRAliasConversationFeedbackParams) error {
+	_, err := q.db.ExecContext(ctx, movePRAliasConversationFeedback, arg.CanonicalURL, arg.PreviousURL)
+	return err
+}
+
+const movePRAliasConversationFeedbackState = `-- name: MovePRAliasConversationFeedbackState :exec
+INSERT OR IGNORE INTO pr_conversation_feedback_state (pr_url, initialized_at)
+SELECT ?1, src.initialized_at
+FROM pr_conversation_feedback_state AS src
+WHERE src.pr_url = ?2
+`
+
+type MovePRAliasConversationFeedbackStateParams struct {
+	CanonicalURL string
+	PreviousURL  string
+}
+
+func (q *Queries) MovePRAliasConversationFeedbackState(ctx context.Context, arg MovePRAliasConversationFeedbackStateParams) error {
+	_, err := q.db.ExecContext(ctx, movePRAliasConversationFeedbackState, arg.CanonicalURL, arg.PreviousURL)
+	return err
 }
 
 const upsertPRConversationFeedback = `-- name: UpsertPRConversationFeedback :exec

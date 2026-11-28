@@ -42,3 +42,26 @@ ON CONFLICT (pr_url, comment_id) DO UPDATE SET
     created_at_provider = COALESCE(excluded.created_at_provider, pr_conversation_feedback.created_at_provider),
     updated_at_provider = COALESCE(excluded.updated_at_provider, pr_conversation_feedback.updated_at_provider),
     observed_at = excluded.observed_at;
+
+-- name: MovePRAliasConversationFeedback :exec
+INSERT OR IGNORE INTO pr_conversation_feedback (
+    pr_url, comment_id, session_id, source_type, author, body, body_hash,
+    url, state, auto_inject_review, created_at_provider, updated_at_provider, observed_at
+)
+SELECT
+    sqlc.arg(canonical_url), src.comment_id, src.session_id, src.source_type, src.author, src.body, src.body_hash,
+    src.url, src.state, src.auto_inject_review, src.created_at_provider, src.updated_at_provider, src.observed_at
+FROM pr_conversation_feedback AS src
+WHERE src.pr_url = sqlc.arg(previous_url);
+
+-- name: DeletePRAliasConversationFeedback :exec
+DELETE FROM pr_conversation_feedback WHERE pr_url = ?;
+
+-- name: MovePRAliasConversationFeedbackState :exec
+INSERT OR IGNORE INTO pr_conversation_feedback_state (pr_url, initialized_at)
+SELECT sqlc.arg(canonical_url), src.initialized_at
+FROM pr_conversation_feedback_state AS src
+WHERE src.pr_url = sqlc.arg(previous_url);
+
+-- name: DeletePRAliasConversationFeedbackState :exec
+DELETE FROM pr_conversation_feedback_state WHERE pr_url = ?;
