@@ -76,6 +76,10 @@ func (o *Observer) refreshConversationFeedback(
 			continue
 		}
 		var hasActive bool
+		freshOpen := false
+		if obs, hasObs := observations[pkey]; hasObs && obs.Fetched && !obs.PR.Merged && !obs.PR.Closed {
+			freshOpen = true
+		}
 		if o.inRateLimitCooldown(now, s.repo.Provider) {
 			hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
 		} else {
@@ -101,6 +105,7 @@ func (o *Observer) refreshConversationFeedback(
 			} else if comments.PRMerged || comments.PRClosed {
 				continue
 			} else {
+				freshOpen = true
 				hasActive, err = o.reconcileConversationFeedback(ctx, fbStore, s, proj.Config.PRCommentFeedback, comments, now)
 				if err != nil {
 					o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
@@ -108,7 +113,7 @@ func (o *Observer) refreshConversationFeedback(
 				}
 			}
 		}
-		if !hasActive {
+		if !hasActive || !freshOpen {
 			continue
 		}
 

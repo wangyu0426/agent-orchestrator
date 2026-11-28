@@ -884,12 +884,14 @@ func TestPRCommentFeedback_DisableAutoInjectReviewDuringFetchFailureSuppressesDe
 		t.Fatalf("disabled session AutoInjectReview must suppress persisted feedback during fetch failure, got %+v", messenger.snapshot())
 	}
 
-	// 3. Re-enable session AutoInjectReview while comment fetch still fails: durable retry still delivers.
+	// 3. Re-enable session AutoInjectReview while comment fetch still fails:
+	// once a fresh open-state PR observation arrives (past DefaultPRMaxAge), durable retry delivers.
 	rec.AutoInjectReview = true
 	if err := st.UpdateSession(context.Background(), rec); err != nil {
 		t.Fatalf("UpdateSession re-enable: %v", err)
 	}
-	now = now.Add(time.Minute)
+	now = now.Add(6 * time.Minute)
+	obs.RequestReviewRefresh(prURL)
 	if err := obs.Poll(context.Background()); err != nil {
 		t.Fatalf("poll after re-enabling AutoInjectReview: %v", err)
 	}
