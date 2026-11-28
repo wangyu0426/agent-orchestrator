@@ -595,6 +595,9 @@ func (m *Manager) resumeChatController(
 		if err := m.applySessionTempEnv(ctx, rec.ID, env); err != nil {
 			return RestoreResult{}, relaunchFailed("temporary directory", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
 		}
+		if err := m.applyGitHubBrokerEnv(ctx, rec.ID, rec.ProjectID, env); err != nil {
+			return RestoreResult{}, relaunchFailed("github credential broker", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
 	}
 	if agent, ok := m.agents.Agent(rec.Harness); ok {
 		m.augmentAgentRuntimeEnv(agent, env)

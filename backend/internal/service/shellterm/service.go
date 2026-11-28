@@ -418,6 +418,7 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
 	// from an unusual daemon launch environment.
 	env["AO_BROWSER_CAPABILITY"] = ""
 	env["AO_PREVIEW_CAPABILITY"] = ""
+	env["AO_GITHUB_BROKER_TOKEN"] = ""
 	// What the user types here is theirs, not the agent's turn's (see cli caller header).
 	env[caller.ShellTerminalEnv] = "1"
 	var verifier string

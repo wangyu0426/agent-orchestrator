@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
@@ -101,6 +102,8 @@ type APIDeps struct {
 	AgentAuth   controllers.AgentAuthService
 	// GitHub is the local GitHub PAT + repos surface.
 	GitHub controllers.GitHubPATService
+	// GitHubBroker mints repo-scoped GitHub App tokens for authenticated worker sessions.
+	GitHubBroker *githubbroker.Broker
 	// LinkPreview unfurls external URLs for the renderer's hover cards; nil
 	// leaves the route answering 501.
 	LinkPreview controllers.LinkPreviewService

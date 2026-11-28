@@ -384,6 +384,7 @@ func startSession(ctx context.Context, cfg config.Config, ghAuth githubAuthWirin
 		Preview:             previewLifecycle,
 		Browser:             browserLifecycle,
 		BrowserCapabilities: browserCapabilities,
+		GitHubBroker:        ghAuth.workerBroker,
 		AgentBrowserURL:     cfg.AgentBrowserURL,
 		AgentBrowserToken:   cfg.AgentBrowserToken,
 		DataDir:             cfg.DataDir,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerkeys"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessiontemp"
@@ -474,6 +476,7 @@ type Manager struct {
 	preview                     PreviewLifecycle
 	browser                     BrowserLifecycle
 	browserCapabilities         BrowserCapabilityIssuer
+	githubBroker                *githubbroker.Broker
 	agentBrowserURL             string
 	agentBrowserToken           string
 	agentAccounts               ports.AgentAccountLaunchEnv
@@ -944,6 +947,9 @@ type Deps struct {
 	// instead of the desktop browser bridge.
 	AgentBrowserURL   string
 	AgentBrowserToken string
+	// GitHubBroker is the optional repo-scoped GitHub App credential broker for
+	// worker git/gh operations. Nil preserves legacy auth mode.
+	GitHubBroker *githubbroker.Broker
 	// DataDir owns durable attachment storage and is exported to spawned agents
 	// as AO_DATA_DIR so their hook commands can open the same store.
 	DataDir string
@@ -1019,6 +1025,7 @@ func New(d Deps) *Manager {
 		preview:                        d.Preview,
 		browser:                        d.Browser,
 		browserCapabilities:            d.BrowserCapabilities,
+		githubBroker:                   d.GitHubBroker,
 		agentBrowserURL:                d.AgentBrowserURL,
 		agentBrowserToken:              d.AgentBrowserToken,
 		attachments:                    attachmentstore.New(d.DataDir),
@@ -2917,7 +2924,7 @@ func sessionPrefix(project domain.ProjectRecord) string {
 // row when nothing observable has landed yet (seed state) via rollbackSpawn or
 // rollbackSpawnSeedRow.
 func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) {
-	_ = m.lcm.MarkTerminated(ctx, id)
+	_ = m.markTerminated(ctx, id)
 	m.cleanupSystemPromptDir(id)
 }
 
@@ -3044,7 +3051,7 @@ func (m *Manager) recordTermination(ctx context.Context, id domain.SessionID, dr
 	if dropRestoreMarker {
 		markerErr = m.store.DeleteSessionWorktrees(ctx, id)
 	}
-	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+	if err := m.markTerminated(ctx, id); err != nil {
 		return fmt.Errorf("kill %s: %w", id, errors.Join(err, markerErr))
 	}
 	m.cleanupSystemPromptDir(id)
@@ -3223,6 +3230,7 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 			return KillResult{}, fmt.Errorf("kill %s: runtime: %w", id, err)
 		}
 	}
+	m.revokeGitHubBrokerSession(id)
 	if err := m.terminateReviewer(ctx, id, "cancelled by worker session termination"); err != nil {
 		return KillResult{}, fmt.Errorf("kill %s: reviewer: %w", id, err)
 	}
@@ -3377,7 +3385,7 @@ func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID)
 				return fmt.Errorf("retire replacement %s: runtime: %w", id, err)
 			}
 		}
-		if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+		if err := m.markTerminated(ctx, id); err != nil {
 			return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
 		}
 		return nil
@@ -4463,7 +4471,7 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 			// must not be ended here.
 			if !switching {
 				cleanupCtx, cancel := spawnRollbackContext(ctx)
-				_ = m.lcm.MarkTerminated(cleanupCtx, rec.ID)
+				_ = m.markTerminated(cleanupCtx, rec.ID)
 				cancel()
 			}
 			m.cleanupSystemPromptDir(rec.ID)
@@ -4626,7 +4634,7 @@ func (m *Manager) saveAndTeardownOne(ctx context.Context, rec domain.SessionReco
 	}
 
 	// 4. Mark terminal via the LCM (same path Kill uses).
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+	if err := m.markTerminated(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: mark terminated: %w", rec.ID, err)
 	}
 
@@ -4707,7 +4715,7 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	// are durable and must be relaunched after the daemon restarts.
 	legacyScratch := projectKind == domain.ProjectKindScratch && rec.ProjectID != ""
 	if legacyScratch && !isChat {
-		return m.lcm.MarkTerminated(ctx, rec.ID)
+		return m.markTerminated(ctx, rec.ID)
 	}
 	var ws ports.WorkspaceInfo
 	var restoreErr error
@@ -5466,7 +5474,7 @@ func (m *Manager) saveAndTeardownWorkspaceProject(ctx context.Context, rec domai
 	if err := m.teardownReviewerTerminal(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: teardown reviewer: %w", rec.ID, err)
 	}
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+	if err := m.markTerminated(ctx, rec.ID); err != nil {
 		return fmt.Errorf("save %s: mark terminated: %w", rec.ID, err)
 	}
 	handle := runtimeHandle(rec.Metadata)
@@ -7258,6 +7266,9 @@ func (m *Manager) launchRuntimeEnvForHarness(ctx context.Context, id domain.Sess
 	if err := m.applySessionTempEnv(ctx, id, env); err != nil {
 		return nil, "", fmt.Errorf("prepare session temporary directory: %w", err)
 	}
+	if err := m.applyGitHubBrokerEnv(ctx, id, project, env); err != nil {
+		return nil, "", fmt.Errorf("prepare github credential broker env: %w", err)
+	}
 	if m.browserCapabilities == nil {
 		return env, "", nil
 	}
@@ -7270,6 +7281,182 @@ func (m *Manager) launchRuntimeEnvForHarness(ctx context.Context, id domain.Sess
 	}
 	env[EnvBrowserCapability] = token
 	return env, verifier, nil
+}
+
+func (m *Manager) applyGitHubBrokerEnv(ctx context.Context, id domain.SessionID, project domain.ProjectID, env map[string]string) error {
+	if m.githubBroker == nil || id == "" {
+		return nil
+	}
+	var repos []string
+	var repoDir string
+	if m.store != nil && project != "" {
+		proj, found, err := m.store.GetProject(ctx, string(project))
+		if err != nil {
+			return fmt.Errorf("read project %s for github broker: %w", project, err)
+		}
+		if found {
+			repoDir = strings.TrimSpace(proj.Path)
+			ownerRepo, isGitHub, parseErr := extractOwnerRepoFromOriginURL(proj.RepoOriginURL, m.githubBroker.GitHubHost())
+			if parseErr != nil {
+				return parseErr
+			}
+			if isGitHub {
+				repos = append(repos, ownerRepo)
+			}
+			if proj.Kind == domain.ProjectKindWorkspace {
+				wsRepos, listErr := m.store.ListWorkspaceRepos(ctx, proj.ID)
+				if listErr != nil {
+					return fmt.Errorf("list workspace repos for project %s: %w", project, listErr)
+				}
+				for _, child := range wsRepos {
+					childRepo, childIsGitHub, childErr := extractOwnerRepoFromOriginURL(child.RepoOriginURL, m.githubBroker.GitHubHost())
+					if childErr != nil {
+						return childErr
+					}
+					if childIsGitHub {
+						repos = append(repos, childRepo)
+					}
+				}
+			}
+		}
+	}
+	var brokerToken string
+	if len(repos) > 0 {
+		var err error
+		brokerToken, err = m.githubBroker.RegisterSession(id, project, repos)
+		if err != nil {
+			return err
+		}
+	} else {
+		m.githubBroker.RevokeSession(id)
+	}
+
+	aoBin := "ao"
+	if m.executable != nil {
+		if exe, exeErr := m.executable(); exeErr == nil && strings.TrimSpace(exe) != "" {
+			aoBin = exe
+		}
+	}
+
+	var ghShimDir, ghConfigDir string
+	if m.dataDir != "" {
+		ghShimDir = filepath.Join(m.dataDir, "runtime", "github-broker-bin", string(id))
+		if _, err := githubbroker.EnsureGHShim(ghShimDir, aoBin); err != nil {
+			m.githubBroker.RevokeSession(id)
+			return err
+		}
+		ghConfigDir = filepath.Join(m.dataDir, "runtime", "github-broker-gh", string(id))
+		if err := os.MkdirAll(ghConfigDir, 0o700); err != nil {
+			m.githubBroker.RevokeSession(id)
+			return fmt.Errorf("create isolated gh config dir: %w", err)
+		}
+	}
+
+	extraHeaderKeys := githubbroker.CollectGitHubExtraHeaderKeys(ctx, repoDir, m.githubBroker.GitHubHost())
+	helperKeys := githubbroker.CollectGitHubCredentialHelperKeys(ctx, repoDir, m.githubBroker.GitHubHost())
+	brokerEnv := githubbroker.WorkerEnv(githubbroker.WorkerEnvOptions{
+		BrokerToken:                 brokerToken,
+		GitHubHost:                  m.githubBroker.GitHubHost(),
+		AOBinary:                    aoBin,
+		GHConfigDir:                 ghConfigDir,
+		GHShimDir:                   ghShimDir,
+		CurrentPATH:                 env["PATH"],
+		AuthorizedRepos:             repos,
+		ExtraHeaderKeysToClear:      extraHeaderKeys,
+		CredentialHelperKeysToClear: helperKeys,
+	})
+	for k, v := range brokerEnv {
+		setProtectedEnv(env, k, v, envKeysCaseInsensitive)
+	}
+	return nil
+}
+
+func (m *Manager) markTerminated(ctx context.Context, id domain.SessionID) error {
+	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+		return err
+	}
+	m.revokeGitHubBrokerSession(id)
+	return nil
+}
+
+func (m *Manager) revokeGitHubBrokerSession(id domain.SessionID) {
+	if m.githubBroker == nil || id == "" {
+		return
+	}
+	m.githubBroker.RevokeSession(id)
+	if m.dataDir != "" {
+		_ = os.RemoveAll(filepath.Join(m.dataDir, "runtime", "github-broker-bin", string(id)))
+		_ = os.RemoveAll(filepath.Join(m.dataDir, "runtime", "github-broker-gh", string(id)))
+	}
+}
+
+func extractOwnerRepoFromOriginURL(originURL, host string) (ownerRepo string, isGitHubHost bool, err error) {
+	raw := strings.TrimSpace(originURL)
+	if raw == "" {
+		return "", false, nil
+	}
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		h = githubbroker.DefaultGitHubHost
+	}
+
+	var parsedHost, pathPart string
+	if strings.Contains(raw, "://") {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			if strings.Contains(strings.ToLower(raw), h) {
+				return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
+			}
+			return "", false, nil
+		}
+		parsedHost = strings.ToLower(strings.TrimSpace(u.Hostname()))
+		pathPart = u.Path
+		scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+		if parsedHost == h {
+			if scheme == "http" {
+				return "", true, fmt.Errorf("%w: plaintext http GitHub origin URL is not supported; use https", githubbroker.ErrForbiddenRepo)
+			}
+			if scheme == "https" {
+				if u.User != nil {
+					return "", true, fmt.Errorf("%w: GitHub origin URL must not contain embedded credentials", githubbroker.ErrForbiddenRepo)
+				}
+				if u.Port() != "" {
+					return "", true, fmt.Errorf("%w: explicit port in https GitHub origin URL is not supported", githubbroker.ErrForbiddenRepo)
+				}
+			}
+			if scheme == "ssh" {
+				if !strings.HasPrefix(raw, "ssh://git@"+h+"/") && !strings.HasPrefix(raw, "ssh://git@"+h+":22/") {
+					return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL", githubbroker.ErrForbiddenRepo)
+				}
+			}
+		}
+	} else if atIdx := strings.Index(raw, "@"); atIdx >= 0 {
+		rest := raw[atIdx+1:]
+		if colonIdx := strings.Index(rest, ":"); colonIdx > 0 {
+			parsedHost = strings.ToLower(strings.TrimSpace(rest[:colonIdx]))
+			pathPart = rest[colonIdx+1:]
+			if parsedHost == h && !strings.HasPrefix(raw, "git@"+h+":") {
+				return "", true, fmt.Errorf("%w: noncanonical SSH GitHub origin URL", githubbroker.ErrForbiddenRepo)
+			}
+		}
+	}
+
+	if parsedHost == "" {
+		if strings.Contains(strings.ToLower(raw), h) {
+			return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
+		}
+		return "", false, nil
+	}
+	if parsedHost != h {
+		return "", false, nil
+	}
+
+	clean := strings.TrimSuffix(strings.Trim(pathPart, "/"), ".git")
+	parts := strings.Split(clean, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", true, fmt.Errorf("%w: unrecognized GitHub origin URL", githubbroker.ErrForbiddenRepo)
+	}
+	return parts[0] + "/" + parts[1], true, nil
 }
 
 // prepareWorkerLaunchEnv couples capability issuance with durable verifier

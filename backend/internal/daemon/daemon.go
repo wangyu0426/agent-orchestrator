@@ -633,6 +633,16 @@ func Run(buildVersion string) (retErr error) {
 		}
 		return err
 	}
+	if ghAuth.workerBroker != nil {
+		ghAuth.workerBroker.SetSessionActiveChecker(func(checkCtx context.Context, id domain.SessionID) (bool, error) {
+			rec, found, getErr := store.GetSession(checkCtx, id)
+			if getErr != nil {
+				return false, getErr
+			}
+			return found && !rec.IsTerminated && rec.Activity.State != domain.ActivityExited, nil
+		})
+		ghAuth.workerBroker.ReconcileSessions(ctx)
+	}
 	tracker := newMultiTrackerWithAuth(ghAuth, cfg.GitLab, log)
 	codexPlugin := codexagent.New()
 	codexHome, err := codexPlugin.NativeSessionConfigDir(ctx, nil)
@@ -1373,6 +1383,7 @@ func Run(buildVersion string) (retErr error) {
 		Cues:               cuesvc.New(cuesvc.Deps{Store: store, Sessions: sessionSvc, Terminals: shellTermSvc}),
 		AgentAuth:          agentAuthSvc,
 		GitHub:             newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
+		GitHubBroker:       ghAuth.workerBroker,
 		Conversations:      chatSvc,
 		ConversationSearch: store,
 		Settings:           settingsSvc,

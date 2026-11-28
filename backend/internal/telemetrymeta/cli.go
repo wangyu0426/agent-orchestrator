@@ -32,6 +32,7 @@ var routineInternalCLICommands = []string{
 	"ao hooks",
 	"ao pty-host",
 	"ao browser-host",
+	"ao github-broker",
 	"ao unreal-provider",
 	"ao codex-login",
 	"ao claude-login",
@@ -64,16 +65,20 @@ func CLIActorType(actorType, commandPath string) string {
 }
 
 var legacyActorlessSystemCLICommands = map[string]struct{}{
-	"ao agent-process":           {},
-	"ao agent-process supervise": {},
-	"ao browser-host":            {},
-	"ao chat-host":               {},
-	"ao completion":              {},
-	"ao daemon":                  {},
-	"ao help":                    {},
-	"ao pty-host":                {},
-	"ao start":                   {},
-	"ao unreal-provider":         {},
+	"ao agent-process":                {},
+	"ao agent-process supervise":      {},
+	"ao browser-host":                 {},
+	"ao chat-host":                    {},
+	"ao completion":                   {},
+	"ao daemon":                       {},
+	"ao github-broker":                {},
+	"ao github-broker gh":             {},
+	"ao github-broker git-credential": {},
+	"ao github-broker ssh-guard":      {},
+	"ao help":                         {},
+	"ao pty-host":                     {},
+	"ao start":                        {},
+	"ao unreal-provider":              {},
 }
 
 var legacyActorlessUserCLICommands = map[string]struct{}{
