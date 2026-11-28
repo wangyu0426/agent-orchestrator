@@ -8,6 +8,13 @@ state, terminal streaming, and CDC/event infrastructure.
 Start with [architecture.md](architecture.md) for the current backend model and
 [cli/README.md](cli/README.md) for the CLI surface.
 
+## Long-term direction
+
+[Agent execution OS vision](agent-os-vision.md) describes the self-hosted fork's
+long-term goal: deterministic task execution and recovery without requiring an
+orchestrator LLM to remain online. It is a vision, not shipped functionality or
+a mandate to rewrite the existing architecture.
+
 ## Reference docs
 
 Gemini CLI setup, permission mapping, and current capability limits are documented
@@ -38,7 +45,7 @@ in [gemini-cli.md](gemini-cli.md).
 | [telemetry.md](telemetry.md)                           | User-facing overview of product telemetry, privacy safeguards, and opt-out controls.                                    |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
 
-See [startup-cues.md](startup-cues.md) for command cues that gate a new worktree’s opening turn.
+See [startup-cues.md](startup-cues.md) for command cues that gate a new worktreeâ€™s opening turn.
 
 ## Mental model
 
