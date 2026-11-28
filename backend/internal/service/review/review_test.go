@@ -191,6 +191,29 @@ func TestSubmitNativeReviewBindsStoredRunAndPersistsVerifiedProviderOutcome(t *t
 	}
 }
 
+func TestSubmitMapsNativeRequestValidationToInvalid(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{err: fmt.Errorf("COMMENT requires review body or inline comments: %w", githubreview.ErrInvalidRequest)}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	_, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictApproved, Event: githubreview.EventComment,
+	}})
+	if !errors.Is(err, ErrInvalid) || !errors.Is(err, githubreview.ErrInvalidRequest) {
+		t.Fatalf("SubmitMany err=%v; want review ErrInvalid wrapping native request validation", err)
+	}
+	if native.calls != 1 || store.updateCalls != 0 {
+		t.Fatalf("native calls=%d run outcome updates=%d; want one validation call and no completed outcome", native.calls, store.updateCalls)
+	}
+}
+
 func TestSubmitCompletedNativeReviewRejectsChangedInlineComments(t *testing.T) {
 	const (
 		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

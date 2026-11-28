@@ -1026,6 +1026,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 				ExpectedHeadSHA: run.TargetSHA, Event: providerEvent, Body: body, Comments: review.Comments,
 			})
 			if submitErr != nil {
+				if errors.Is(submitErr, githubreview.ErrInvalidRequest) {
+					return domain.ReviewRun{}, fmt.Errorf("%w: %w", ErrInvalid, submitErr)
+				}
 				if !degradedNativeReviewError(submitErr) {
 					return domain.ReviewRun{}, submitErr
 				}

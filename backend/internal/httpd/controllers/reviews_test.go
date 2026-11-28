@@ -26,6 +26,7 @@ type fakeReviewService struct {
 	triggeredMode     domain.ReviewerInterfaceMode
 	triggeredRerun    bool
 	triggerErr        error
+	submitErr         error
 	cancelErr         error
 	trigger           reviewcore.TriggerResult
 	cancel            reviewcore.CancelResult
@@ -154,6 +155,9 @@ func (f *fakeReviewService) SwitchReviewer(_ context.Context, _ domain.SessionID
 
 func (f *fakeReviewService) SubmitMany(_ context.Context, _ domain.SessionID, reviews []reviewsvc.SubmittedReview) ([]domain.ReviewRun, error) {
 	f.submitted = append([]reviewsvc.SubmittedReview(nil), reviews...)
+	if f.submitErr != nil {
+		return nil, f.submitErr
+	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
 	for _, review := range reviews {
 		runs = append(runs, domain.ReviewRun{ID: review.RunID, Verdict: review.Verdict, Body: review.Body, GithubReviewID: review.GithubReviewID})
@@ -474,6 +478,15 @@ func TestReviewsSubmitAcceptsBatchedReviews(t *testing.T) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
 	}
+}
+
+func TestReviewsSubmitMapsInvalidRequestTo422(t *testing.T) {
+	svc := &fakeReviewService{submitErr: fmt.Errorf("native review request: %w", reviewsvc.ErrInvalid)}
+	srv := newReviewTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"runId":"run-1","verdict":"approved","event":"COMMENT"}`)
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusUnprocessableEntity, "REVIEW_INVALID")
 }
 
 func TestReviewsTriggerForwardsExplicitRerun(t *testing.T) {
