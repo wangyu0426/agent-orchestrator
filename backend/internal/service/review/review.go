@@ -1029,6 +1029,9 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 				if errors.Is(submitErr, githubreview.ErrInvalidRequest) {
 					return domain.ReviewRun{}, fmt.Errorf("%w: %w", ErrInvalid, submitErr)
 				}
+				if errors.Is(submitErr, githubreview.ErrConflictingRetry) {
+					return domain.ReviewRun{}, fmt.Errorf("%w: %w", ErrConflict, submitErr)
+				}
 				if !degradedNativeReviewError(submitErr) {
 					return domain.ReviewRun{}, submitErr
 				}
@@ -1139,8 +1142,7 @@ func degradedNativeReviewError(err error) bool {
 		errors.Is(err, githubreview.ErrRepositoryForbidden) ||
 		errors.Is(err, githubreview.ErrProviderRejected) ||
 		errors.Is(err, githubreview.ErrStaleHead) ||
-		errors.Is(err, githubreview.ErrUnverifiedReview) ||
-		errors.Is(err, githubreview.ErrConflictingRetry)
+		errors.Is(err, githubreview.ErrUnverifiedReview)
 }
 
 func safeNativeReviewError(err error) string {

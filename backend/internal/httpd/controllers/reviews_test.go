@@ -489,6 +489,15 @@ func TestReviewsSubmitMapsInvalidRequestTo422(t *testing.T) {
 	assertErrorCode(t, body, status, http.StatusUnprocessableEntity, "REVIEW_INVALID")
 }
 
+func TestReviewsSubmitMapsConflictTo409(t *testing.T) {
+	svc := &fakeReviewService{submitErr: fmt.Errorf("native review retry: %w", reviewsvc.ErrConflict)}
+	srv := newReviewTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"runId":"run-1","verdict":"changes_requested"}`)
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusConflict, "REVIEW_CONFLICT")
+}
+
 func TestReviewsTriggerForwardsExplicitRerun(t *testing.T) {
 	svc := &fakeReviewService{}
 	srv := newReviewTestServer(t, svc)

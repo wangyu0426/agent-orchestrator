@@ -214,6 +214,33 @@ func TestSubmitMapsNativeRequestValidationToInvalid(t *testing.T) {
 	}
 }
 
+func TestSubmitConflictingNativeRetryDoesNotCompleteRun(t *testing.T) {
+	const (
+		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		prURL     = "https://github.com/org/repo/pull/7"
+	)
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{err: githubreview.ErrConflictingRetry}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	_, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.", Comments: []githubreview.Comment{{Path: "main.go", Line: 14, Side: "RIGHT", Body: "Guard this dereference."}},
+	}})
+	if !errors.Is(err, ErrConflict) || !errors.Is(err, githubreview.ErrConflictingRetry) {
+		t.Fatalf("SubmitMany err=%v; want conflict preserving the native retry cause", err)
+	}
+	if native.calls != 1 || store.updateCalls != 0 {
+		t.Fatalf("native calls=%d run outcome updates=%d; want one provider check and no completed outcome", native.calls, store.updateCalls)
+	}
+	if store.run.Status != domain.ReviewRunRunning || store.run.Verdict != domain.VerdictNone || store.run.Body != "" {
+		t.Fatalf("run was overwritten after provider conflict: %+v", store.run)
+	}
+}
+
 func TestSubmitCompletedNativeReviewRejectsChangedInlineComments(t *testing.T) {
 	const (
 		targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
