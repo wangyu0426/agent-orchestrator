@@ -35,6 +35,10 @@ type PRObservation struct {
 	Mergeability domain.Mergeability
 	Checks       []PRCheckObservation
 	Comments     []PRCommentObservation
+	// ConversationFeedbackUnverified suppresses delivery of persisted active
+	// conversation feedback rows when the latest scan was partial and did not
+	// verify an active command in the fetched window.
+	ConversationFeedbackUnverified bool
 }
 
 // PRCheckObservation is one SCM check result on the observed PR.

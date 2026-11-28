@@ -310,7 +310,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 			}
 		}
 
-		if fbStore, ok := m.store.(conversationFeedbackStore); ok {
+		if fbStore, ok := m.store.(conversationFeedbackStore); ok && !o.ConversationFeedbackUnverified {
 			proj, found, err := fbStore.GetProject(ctx, string(rec.ProjectID))
 			if err != nil {
 				return fmt.Errorf("load project %s for conversation feedback: %w", rec.ProjectID, err)
@@ -786,8 +786,9 @@ func scmToPRObservation(o ports.SCMObservation) ports.PRObservation {
 		Merged:       o.PR.Merged,
 		Closed:       o.PR.Closed,
 		CI:           domain.CIState(o.CI.Summary),
-		Review:       domain.ReviewDecision(o.Review.Decision),
-		Mergeability: domain.Mergeability(o.Mergeability.State),
+		Review:                         domain.ReviewDecision(o.Review.Decision),
+		Mergeability:                   domain.Mergeability(o.Mergeability.State),
+		ConversationFeedbackUnverified: o.ConversationFeedbackUnverified,
 	}
 	if pr.CI == "" {
 		pr.CI = domain.CIUnknown

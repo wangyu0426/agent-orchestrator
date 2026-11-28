@@ -114,6 +114,9 @@ func (o *Observer) refreshConversationFeedback(
 				if err != nil {
 					o.logger.Error("scm observer: reconcile conversation feedback failed", "pr", prURL, "session", s.session.ID, "err", err)
 					hasActive = o.hasPersistedActiveConversationFeedback(ctx, fbStore, prURL)
+				} else if comments.Partial && !hasActive && hasObs {
+					obs.ConversationFeedbackUnverified = true
+					observations[pkey] = obs
 				}
 			}
 		}

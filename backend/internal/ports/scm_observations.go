@@ -92,6 +92,11 @@ type SCMObservation struct {
 
 	// Changed marks which semantic buckets changed compared with the DB snapshot.
 	Changed SCMChanged
+
+	// ConversationFeedbackUnverified is set when the latest conversation-comment
+	// scan was partial and did not verify an active command in the fetched
+	// window, so lifecycle must not deliver unverified persisted active rows.
+	ConversationFeedbackUnverified bool `json:"-"`
 }
 
 // SCMChanged marks which semantic state buckets changed in the successful poll.
