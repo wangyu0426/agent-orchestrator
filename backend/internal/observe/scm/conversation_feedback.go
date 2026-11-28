@@ -295,32 +295,46 @@ func (o *Observer) reconcileConversationFeedback(
 		})
 	}
 
-	// Mark any previously active command that disappeared from the PR as deleted,
-	// ONLY when every page of conversation comments was fetched. A partial listing
-	// must not infer deletion from absence.
-	if result.Partial {
-		o.logger.Warn("scm observer: conversation comments listing is partial; skipping absence-based deletion",
+	// Mark any previously active command that disappeared from the PR as deleted.
+	// On a complete scan, any absent active row was deleted. On a partial scan
+	// (newest 1,000 comments), any absent active row whose timestamp falls within
+	// the fetched window (>= comments[0].CreatedAt) was also deleted; only rows
+	// older than the fetched window are spared from absence-based deletion.
+	var windowOldest time.Time
+	var windowOldestID string
+	if result.Partial && len(comments) > 0 {
+		windowOldest = comments[0].CreatedAt
+		windowOldestID = comments[0].ID
+		o.logger.Warn("scm observer: conversation comments listing is partial; limiting absence-based deletion to fetched window",
 			"pr", prURL,
 			"session", s.session.ID,
 			"fetched_count", len(comments),
 		)
-	} else {
-		for _, prev := range existingRows {
-			if prev.State == domain.PRConversationFeedbackActive && !presentIDs[prev.CommentID] {
-				prev.State = domain.PRConversationFeedbackDeleted
-				prev.ObservedAt = now
-				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
-					return false, err
-				}
-				o.logger.Info("scm observer: conversation feedback deleted",
-					"event", "ignored",
-					"pr", prURL,
-					"session", s.session.ID,
-					"comment_id", prev.CommentID,
-					"reason", "deleted",
-				)
+	}
+	for _, prev := range existingRows {
+		if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
+			continue
+		}
+		if result.Partial {
+			inWindow := !windowOldest.IsZero() && !prev.CreatedAtProvider.IsZero() &&
+				(prev.CreatedAtProvider.After(windowOldest) ||
+					(prev.CreatedAtProvider.Equal(windowOldest) && prev.CommentID >= windowOldestID))
+			if !inWindow {
+				continue
 			}
 		}
+		prev.State = domain.PRConversationFeedbackDeleted
+		prev.ObservedAt = now
+		if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+			return false, err
+		}
+		o.logger.Info("scm observer: conversation feedback deleted",
+			"event", "ignored",
+			"pr", prURL,
+			"session", s.session.ID,
+			"comment_id", prev.CommentID,
+			"reason", "deleted",
+		)
 	}
 
 	// Supersession: when multiple active commands exist, keep only the newest
