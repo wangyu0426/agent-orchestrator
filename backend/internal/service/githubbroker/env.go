@@ -221,55 +221,10 @@ func shellQuoteForGit(s string) string {
 
 // CollectGitHubExtraHeaderKeys inspects effective Git config (system, global,
 // and repository-local when repoDir is non-empty) and returns every
-// `http.<url>.extraheader` key whose URL targets host (or bare `http.extraheader`
-// when host matches). Non-GitHub hosts (such as GitLab) are untouched.
+// `http.<url>.extraheader` key whose URL targets host. Non-GitHub hosts (such
+// as GitLab) are untouched.
 func CollectGitHubExtraHeaderKeys(ctx context.Context, repoDir, host string) []string {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if h == "" {
-		h = DefaultGitHubHost
-	}
-	args := []string{"config", "--name-only", "--get-regexp", `^http\..*\.extraheader$`}
-	if strings.TrimSpace(repoDir) != "" {
-		args = append([]string{"-C", repoDir}, args...)
-	}
-	out, err := process.CommandContext(ctx, "git", args...).Output()
-	if err != nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var keys []string
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		key := strings.TrimSpace(scanner.Text())
-		if key == "" {
-			continue
-		}
-		if !extraHeaderKeyTargetsHost(key, h) {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func extraHeaderKeyTargetsHost(key, host string) bool {
-	lower := strings.ToLower(strings.TrimSpace(key))
-	if !strings.HasPrefix(lower, "http.") || !strings.HasSuffix(lower, ".extraheader") {
-		return false
-	}
-	middle := key[len("http.") : len(key)-len(".extraheader")]
-	u, err := url.Parse(middle)
-	if err != nil {
-		return false
-	}
-	uHost := strings.ToLower(strings.TrimSpace(u.Hostname()))
-	uHostPort := strings.ToLower(strings.TrimSpace(u.Host))
-	return uHost == host || uHostPort == host
+	return collectGitHubConfigKeys(ctx, repoDir, host, `^http\..*\.extraheader$`, "http.", ".extraheader")
 }
 
 // CollectGitHubCredentialHelperKeys inspects effective Git config (system,
@@ -277,11 +232,15 @@ func extraHeaderKeyTargetsHost(key, host string) bool {
 // `credential.<url>.helper` key whose URL targets host. Non-GitHub hosts (such
 // as GitLab) are untouched.
 func CollectGitHubCredentialHelperKeys(ctx context.Context, repoDir, host string) []string {
+	return collectGitHubConfigKeys(ctx, repoDir, host, `^credential\..*\.helper$`, "credential.", ".helper")
+}
+
+func collectGitHubConfigKeys(ctx context.Context, repoDir, host, pattern, prefix, suffix string) []string {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
 		h = DefaultGitHubHost
 	}
-	args := []string{"config", "--name-only", "--get-regexp", `^credential\..*\.helper$`}
+	args := []string{"config", "--name-only", "--get-regexp", pattern}
 	if strings.TrimSpace(repoDir) != "" {
 		args = append([]string{"-C", repoDir}, args...)
 	}
@@ -297,7 +256,7 @@ func CollectGitHubCredentialHelperKeys(ctx context.Context, repoDir, host string
 		if key == "" {
 			continue
 		}
-		if !credentialHelperKeyTargetsHost(key, h) {
+		if !configURLKeyTargetsHost(key, h, prefix, suffix) {
 			continue
 		}
 		if _, ok := seen[key]; ok {
@@ -310,12 +269,12 @@ func CollectGitHubCredentialHelperKeys(ctx context.Context, repoDir, host string
 	return keys
 }
 
-func credentialHelperKeyTargetsHost(key, host string) bool {
+func configURLKeyTargetsHost(key, host, prefix, suffix string) bool {
 	lower := strings.ToLower(strings.TrimSpace(key))
-	if !strings.HasPrefix(lower, "credential.") || !strings.HasSuffix(lower, ".helper") {
+	if !strings.HasPrefix(lower, prefix) || !strings.HasSuffix(lower, suffix) {
 		return false
 	}
-	middle := key[len("credential.") : len(key)-len(".helper")]
+	middle := key[len(prefix) : len(key)-len(suffix)]
 	u, err := url.Parse(middle)
 	if err != nil {
 		return false
