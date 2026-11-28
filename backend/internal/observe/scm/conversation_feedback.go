@@ -40,12 +40,15 @@ func (o *Observer) refreshConversationFeedback(
 	now time.Time,
 ) map[string]bool {
 	activePRKeys := map[string]bool{}
-	ccProvider, ok := o.provider.(ConversationCommentProvider)
-	if !ok {
-		return activePRKeys
-	}
-	fbStore, ok := o.store.(conversationFeedbackStore)
-	if !ok {
+	ccProvider, providerSupportsComments := o.provider.(ConversationCommentProvider)
+	fbStore, storeSupportsFeedback := o.store.(conversationFeedbackStore)
+	if !providerSupportsComments || !storeSupportsFeedback {
+		for key := range localOnlyObservations {
+			if obs, hasObs := observations[key]; hasObs {
+				obs.ConversationFeedbackUnverified = true
+				observations[key] = obs
+			}
+		}
 		return activePRKeys
 	}
 
@@ -79,7 +82,7 @@ func (o *Observer) refreshConversationFeedback(
 		var hasActive, hasUnverified bool
 		freshOpen := false
 		obs, hasObs := observations[pkey]
-		if hasObs && obs.Fetched && !obs.PR.Merged && !obs.PR.Closed {
+		if hasObs && obs.Fetched && !localOnlyObservations[pkey] && !obs.PR.Merged && !obs.PR.Closed {
 			freshOpen = true
 		}
 		if o.inRateLimitCooldown(now, s.repo.Provider) || !o.needsConversationFeedbackRefresh(pkey, s.known, obs, hasObs, forced, now) {
@@ -92,6 +95,10 @@ func (o *Observer) refreshConversationFeedback(
 				URL:    prURL,
 			})
 			if errors.Is(err, ports.ErrSCMUnsupported) {
+				if hasObs && !freshOpen {
+					obs.ConversationFeedbackUnverified = true
+					observations[pkey] = obs
+				}
 				continue
 			}
 			o.logProviderRequest("fetch_conversation_comments", repoFullName(s.repo), started, err)
@@ -125,8 +132,8 @@ func (o *Observer) refreshConversationFeedback(
 				}
 			}
 		}
-		if hasObs && (hasActive || hasUnverified) {
-			obs.ConversationFeedbackUnverified = hasUnverified && !hasActive
+		if hasObs {
+			obs.ConversationFeedbackUnverified = !freshOpen || (hasUnverified && !hasActive)
 			observations[pkey] = obs
 		}
 		if !hasActive || !freshOpen {

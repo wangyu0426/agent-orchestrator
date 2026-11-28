@@ -2,6 +2,7 @@ package scm
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -20,12 +21,13 @@ type memConversationFeedbackStore struct {
 type conversationFeedbackTestProvider struct {
 	Provider
 	result ports.SCMConversationCommentsResult
+	err    error
 	calls  int
 }
 
 func (p *conversationFeedbackTestProvider) FetchConversationComments(context.Context, ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
 	p.calls++
-	return p.result, nil
+	return p.result, p.err
 }
 
 type conversationFeedbackTestStore struct {
@@ -360,5 +362,199 @@ func TestRefreshConversationFeedback_TerminalResponseSuppressesVerifiedFeedback(
 				t.Fatalf("terminal response changed the verified active row: %+v", row)
 			}
 		})
+	}
+}
+
+func TestRefreshConversationFeedback_ReviewOnlyObservationRequiresFreshOpenEvidence(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	repo := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "wangyu0426", Name: "WebPoB", Repo: "wangyu0426/WebPoB"}
+	tests := []struct {
+		name           string
+		providerErr    error
+		skipRefresh    bool
+		wantFetchCalls int
+	}{
+		{name: "failed comment refresh", providerErr: errors.New("temporary fetch failure"), wantFetchCalls: 1},
+		{name: "cadence cache hit", skipRefresh: true, wantFetchCalls: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subj := &subject{
+				session: domain.SessionRecord{ID: "webpob-1", ProjectID: "project-1", AutoInjectReview: true},
+				repo:    repo,
+				known:   domain.PullRequest{URL: prURL, Number: 9},
+				hasPR:   true,
+			}
+			pkey := keyForTrackedPR(subj.known, repo)
+			fbStore := newMemConversationFeedbackStore()
+			if err := fbStore.UpsertPRConversationFeedback(ctx, domain.PullRequestConversationFeedback{
+				PRURL:             prURL,
+				CommentID:         "IC_verified_cmd",
+				SessionID:         subj.session.ID,
+				Author:            "wangyu0426",
+				Body:              "Fix edge case",
+				BodyHash:          "verified-hash",
+				State:             domain.PRConversationFeedbackActive,
+				AutoInjectReview:  true,
+				CreatedAtProvider: now.Add(-time.Hour),
+				ObservedAt:        now.Add(-time.Hour),
+			}); err != nil {
+				t.Fatalf("seed active feedback: %v", err)
+			}
+			provider := &conversationFeedbackTestProvider{err: tt.providerErr}
+			store := &conversationFeedbackTestStore{
+				memConversationFeedbackStore: fbStore,
+				project: domain.ProjectRecord{ID: "project-1", Config: domain.ProjectConfig{PRCommentFeedback: domain.PRCommentFeedbackConfig{
+					Enabled:        true,
+					TrustedAuthors: []string{"wangyu0426"},
+				}}},
+			}
+			observer := New(provider, store, nil, Config{
+				Clock:          func() time.Time { return now },
+				ReviewInterval: 5 * time.Minute,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			if tt.skipRefresh {
+				observer.Cache.LastConversationPollAt[pkey] = now
+			}
+			observations := map[string]ports.SCMObservation{pkey: observationFromLocal(repo, subj.known, nil)}
+			active := observer.refreshConversationFeedback(
+				ctx,
+				map[string]*subject{"webpob-1": subj},
+				observations,
+				map[string]*subject{pkey: subj},
+				map[string]bool{},
+				map[string]bool{pkey: true},
+				now,
+			)
+			if active[pkey] {
+				t.Fatal("review-only OPEN snapshot made persisted feedback eligible without fresh open evidence")
+			}
+			if !observations[pkey].ConversationFeedbackUnverified {
+				t.Fatal("review-only OPEN snapshot did not suppress conversation feedback on the dispatched observation")
+			}
+			if provider.calls != tt.wantFetchCalls {
+				t.Fatalf("conversation fetches = %d, want %d", provider.calls, tt.wantFetchCalls)
+			}
+		})
+	}
+}
+
+func TestRefreshConversationFeedback_TerminalResultWithoutMainObservationSuppressesNextReviewOnlyPoll(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	repo := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "wangyu0426", Name: "WebPoB", Repo: "wangyu0426/WebPoB"}
+	subj := &subject{
+		session: domain.SessionRecord{ID: "webpob-1", ProjectID: "project-1", AutoInjectReview: true},
+		repo:    repo,
+		known:   domain.PullRequest{URL: prURL, Number: 9},
+		hasPR:   true,
+	}
+	pkey := keyForTrackedPR(subj.known, repo)
+	fbStore := newMemConversationFeedbackStore()
+	if err := fbStore.UpsertPRConversationFeedback(ctx, domain.PullRequestConversationFeedback{
+		PRURL:             prURL,
+		CommentID:         "IC_verified_cmd",
+		SessionID:         subj.session.ID,
+		Author:            "wangyu0426",
+		Body:              "Fix edge case",
+		BodyHash:          "verified-hash",
+		State:             domain.PRConversationFeedbackActive,
+		AutoInjectReview:  true,
+		CreatedAtProvider: now.Add(-time.Hour),
+		ObservedAt:        now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed active feedback: %v", err)
+	}
+	provider := &conversationFeedbackTestProvider{result: ports.SCMConversationCommentsResult{PRClosed: true}}
+	store := &conversationFeedbackTestStore{
+		memConversationFeedbackStore: fbStore,
+		project: domain.ProjectRecord{ID: "project-1", Config: domain.ProjectConfig{PRCommentFeedback: domain.PRCommentFeedbackConfig{
+			Enabled:        true,
+			TrustedAuthors: []string{"wangyu0426"},
+		}}},
+	}
+	observer := New(provider, store, nil, Config{
+		Clock:          func() time.Time { return now },
+		ReviewInterval: 5 * time.Minute,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	subjects := map[string]*subject{"webpob-1": subj}
+	subjectsByPR := map[string]*subject{pkey: subj}
+	forced := map[string]bool{}
+	localOnly := map[string]bool{}
+
+	// A terminal comment result without a main observation must still cache the
+	// poll, then suppress delivery if the next poll has only a cached OPEN row.
+	observations := map[string]ports.SCMObservation{}
+	active := observer.refreshConversationFeedback(ctx, subjects, observations, subjectsByPR, forced, localOnly, now)
+	if active[pkey] {
+		t.Fatal("terminal result without a main observation made feedback eligible")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("conversation fetches after terminal result = %d, want 1", provider.calls)
+	}
+
+	observations[pkey] = observationFromLocal(repo, subj.known, nil)
+	localOnly[pkey] = true
+	active = observer.refreshConversationFeedback(ctx, subjects, observations, subjectsByPR, forced, localOnly, now.Add(time.Minute))
+	if active[pkey] {
+		t.Fatal("subsequent review-only OPEN snapshot re-enabled cached verified feedback")
+	}
+	if !observations[pkey].ConversationFeedbackUnverified {
+		t.Fatal("subsequent review-only observation did not suppress feedback delivery")
+	}
+	if provider.calls != 1 {
+		t.Fatalf("conversation fetches = %d, want terminal fetch followed by cadence cache hit", provider.calls)
+	}
+}
+
+func TestRefreshConversationFeedback_UnsupportedProviderSuppressesLocalOnlyObservation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/wangyu0426/WebPoB/pull/9"
+	repo := ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "wangyu0426", Name: "WebPoB", Repo: "wangyu0426/WebPoB"}
+	subj := &subject{
+		session: domain.SessionRecord{ID: "webpob-1", ProjectID: "project-1", AutoInjectReview: true},
+		repo:    repo,
+		known:   domain.PullRequest{URL: prURL, Number: 9},
+		hasPR:   true,
+	}
+	pkey := keyForTrackedPR(subj.known, repo)
+	fbStore := newMemConversationFeedbackStore()
+	if err := fbStore.UpsertPRConversationFeedback(ctx, domain.PullRequestConversationFeedback{
+		PRURL:             prURL,
+		CommentID:         "IC_verified_cmd",
+		SessionID:         subj.session.ID,
+		Author:            "wangyu0426",
+		Body:              "Fix edge case",
+		BodyHash:          "verified-hash",
+		State:             domain.PRConversationFeedbackActive,
+		AutoInjectReview:  true,
+		CreatedAtProvider: now.Add(-time.Hour),
+		ObservedAt:        now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed active feedback: %v", err)
+	}
+	store := &conversationFeedbackTestStore{memConversationFeedbackStore: fbStore}
+	observer := New(nil, store, nil, Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	observations := map[string]ports.SCMObservation{pkey: observationFromLocal(repo, subj.known, nil)}
+	active := observer.refreshConversationFeedback(
+		ctx,
+		map[string]*subject{"webpob-1": subj},
+		observations,
+		map[string]*subject{pkey: subj},
+		map[string]bool{},
+		map[string]bool{pkey: true},
+		now,
+	)
+	if active[pkey] {
+		t.Fatal("unsupported provider made persisted feedback eligible from a review-only OPEN snapshot")
+	}
+	if !observations[pkey].ConversationFeedbackUnverified {
+		t.Fatal("unsupported provider did not suppress feedback on the local-only observation")
 	}
 }

@@ -117,7 +117,11 @@ func newMockPRServer(t *testing.T, prAuthor, headSHA string) *mockPRServer {
 			m.mu.Unlock()
 
 			// Backward-paginated conversation comments query (newest page first).
-			if strings.Contains(payload.Query, "comments(last:") {
+			// PR detail queries also contain an aliased comments(last:...) field;
+			// keep the failure switch scoped to this standalone query.
+			if strings.Contains(payload.Query, "merged closed") &&
+				strings.Contains(payload.Query, "comments(last:") &&
+				!strings.Contains(payload.Query, "conversation:") {
 				if failComments {
 					w.WriteHeader(http.StatusInternalServerError)
 					_, _ = w.Write([]byte(`{"message":"simulated graphql failure"}`))
@@ -891,7 +895,7 @@ func TestPRCommentFeedback_DisableAutoInjectReviewDuringFetchFailureSuppressesDe
 		t.Fatalf("UpdateSession re-enable: %v", err)
 	}
 	now = now.Add(6 * time.Minute)
-	obs.RequestReviewRefresh(prURL)
+	obs.RequestSessionRefresh(rec.ID)
 	if err := obs.Poll(context.Background()); err != nil {
 		t.Fatalf("poll after re-enabling AutoInjectReview: %v", err)
 	}
