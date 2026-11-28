@@ -382,6 +382,35 @@ func (o *Observer) reconcileConversationFeedback(
 		}
 	}
 
+	// On partial results with a newer authorized command, supersede any absent
+	// stored active row that is older than the newest fetched command so only
+	// the newest command remains active.
+	if result.Partial && len(activeCandidates) > 0 {
+		newest := activeCandidates[len(activeCandidates)-1]
+		for _, prev := range existingRows {
+			if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
+				continue
+			}
+			older := prev.CreatedAtProvider.Before(newest.CreatedAtProvider) ||
+				(prev.CreatedAtProvider.Equal(newest.CreatedAtProvider) && prev.CommentID < newest.CommentID)
+			if older {
+				prev.State = domain.PRConversationFeedbackSuperseded
+				prev.ObservedAt = now
+				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+					return false, err
+				}
+				o.logger.Info("scm observer: conversation feedback superseded across partial window",
+					"event", "ignored",
+					"pr", prURL,
+					"session", s.session.ID,
+					"comment_id", prev.CommentID,
+					"superseded_by", newest.CommentID,
+					"reason", "superseded",
+				)
+			}
+		}
+	}
+
 	if !initialized && !result.Partial {
 		if err := fbStore.MarkPRConversationFeedbackInitialized(ctx, prURL, now); err != nil {
 			return false, err
