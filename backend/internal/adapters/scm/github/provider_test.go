@@ -2003,6 +2003,71 @@ func TestFetchConversationCommentsTruncatesOversizedBodies(t *testing.T) {
 	}
 }
 
+func TestFetchConversationCommentsMissingPaginationMetadataIsPartial(t *testing.T) {
+	comment := map[string]any{
+		"id":        "IC_existing",
+		"body":      domain.PRCommentFeedbackMarker + " keep this instruction",
+		"url":       "https://github.com/o/r/pull/1#issuecomment-1",
+		"createdAt": "2026-11-28T00:00:00Z",
+		"updatedAt": "2026-11-28T00:00:00Z",
+		"author":    map[string]any{"login": "alice", "__typename": "User"},
+	}
+	tests := []struct {
+		name             string
+		includeConn      bool
+		connection       any
+		wantCommentCount int
+	}{
+		{name: "missing connection"},
+		{name: "null connection", includeConn: true, connection: nil},
+		{
+			name:             "missing pageInfo",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}},
+			wantCommentCount: 1,
+		},
+		{
+			name:             "null pageInfo",
+			includeConn:      true,
+			connection:       map[string]any{"nodes": []any{comment}, "pageInfo": nil},
+			wantCommentCount: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeGH(t)
+			fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				pr := map[string]any{"merged": false, "closed": false}
+				if tt.includeConn {
+					pr["comments"] = tt.connection
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{
+						"repo": map[string]any{
+							"pullRequest": pr,
+						},
+					},
+				})
+			})
+			p := newProviderForTest(t, fake)
+			result, err := p.FetchConversationComments(ctx(), ports.SCMPRRef{
+				Repo:   ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "r", Repo: "o/r"},
+				Number: 1,
+			})
+			if err != nil {
+				t.Fatalf("FetchConversationComments: %v", err)
+			}
+			if !result.Partial {
+				t.Fatal("Partial = false, want incomplete connection metadata to fail closed")
+			}
+			if len(result.Comments) != tt.wantCommentCount {
+				t.Fatalf("comments = %#v, want %d comments retained from the response", result.Comments, tt.wantCommentCount)
+			}
+		})
+	}
+}
+
 func TestFetchReviewThreadsFetchesOneOlderPageWhenOldestUnresolved(t *testing.T) {
 	fake := newFakeGH(t)
 	fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, r *http.Request) {

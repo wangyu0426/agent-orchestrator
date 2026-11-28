@@ -410,8 +410,8 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 // githubConversationCommentMaxPages pages) so recent explicit operator
 // feedback commands are always inside the fetched window even on PRs with more
 // than 1,000 comments. Results are returned in chronological order. If
-// pagination stops before the oldest page (unusable cursor or page cap),
-// Partial is set to true.
+// pagination stops before the oldest page (unusable cursor, missing
+// pagination metadata, or page cap), Partial is set to true.
 func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMPRRef) (ports.SCMConversationCommentsResult, error) {
 	var pages [][]ports.SCMConversationCommentObservation
 	cursor := ""
@@ -434,6 +434,12 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 			prClosed = boolv(pr["closed"]) && !prMerged
 		}
 		conn, _ := pr["comments"].(map[string]any)
+		if conn == nil {
+			p.logger.Warn("github scm: conversation comments page is partial with missing connection",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
 		var pageNodes []ports.SCMConversationCommentObservation
 		for _, n := range nodes(conn["nodes"]) {
 			id := str(n["id"])
@@ -454,6 +460,12 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 		}
 		pages = append(pages, pageNodes)
 		pi, _ := conn["pageInfo"].(map[string]any)
+		if pi == nil {
+			p.logger.Warn("github scm: conversation comments page is partial with missing page info",
+				"repo", repoFullName(ref.Repo), "pr", ref.Number, "page", page)
+			partial = true
+			break
+		}
 		if !boolv(pi["hasPreviousPage"]) {
 			break
 		}
