@@ -254,15 +254,17 @@ func (c *commandContext) invalidateGitHubBrokerToken(ctx context.Context, host, 
 	sessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	brokerToken := strings.TrimSpace(os.Getenv(githubbroker.EnvBrokerToken))
 	if sessionID == "" || brokerToken == "" {
-		return nil
+		return errors.New("github-broker: missing AO_SESSION_ID or AO_GITHUB_BROKER_TOKEN")
 	}
-	_ = c.doJSONPathWithHeaders(ctx, http.MethodPost, "/internal/github/broker/invalidate", brokerTokenRequestDTO{
+	if err := c.doJSONPathWithHeaders(ctx, http.MethodPost, "/internal/github/broker/invalidate", brokerTokenRequestDTO{
 		SessionID:  sessionID,
 		Host:       host,
 		Repository: repo,
 	}, nil, map[string]string{
 		"Authorization": "Bearer " + brokerToken,
-	})
+	}); err != nil {
+		return fmt.Errorf("github-broker: invalidate token: %v", githubapp.Redact(err.Error()))
+	}
 	return nil
 }
 
