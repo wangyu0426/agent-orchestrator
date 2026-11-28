@@ -441,11 +441,12 @@ func (p *Provider) FetchConversationComments(ctx context.Context, ref ports.SCMP
 				continue
 			}
 			authorMap, _ := n["author"].(map[string]any)
+			body, _ := truncateUTF8(str(n["body"]), domain.MaxPullRequestCommentBodyBytes)
 			pageNodes = append(pageNodes, ports.SCMConversationCommentObservation{
 				ID:        id,
 				Author:    authorLogin(n["author"]),
 				IsBot:     isBotAuthor(authorMap),
-				Body:      str(n["body"]),
+				Body:      body,
 				URL:       str(n["url"]),
 				CreatedAt: parseGitHubTime(str(n["createdAt"])),
 				UpdatedAt: parseGitHubTime(str(n["updatedAt"])),
