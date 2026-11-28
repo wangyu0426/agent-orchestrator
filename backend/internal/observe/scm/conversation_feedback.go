@@ -319,34 +319,33 @@ func (o *Observer) reconcileConversationFeedback(
 	}
 
 	// Mark any previously active command absent from the fetched comments as
-	// deleted. On a complete scan, absence proves deletion. On a partial scan
-	// (newest 1,000 comments), an active row that is absent cannot be verified
-	// as still existing (either deleted inside the window or aged out past 1,000
-	// newer comments), so marking it deleted ensures deleted commands never
-	// remain deliverable.
+	// deleted ONLY on a complete scan. On a partial scan (newest 1,000 comments),
+	// preserve absent active rows in storage (do not falsely mark them deleted)
+	// while keeping hasActive=false so unverified rows are not delivered blindly.
 	if result.Partial {
-		o.logger.Warn("scm observer: conversation comments listing is partial; marking absent active commands non-deliverable",
+		o.logger.Warn("scm observer: conversation comments listing is partial; preserving absent active rows without delivery",
 			"pr", prURL,
 			"session", s.session.ID,
 			"fetched_count", len(comments),
 		)
-	}
-	for _, prev := range existingRows {
-		if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
-			continue
+	} else {
+		for _, prev := range existingRows {
+			if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
+				continue
+			}
+			prev.State = domain.PRConversationFeedbackDeleted
+			prev.ObservedAt = now
+			if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
+				return false, err
+			}
+			o.logger.Info("scm observer: conversation feedback deleted",
+				"event", "ignored",
+				"pr", prURL,
+				"session", s.session.ID,
+				"comment_id", prev.CommentID,
+				"reason", "deleted",
+			)
 		}
-		prev.State = domain.PRConversationFeedbackDeleted
-		prev.ObservedAt = now
-		if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
-			return false, err
-		}
-		o.logger.Info("scm observer: conversation feedback deleted",
-			"event", "ignored",
-			"pr", prURL,
-			"session", s.session.ID,
-			"comment_id", prev.CommentID,
-			"reason", "deleted",
-		)
 	}
 
 	// Supersession: when multiple active commands exist, keep only the newest

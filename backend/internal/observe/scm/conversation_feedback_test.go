@@ -110,7 +110,7 @@ func TestReconcileConversationFeedback_PartialWindowExcludesDeletedCommand(t *te
 	if err != nil {
 		t.Fatalf("ListPRConversationFeedback: %v", err)
 	}
-	if len(rows) != 1 || rows[0].State != domain.PRConversationFeedbackDeleted {
-		t.Fatalf("expected IC_old_cmd to be marked deleted (non-deliverable), got %+v", rows)
+	if len(rows) != 1 || rows[0].State != domain.PRConversationFeedbackActive {
+		t.Fatalf("expected IC_old_cmd to be preserved as active on partial scan (not falsely deleted), got %+v", rows)
 	}
 }
