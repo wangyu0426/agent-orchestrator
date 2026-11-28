@@ -318,17 +318,14 @@ func (o *Observer) reconcileConversationFeedback(
 		})
 	}
 
-	// Mark any previously active command that disappeared from the PR as deleted.
-	// On a complete scan, any absent active row was deleted. On a partial scan
-	// (newest 1,000 comments), any absent active row whose timestamp falls within
-	// the fetched window (>= comments[0].CreatedAt) was also deleted; only rows
-	// older than the fetched window are spared from absence-based deletion.
-	var windowOldest time.Time
-	var windowOldestID string
-	if result.Partial && len(comments) > 0 {
-		windowOldest = comments[0].CreatedAt
-		windowOldestID = comments[0].ID
-		o.logger.Warn("scm observer: conversation comments listing is partial; limiting absence-based deletion to fetched window",
+	// Mark any previously active command absent from the fetched comments as
+	// deleted. On a complete scan, absence proves deletion. On a partial scan
+	// (newest 1,000 comments), an active row that is absent cannot be verified
+	// as still existing (either deleted inside the window or aged out past 1,000
+	// newer comments), so marking it deleted ensures deleted commands never
+	// remain deliverable.
+	if result.Partial {
+		o.logger.Warn("scm observer: conversation comments listing is partial; marking absent active commands non-deliverable",
 			"pr", prURL,
 			"session", s.session.ID,
 			"fetched_count", len(comments),
@@ -337,14 +334,6 @@ func (o *Observer) reconcileConversationFeedback(
 	for _, prev := range existingRows {
 		if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
 			continue
-		}
-		if result.Partial {
-			inWindow := !windowOldest.IsZero() && !prev.CreatedAtProvider.IsZero() &&
-				(prev.CreatedAtProvider.After(windowOldest) ||
-					(prev.CreatedAtProvider.Equal(windowOldest) && prev.CommentID >= windowOldestID))
-			if !inWindow {
-				continue
-			}
 		}
 		prev.State = domain.PRConversationFeedbackDeleted
 		prev.ObservedAt = now
@@ -391,44 +380,6 @@ func (o *Observer) reconcileConversationFeedback(
 				"body_hash", item.BodyHash,
 				"state", item.State,
 			)
-		}
-	}
-
-	// On partial results, supersede any stored active row outside the fetched
-	// window that is older than the newest fetched authorized command, while
-	// continuing to avoid absence-based deletion.
-	if result.Partial && len(activeCandidates) > 0 {
-		newest := activeCandidates[len(activeCandidates)-1]
-		for _, prev := range existingRows {
-			if prev.State != domain.PRConversationFeedbackActive || presentIDs[prev.CommentID] {
-				continue
-			}
-			older := prev.CreatedAtProvider.Before(newest.CreatedAtProvider) ||
-				(prev.CreatedAtProvider.Equal(newest.CreatedAtProvider) && prev.CommentID < newest.CommentID)
-			if older {
-				prev.State = domain.PRConversationFeedbackSuperseded
-				prev.ObservedAt = now
-				if err := fbStore.UpsertPRConversationFeedback(ctx, prev); err != nil {
-					return false, err
-				}
-				o.logger.Info("scm observer: conversation feedback superseded across partial window",
-					"event", "ignored",
-					"pr", prURL,
-					"session", s.session.ID,
-					"comment_id", prev.CommentID,
-					"superseded_by", newest.CommentID,
-					"reason", "superseded",
-				)
-			}
-		}
-	}
-
-	if result.Partial && !hasActive {
-		for _, prev := range existingRows {
-			if prev.State == domain.PRConversationFeedbackActive && !presentIDs[prev.CommentID] {
-				hasActive = true
-				break
-			}
 		}
 	}
 
