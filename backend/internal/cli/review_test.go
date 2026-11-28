@@ -78,6 +78,31 @@ func TestReviewSubmitReadsBodyFile(t *testing.T) {
 	}
 }
 
+func TestReviewSubmitNativeEventReportsVerifiedProviderState(t *testing.T) {
+	cfg := setReviewEnv(t)
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	srv, capture := reviewServer(t, http.StatusOK, `{"review":{"id":"run-1","verdict":"changes_requested","githubReviewState":"CHANGES_REQUESTED","githubReviewAuthor":"reviewer-app[bot]","githubReviewCommitSha":"`+sha+`"}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	deps := aliveDeps()
+	deps.In = strings.NewReader("please fix")
+	out, errOut, err := executeCLI(t, deps,
+		"review", "submit", "mer-1", "--run", "run-1", "--verdict", "changes_requested", "--event", "REQUEST_CHANGES", "--body", "-")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	var req submitReviewRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if req.Event != "REQUEST_CHANGES" {
+		t.Fatalf("event = %q, want REQUEST_CHANGES", req.Event)
+	}
+	if !strings.Contains(out, "verified GitHub state CHANGES_REQUESTED by reviewer-app[bot] on aaaaaaaa") {
+		t.Fatalf("stdout does not show the verified provider state: %q", out)
+	}
+}
+
 func TestReviewSubmitReadsBodyFromStdin(t *testing.T) {
 	cfg := setReviewEnv(t)
 	srv, capture := reviewServer(t, http.StatusOK, `{"review":{"id":"run-1","verdict":"changes_requested"}}`)

@@ -23,19 +23,23 @@ const (
 
 // reviewRun mirrors the daemon's domain.ReviewRun for the CLI client.
 type reviewRun struct {
-	ID             string     `json:"id"`
-	ReviewID       string     `json:"reviewId"`
-	SessionID      string     `json:"sessionId"`
-	BatchID        string     `json:"batchId"`
-	Harness        string     `json:"harness"`
-	PRURL          string     `json:"prUrl"`
-	TargetSHA      string     `json:"targetSha"`
-	Status         string     `json:"status"`
-	Verdict        string     `json:"verdict"`
-	Body           string     `json:"body"`
-	GithubReviewID string     `json:"githubReviewId"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
+	ID                    string     `json:"id"`
+	ReviewID              string     `json:"reviewId"`
+	SessionID             string     `json:"sessionId"`
+	BatchID               string     `json:"batchId"`
+	Harness               string     `json:"harness"`
+	PRURL                 string     `json:"prUrl"`
+	TargetSHA             string     `json:"targetSha"`
+	Status                string     `json:"status"`
+	Verdict               string     `json:"verdict"`
+	Body                  string     `json:"body"`
+	GithubReviewID        string     `json:"githubReviewId"`
+	GithubReviewState     string     `json:"githubReviewState,omitempty"`
+	GithubReviewAuthor    string     `json:"githubReviewAuthor,omitempty"`
+	GithubReviewCommitSHA string     `json:"githubReviewCommitSha,omitempty"`
+	GithubReviewError     string     `json:"githubReviewError,omitempty"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	DeliveredAt           *time.Time `json:"deliveredAt,omitempty"`
 }
 
 type reviewState struct {
@@ -91,19 +95,30 @@ type reviewRunResponse struct {
 
 // submitReviewItem mirrors controllers.SubmitReviewItem.
 type submitReviewItem struct {
-	RunID          string `json:"runId"`
-	Verdict        string `json:"verdict"`
-	Body           string `json:"body,omitempty"`
-	GithubReviewID string `json:"githubReviewId,omitempty"`
+	RunID          string                `json:"runId"`
+	Verdict        string                `json:"verdict"`
+	Event          string                `json:"event,omitempty"`
+	Body           string                `json:"body,omitempty"`
+	GithubReviewID string                `json:"githubReviewId,omitempty"`
+	Comments       []submitReviewComment `json:"comments,omitempty"`
+}
+
+type submitReviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Side string `json:"side"`
+	Body string `json:"body"`
 }
 
 // submitReviewRequest mirrors controllers.SubmitReviewInput.
 type submitReviewRequest struct {
-	RunID          string             `json:"runId,omitempty"`
-	Verdict        string             `json:"verdict,omitempty"`
-	Body           string             `json:"body,omitempty"`
-	GithubReviewID string             `json:"githubReviewId,omitempty"`
-	Reviews        []submitReviewItem `json:"reviews,omitempty"`
+	RunID          string                `json:"runId,omitempty"`
+	Verdict        string                `json:"verdict,omitempty"`
+	Event          string                `json:"event,omitempty"`
+	Body           string                `json:"body,omitempty"`
+	GithubReviewID string                `json:"githubReviewId,omitempty"`
+	Comments       []submitReviewComment `json:"comments,omitempty"`
+	Reviews        []submitReviewItem    `json:"reviews,omitempty"`
 }
 
 type reviewSubmitOptions struct {
@@ -112,6 +127,7 @@ type reviewSubmitOptions struct {
 	verdict  string
 	body     string
 	reviewID string
+	event    string
 	reviews  string
 }
 
@@ -209,6 +225,7 @@ func newReviewSubmitCommand(ctx *commandContext) *cobra.Command {
 	cmd.Flags().StringVar(&opts.verdict, "verdict", "", "Review verdict: approved or changes_requested (required)")
 	cmd.Flags().StringVar(&opts.body, "body", "", "Review body: a path to a Markdown file, or - to read from stdin (so nothing is written into the worktree)")
 	cmd.Flags().StringVar(&opts.reviewID, "review-id", "", "Id of the GitHub PR review just posted (the .id from the gh api POST that created the review)")
+	cmd.Flags().StringVar(&opts.event, "event", "", "Native GitHub review event when daemon App submission is enabled: APPROVE, REQUEST_CHANGES, or COMMENT")
 	cmd.Flags().StringVar(&opts.reviews, "reviews", "", "JSON review results array or object: a path, or - to read from stdin")
 	return cmd
 }
@@ -251,7 +268,7 @@ func (c *commandContext) submitReview(cmd *cobra.Command, args []string, opts re
 	reviewID := strings.TrimSpace(opts.reviewID)
 	path := "sessions/" + url.PathEscape(session) + "/reviews/submit"
 	var res reviewRunResponse
-	if err := c.postReviewJSON(cmd.Context(), path, submitReviewRequest{RunID: runID, Verdict: verdict, Body: body, GithubReviewID: reviewID}, &res); err != nil {
+	if err := c.postReviewJSON(cmd.Context(), path, submitReviewRequest{RunID: runID, Verdict: verdict, Event: strings.TrimSpace(opts.event), Body: body, GithubReviewID: reviewID}, &res); err != nil {
 		return err
 	}
 	// A submit response always carries the recorded run's ID and verdict; a
@@ -260,13 +277,13 @@ func (c *commandContext) submitReview(cmd *cobra.Command, args []string, opts re
 	if strings.TrimSpace(res.Review.ID) == "" || strings.TrimSpace(res.Review.Verdict) == "" {
 		return fmt.Errorf("daemon returned empty review result for %s", session)
 	}
-	_, err := fmt.Fprintf(cmd.OutOrStdout(), "recorded %s review for %s\n", res.Review.Verdict, session)
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "recorded %s review for %s%s\n", res.Review.Verdict, session, providerReviewSuffix(res.Review))
 	return err
 }
 
 func (c *commandContext) submitReviewBatch(cmd *cobra.Command, session string, opts reviewSubmitOptions) error {
-	if strings.TrimSpace(opts.runID) != "" || strings.TrimSpace(opts.verdict) != "" || strings.TrimSpace(opts.body) != "" || strings.TrimSpace(opts.reviewID) != "" {
-		return usageError{errors.New("usage: --reviews cannot be combined with --run, --verdict, --body, or --review-id")}
+	if strings.TrimSpace(opts.runID) != "" || strings.TrimSpace(opts.verdict) != "" || strings.TrimSpace(opts.body) != "" || strings.TrimSpace(opts.reviewID) != "" || strings.TrimSpace(opts.event) != "" {
+		return usageError{errors.New("usage: --reviews cannot be combined with --run, --verdict, --event, --body, or --review-id")}
 	}
 	reviews, err := readReviewItems(cmd, strings.TrimSpace(opts.reviews))
 	if err != nil {
@@ -295,7 +312,33 @@ func (c *commandContext) submitReviewBatch(cmd *cobra.Command, session string, o
 		count = len(reviews)
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "recorded %d review(s) for %s\n", count, session)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, run := range res.Reviews {
+		if run.GithubReviewState == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "  run %s%s\n", run.ID, providerReviewSuffix(run)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func providerReviewSuffix(run reviewRun) string {
+	switch run.GithubReviewState {
+	case "APPROVED", "CHANGES_REQUESTED", "COMMENTED":
+		return fmt.Sprintf("; verified GitHub state %s by %s on %s", run.GithubReviewState, run.GithubReviewAuthor, shortReviewSHA(run.GithubReviewCommitSHA))
+	case "DEGRADED":
+		return "; native GitHub review degraded: " + run.GithubReviewError
+	case "LEGACY_UNVERIFIED":
+		return "; legacy GitHub review was recorded without daemon verification"
+	case "NOT_POSTED":
+		return "; no GitHub review was posted"
+	default:
+		return ""
+	}
 }
 
 // postReviewJSON retries only transport-level daemon unavailability. The

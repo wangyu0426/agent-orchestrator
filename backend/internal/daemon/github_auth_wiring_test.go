@@ -29,6 +29,7 @@ import (
 	scmobserve "github.com/aoagents/agent-orchestrator/backend/internal/observe/scm"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubapp"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubbroker"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -107,6 +108,79 @@ func TestConfig_ScrubGitHubAppEnv(t *testing.T) {
 		if v := os.Getenv(k); v != "" {
 			t.Fatalf("env %s was not scrubbed: %q", k, v)
 		}
+	}
+}
+
+func TestGitHubAppWiring_RoutesWorkerBrokerThroughDistinctWorkerApp(t *testing.T) {
+	reviewerKey := writeTempAppKey(t)
+	workerKey := writeTempAppKey(t)
+	var installPath string
+	var permissions map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		installPath = r.URL.Path
+		var payload struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode token request: %v", err)
+		}
+		permissions = payload.Permissions
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":        "ghs_worker_app_token_1234567890",
+			"expires_at":   time.Now().Add(time.Hour).Format(time.RFC3339),
+			"repositories": []map[string]string{{"full_name": "org/repo"}},
+		})
+	}))
+	defer srv.Close()
+
+	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled: true, AppID: 101, InstallationID: 202, PrivateKeyPath: reviewerKey,
+		APIBaseURL: srv.URL, GitHubHost: "github.com", Repositories: []string{"repo"},
+		InstallationOwner: "org", WorkerBrokerEnabled: true, WorkerIsolationMode: "unsafe-same-uid",
+		WorkerAppEnabled: true, WorkerAppID: 303, WorkerInstallationID: 404, WorkerPrivateKeyPath: workerKey,
+		WorkerAPIBaseURL: srv.URL, GrantsPath: filepath.Join(t.TempDir(), "grants.json"),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring: %v", err)
+	}
+	if auth.appProvider == auth.workerAppProvider || auth.workerBroker == nil || auth.nativeReviewer == nil {
+		t.Fatalf("auth wiring did not retain separate worker and reviewer paths: %+v", auth)
+	}
+	capability, err := auth.workerBroker.RegisterSession("worker-session", "project", []string{"org/repo"})
+	if err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	issued, err := auth.workerBroker.IssueToken(context.Background(), githubbroker.IssueRequest{
+		SessionID: "worker-session", BrokerToken: capability, Host: "github.com", Repository: "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	if issued.Token != "ghs_worker_app_token_1234567890" || installPath != "/app/installations/404/access_tokens" {
+		t.Fatalf("worker token route token=%q path=%q, want Worker installation 404", issued.Token, installPath)
+	}
+	if permissions["contents"] != "write" || permissions["pull_requests"] != "write" {
+		t.Fatalf("Worker App permissions = %v, want broker worker permissions", permissions)
+	}
+}
+
+func TestGitHubAppWiring_PreservesLegacyBrokerReviewMode(t *testing.T) {
+	keyPath := writeTempAppKey(t)
+	auth, err := newGitHubAuthWiring(config.GitHubAppConfig{
+		Enabled: true, AppID: 101, InstallationID: 202, PrivateKeyPath: keyPath,
+		Repositories: []string{"repo"}, InstallationOwner: "org", WorkerBrokerEnabled: true,
+		WorkerIsolationMode: "unsafe-same-uid", GrantsPath: filepath.Join(t.TempDir(), "grants.json"),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("newGitHubAuthWiring: %v", err)
+	}
+	if auth.workerBroker == nil || auth.workerAppProvider != nil || auth.nativeReviewer != nil {
+		t.Fatalf("legacy broker mode unexpectedly enabled distinct-identity native reviews: %+v", auth)
 	}
 }
 

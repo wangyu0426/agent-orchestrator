@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubreview"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 )
 
@@ -83,19 +84,31 @@ type KillReviewResponse struct {
 
 // SubmitReviewItem is one review result in a batched submit request.
 type SubmitReviewItem struct {
-	RunID          string `json:"runId" description:"Review run id being completed."`
-	Verdict        string `json:"verdict" description:"Review verdict: approved or changes_requested."`
-	Body           string `json:"body,omitempty" description:"Review body recorded by AO. Required for changes_requested."`
-	GithubReviewID string `json:"githubReviewId,omitempty" description:"Id of the GitHub PR review the reviewer posted, if any."`
+	RunID          string                `json:"runId" description:"Review run id being completed."`
+	Verdict        string                `json:"verdict" description:"AO review verdict: approved or changes_requested."`
+	Event          string                `json:"event,omitempty" description:"Optional native GitHub review event: APPROVE, REQUEST_CHANGES, or COMMENT."`
+	Body           string                `json:"body,omitempty" description:"Review body recorded by AO. Required for changes_requested."`
+	GithubReviewID string                `json:"githubReviewId,omitempty" description:"Id of the GitHub PR review the reviewer posted, if any."`
+	Comments       []SubmitReviewComment `json:"comments,omitempty" description:"Inline comments submitted through AO's scoped provider path."`
+}
+
+// SubmitReviewComment is one file/line comment included in a native provider review.
+type SubmitReviewComment struct {
+	Path string `json:"path" description:"Repository-relative file path."`
+	Line int    `json:"line" description:"Positive changed-file line number."`
+	Side string `json:"side" description:"Diff side: LEFT for the old version, RIGHT for the new version."`
+	Body string `json:"body" description:"Inline review finding."`
 }
 
 // SubmitReviewInput is the body of POST /api/v1/sessions/{sessionId}/reviews/submit.
 type SubmitReviewInput struct {
-	RunID          string             `json:"runId,omitempty" description:"Review run id being completed."`
-	Verdict        string             `json:"verdict,omitempty" description:"Review verdict: approved or changes_requested."`
-	Body           string             `json:"body,omitempty" description:"Review body recorded by AO. Required for changes_requested."`
-	GithubReviewID string             `json:"githubReviewId,omitempty" description:"Id of the GitHub PR review the reviewer posted, if any."`
-	Reviews        []SubmitReviewItem `json:"reviews,omitempty" description:"Batched review results recorded by one reviewer CLI command."`
+	RunID          string                `json:"runId,omitempty" description:"Review run id being completed."`
+	Verdict        string                `json:"verdict,omitempty" description:"Review verdict: approved or changes_requested."`
+	Event          string                `json:"event,omitempty" description:"Optional native GitHub review event: APPROVE, REQUEST_CHANGES, or COMMENT."`
+	Body           string                `json:"body,omitempty" description:"Review body recorded by AO. Required for changes_requested."`
+	GithubReviewID string                `json:"githubReviewId,omitempty" description:"Id of the GitHub PR review the reviewer posted, if any."`
+	Comments       []SubmitReviewComment `json:"comments,omitempty" description:"Inline comments submitted through AO's scoped provider path."`
+	Reviews        []SubmitReviewItem    `json:"reviews,omitempty" description:"Batched review results recorded by one reviewer CLI command."`
 }
 
 // ReviewsController owns the session-scoped /reviews routes. A nil Svc returns 501.
@@ -402,19 +415,31 @@ func (c *ReviewsController) submit(w http.ResponseWriter, r *http.Request) {
 	reviews := make([]reviewsvc.SubmittedReview, 0, len(in.Reviews))
 	if len(in.Reviews) > 0 {
 		for _, item := range in.Reviews {
+			comments := make([]githubreview.Comment, 0, len(item.Comments))
+			for _, comment := range item.Comments {
+				comments = append(comments, githubreview.Comment{Path: comment.Path, Line: comment.Line, Side: comment.Side, Body: comment.Body})
+			}
 			reviews = append(reviews, reviewsvc.SubmittedReview{
 				RunID:          item.RunID,
 				Verdict:        domain.ReviewVerdict(item.Verdict),
+				Event:          item.Event,
 				Body:           item.Body,
 				GithubReviewID: item.GithubReviewID,
+				Comments:       comments,
 			})
 		}
 	} else {
+		comments := make([]githubreview.Comment, 0, len(in.Comments))
+		for _, comment := range in.Comments {
+			comments = append(comments, githubreview.Comment{Path: comment.Path, Line: comment.Line, Side: comment.Side, Body: comment.Body})
+		}
 		reviews = append(reviews, reviewsvc.SubmittedReview{
 			RunID:          in.RunID,
 			Verdict:        domain.ReviewVerdict(in.Verdict),
+			Event:          in.Event,
 			Body:           in.Body,
 			GithubReviewID: in.GithubReviewID,
+			Comments:       comments,
 		})
 	}
 	runs, err := c.Svc.SubmitMany(r.Context(), sessionID(r), reviews)

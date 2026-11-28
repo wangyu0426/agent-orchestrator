@@ -279,6 +279,23 @@ func (s *Store) UpdateReviewRunResult(ctx context.Context, id string, status dom
 	return n > 0, nil
 }
 
+// UpdateReviewRunOutcome atomically records AO's verdict separately from the
+// verified (or explicitly degraded) GitHub review observation.
+func (s *Store) UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError string, autoInjectReview bool) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.UpdateReviewRunOutcome(ctx, gen.UpdateReviewRunOutcomeParams{
+		Status: status, Verdict: verdict, Body: body, GithubReviewID: githubReviewID,
+		GithubReviewState: githubReviewState, GithubReviewAuthor: githubReviewAuthor,
+		GithubReviewCommitSha: githubReviewCommitSHA, GithubReviewError: githubReviewError,
+		AutoInjectReview: autoInjectReview, ID: id,
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // SupersedeStaleRunningReviewRuns marks older running unverdicted passes for a
 // worker failed before starting a review for a newer commit.
 func (s *Store) SupersedeStaleRunningReviewRuns(ctx context.Context, sessionID domain.SessionID, prURL, targetSHA, body string) (int64, error) {
@@ -495,22 +512,26 @@ func reviewRunFromRow(r gen.ReviewRun) domain.ReviewRun {
 		deliveredAt = &t
 	}
 	return domain.ReviewRun{
-		ID:               r.ID,
-		ReviewID:         r.ReviewID,
-		SessionID:        r.SessionID,
-		BatchID:          r.BatchID,
-		Harness:          r.Harness,
-		TriggerSource:    r.TriggerSource,
-		PRURL:            r.PRURL,
-		TargetSHA:        r.TargetSha,
-		Status:           r.Status,
-		Verdict:          r.Verdict,
-		Body:             r.Body,
-		GithubReviewID:   r.GithubReviewID,
-		CreatedAt:        r.CreatedAt,
-		CompletedAt:      completedAt,
-		DeliveredAt:      deliveredAt,
-		AutoInjectReview: r.AutoInjectReview,
+		ID:                    r.ID,
+		ReviewID:              r.ReviewID,
+		SessionID:             r.SessionID,
+		BatchID:               r.BatchID,
+		Harness:               r.Harness,
+		TriggerSource:         r.TriggerSource,
+		PRURL:                 r.PRURL,
+		TargetSHA:             r.TargetSha,
+		Status:                r.Status,
+		Verdict:               r.Verdict,
+		Body:                  r.Body,
+		GithubReviewID:        r.GithubReviewID,
+		GithubReviewState:     r.GithubReviewState,
+		GithubReviewAuthor:    r.GithubReviewAuthor,
+		GithubReviewCommitSHA: r.GithubReviewCommitSha,
+		GithubReviewError:     r.GithubReviewError,
+		CreatedAt:             r.CreatedAt,
+		CompletedAt:           completedAt,
+		DeliveredAt:           deliveredAt,
+		AutoInjectReview:      r.AutoInjectReview,
 	}
 }
 

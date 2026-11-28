@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -92,6 +94,9 @@ type Service struct {
 	notifications      reviewNotificationSink
 	prRefresher        PRRefresher
 	reviewRefresher    ThreadRefresher
+	nativeReviewer     NativeReviewSubmitter
+	submitLockMu       sync.Mutex
+	submitLocks        map[string]*sync.Mutex
 	// engineTrigger indirects the engine's source-tagged trigger so the
 	// instrumented path can be exercised without standing up a full engine and
 	// its eighteen-method store. Defaulted in New; only tests replace it.
@@ -119,6 +124,7 @@ type Store interface {
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
+	UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError string, autoInjectReview bool) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
 	ListPRReviews(ctx context.Context, prURL string) ([]domain.PullRequestReview, error)
 	ListPRComments(ctx context.Context, prURL string) ([]domain.PullRequestComment, error)
@@ -168,6 +174,18 @@ func WithPRRefresher(r PRRefresher) Option {
 // rather than on its next scheduled poll. It must not block.
 type ThreadRefresher interface {
 	RequestReviewRefresh(prURL string)
+}
+
+// NativeReviewSubmitter keeps GitHub App credentials in the daemon and accepts
+// only a run-bound structured review payload.
+type NativeReviewSubmitter interface {
+	Submit(context.Context, githubreview.Request) (githubreview.Result, error)
+}
+
+// WithNativeReviewSubmitter enables daemon-owned, verified GitHub review
+// submissions. Legacy mode keeps its existing reviewer CLI behavior.
+func WithNativeReviewSubmitter(submitter NativeReviewSubmitter) Option {
+	return func(s *Service) { s.nativeReviewer = submitter }
 }
 
 // WithThreadRefresher refreshes a PR's review threads as soon as an AO review
@@ -239,9 +257,10 @@ func (s *Service) emit(ctx context.Context, name string, sessionID domain.Sessio
 // New wraps a core review engine as the API-facing service.
 func New(engine *reviewcore.Engine, store Store, opts ...Option) *Service {
 	s := &Service{
-		engine: engine,
-		store:  store,
-		clock:  func() time.Time { return time.Now().UTC() },
+		engine:      engine,
+		store:       store,
+		clock:       func() time.Time { return time.Now().UTC() },
+		submitLocks: make(map[string]*sync.Mutex),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -826,8 +845,10 @@ func (s *Service) ApplyReviewActivitySignal(ctx context.Context, reviewSessionID
 type SubmittedReview struct {
 	RunID          string
 	Verdict        domain.ReviewVerdict
+	Event          string
 	Body           string
 	GithubReviewID string
+	Comments       []githubreview.Comment
 }
 
 // Submit records a reviewer's result for a specific worker review pass.
@@ -891,6 +912,8 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 
 func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, review SubmittedReview) (domain.ReviewRun, error) {
 	runID := review.RunID
+	unlock := s.lockSubmission(runID)
+	defer unlock()
 	verdict := review.Verdict
 	body := review.Body
 	githubReviewID := review.GithubReviewID
@@ -899,6 +922,36 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 	}
 	if !verdict.Valid() {
 		return domain.ReviewRun{}, fmt.Errorf("%w: verdict must be %q or %q", ErrInvalid, domain.VerdictApproved, domain.VerdictChangesRequested)
+	}
+	providerEvent := strings.ToUpper(strings.TrimSpace(review.Event))
+	if providerEvent != "" && s.nativeReviewer == nil {
+		return domain.ReviewRun{}, fmt.Errorf("%w: provider event is supported only when daemon native GitHub reviews are configured", ErrInvalid)
+	}
+	if s.nativeReviewer != nil {
+		if providerEvent == "" {
+			if verdict == domain.VerdictApproved {
+				providerEvent = githubreview.EventApprove
+			} else {
+				providerEvent = githubreview.EventRequestChanges
+			}
+		}
+		if providerEvent != githubreview.EventApprove && providerEvent != githubreview.EventRequestChanges && providerEvent != githubreview.EventComment {
+			return domain.ReviewRun{}, fmt.Errorf("%w: event must be APPROVE, REQUEST_CHANGES, or COMMENT", ErrInvalid)
+		}
+		if providerEvent == githubreview.EventApprove && verdict != domain.VerdictApproved {
+			return domain.ReviewRun{}, fmt.Errorf("%w: GitHub APPROVE event requires AO approved verdict; use COMMENT to keep provider state unchanged", ErrInvalid)
+		}
+		if providerEvent == githubreview.EventRequestChanges && verdict != domain.VerdictChangesRequested {
+			return domain.ReviewRun{}, fmt.Errorf("%w: GitHub REQUEST_CHANGES event requires AO changes_requested verdict; use COMMENT to keep provider state unchanged", ErrInvalid)
+		}
+		if githubReviewID != "" {
+			return domain.ReviewRun{}, fmt.Errorf("%w: do not pass githubReviewId when daemon native reviews are enabled; AO submits and verifies the provider review", ErrInvalid)
+		}
+		for _, comment := range review.Comments {
+			if strings.TrimSpace(comment.Path) == "" || comment.Line < 1 || (strings.ToUpper(strings.TrimSpace(comment.Side)) != "LEFT" && strings.ToUpper(strings.TrimSpace(comment.Side)) != "RIGHT") || strings.TrimSpace(comment.Body) == "" {
+				return domain.ReviewRun{}, fmt.Errorf("%w: each inline comment requires path, positive line, LEFT/RIGHT side, and body", ErrInvalid)
+			}
+		}
 	}
 	if verdict == domain.VerdictChangesRequested && body == "" {
 		return domain.ReviewRun{}, fmt.Errorf("%w: a changes_requested review requires a body", ErrInvalid)
@@ -923,7 +976,46 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		if !found {
 			return domain.ReviewRun{}, fmt.Errorf("%w: worker session %q", ErrNotFound, workerID)
 		}
-		updated, err := s.store.UpdateReviewRunResult(ctx, run.ID, domain.ReviewRunComplete, verdict, body, githubReviewID, session.AutoInjectReview)
+		githubReviewState := domain.GithubReviewStateNotPosted
+		githubReviewAuthor, githubReviewCommitSHA, githubReviewError := "", "", ""
+		if s.nativeReviewer != nil {
+			prs, listErr := s.store.ListPRsBySession(ctx, workerID)
+			if listErr != nil {
+				return domain.ReviewRun{}, listErr
+			}
+			var prAuthor string
+			foundPR := false
+			for _, pr := range prs {
+				if pr.URL == run.PRURL || pr.HTMLURL == run.PRURL {
+					prAuthor, foundPR = pr.Author, true
+					break
+				}
+			}
+			if !foundPR {
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q PR is no longer tracked by worker %q", ErrNotFound, run.ID, workerID)
+			}
+			result, submitErr := s.nativeReviewer.Submit(ctx, githubreview.Request{
+				RunID: run.ID, PRURL: run.PRURL, PRAuthor: prAuthor,
+				ExpectedHeadSHA: run.TargetSHA, Event: providerEvent, Body: body, Comments: review.Comments,
+			})
+			if submitErr != nil {
+				if !degradedNativeReviewError(submitErr) {
+					return domain.ReviewRun{}, submitErr
+				}
+				githubReviewState = domain.GithubReviewStateDegraded
+				githubReviewError = safeNativeReviewError(submitErr)
+				githubReviewID = ""
+			} else {
+				githubReviewState = result.State
+				githubReviewID = result.ID
+				githubReviewAuthor = result.Author
+				githubReviewCommitSHA = result.CommitSHA
+			}
+		} else if githubReviewID != "" {
+			githubReviewState = domain.GithubReviewStateLegacyUnverified
+		}
+		updated, err := s.store.UpdateReviewRunOutcome(ctx, run.ID, domain.ReviewRunComplete, verdict, body, githubReviewID,
+			githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError, session.AutoInjectReview)
 		if err != nil {
 			return domain.ReviewRun{}, err
 		}
@@ -934,6 +1026,10 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		run.Verdict = verdict
 		run.Body = body
 		run.GithubReviewID = githubReviewID
+		run.GithubReviewState = githubReviewState
+		run.GithubReviewAuthor = githubReviewAuthor
+		run.GithubReviewCommitSHA = githubReviewCommitSHA
+		run.GithubReviewError = githubReviewError
 		run.AutoInjectReview = session.AutoInjectReview
 		if githubReviewID != "" && s.reviewRefresher != nil {
 			s.reviewRefresher.RequestReviewRefresh(run.PRURL)
@@ -946,6 +1042,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			"verdict":            string(verdict),
 			"duration_ms":        s.clock().Sub(run.CreatedAt).Milliseconds(),
 			"posted_to_provider": githubReviewID != "",
+			"provider_state":     githubReviewState,
 			// Which pass produced this verdict. A manual and an automatic review
 			// mean different things about how the feature is being used, and the
 			// verdict split between them is the whole question.
@@ -968,6 +1065,12 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		if githubReviewID != "" && githubReviewID != run.GithubReviewID {
 			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded GitHub review id %q", ErrInvalid, runID, run.GithubReviewID)
 		}
+		if s.nativeReviewer != nil && run.GithubReviewState != "" && run.GithubReviewState != domain.GithubReviewStateDegraded {
+			wantState := map[string]string{githubreview.EventApprove: domain.GithubReviewStateApproved, githubreview.EventRequestChanges: domain.GithubReviewStateChangesRequested, githubreview.EventComment: domain.GithubReviewStateCommented}[providerEvent]
+			if wantState != "" && run.GithubReviewState != wantState {
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q already recorded provider state %q", ErrInvalid, runID, run.GithubReviewState)
+			}
+		}
 	case domain.ReviewRunDelivered:
 		return run, nil
 	default:
@@ -975,6 +1078,38 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 	}
 	s.emitReviewNotification(ctx, run)
 	return run, nil
+}
+
+func (s *Service) lockSubmission(runID string) func() {
+	s.submitLockMu.Lock()
+	mu := s.submitLocks[runID]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		s.submitLocks[runID] = mu
+	}
+	s.submitLockMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
+func degradedNativeReviewError(err error) bool {
+	return errors.Is(err, githubreview.ErrSameActor) ||
+		errors.Is(err, githubreview.ErrRepositoryForbidden) ||
+		errors.Is(err, githubreview.ErrProviderRejected) ||
+		errors.Is(err, githubreview.ErrStaleHead) ||
+		errors.Is(err, githubreview.ErrUnverifiedReview) ||
+		errors.Is(err, githubreview.ErrConflictingRetry)
+}
+
+func safeNativeReviewError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 500 {
+		message = message[:500]
+	}
+	return message
 }
 
 func (s *Service) emitReviewNotification(ctx context.Context, run domain.ReviewRun) {

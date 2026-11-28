@@ -92,14 +92,33 @@ type ReviewRun struct {
 	// submit time. It is empty when the reviewer could not post to the provider.
 	// When the pass requests changes, AO includes it in the message to the
 	// worker so the worker knows exactly which review to address and reply to.
-	GithubReviewID string     `json:"githubReviewId"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	CompletedAt    *time.Time `json:"completedAt,omitempty"`
-	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
+	GithubReviewID string `json:"githubReviewId"`
+	// GithubReviewState, GithubReviewAuthor, and GithubReviewCommitSHA are
+	// populated only from a provider response AO verified. The AO verdict above
+	// remains independent; DEGRADED and LEGACY_UNVERIFIED never imply a native
+	// GitHub decision.
+	GithubReviewState     string     `json:"githubReviewState,omitempty"`
+	GithubReviewAuthor    string     `json:"githubReviewAuthor,omitempty"`
+	GithubReviewCommitSHA string     `json:"githubReviewCommitSha,omitempty"`
+	GithubReviewError     string     `json:"githubReviewError,omitempty"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	CompletedAt           *time.Time `json:"completedAt,omitempty"`
+	DeliveredAt           *time.Time `json:"deliveredAt,omitempty"`
 	// AutoInjectReview snapshots the session policy when this result is first
 	// recorded. Later toggle changes must not rewrite or deliver this run.
 	AutoInjectReview bool `json:"autoInjectReview"`
 }
+
+// Provider review states are observations from the SCM submission path. They
+// never replace the AO review verdict.
+const (
+	GithubReviewStateApproved         = "APPROVED"
+	GithubReviewStateChangesRequested = "CHANGES_REQUESTED"
+	GithubReviewStateCommented        = "COMMENTED"
+	GithubReviewStateDegraded         = "DEGRADED"
+	GithubReviewStateLegacyUnverified = "LEGACY_UNVERIFIED"
+	GithubReviewStateNotPosted        = "NOT_POSTED"
+)
 
 // ReviewTriggerSource identifies who initiated a review pass.
 type ReviewTriggerSource string

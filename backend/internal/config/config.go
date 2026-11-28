@@ -126,6 +126,14 @@ type GitHubAppConfig struct {
 	WorkerBrokerEnabled bool
 	WorkerIsolationMode string
 	GrantsPath          string
+	// WorkerAppEnabled selects a distinct GitHub App installation identity for
+	// worker credentials issued by the repo-scoped broker. When disabled, the
+	// broker retains its legacy behavior and uses the daemon App installation.
+	WorkerAppEnabled     bool
+	WorkerAppID          int64
+	WorkerInstallationID int64
+	WorkerPrivateKeyPath string
+	WorkerAPIBaseURL     string
 }
 
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
@@ -604,6 +612,56 @@ func Load() (Config, error) {
 		}
 		cfg.GitHubApp.GrantsPath = filepath.Join(cfg.StateDir, "github-broker-grants.json")
 	}
+	if raw, ok := os.LookupEnv("AO_GITHUB_APP_WORKER_APP_ENABLED"); ok && strings.TrimSpace(raw) != "" {
+		v, err := parseToggleEnv("AO_GITHUB_APP_WORKER_APP_ENABLED", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.GitHubApp.WorkerAppEnabled = v
+	}
+	if cfg.GitHubApp.WorkerAppEnabled {
+		if !cfg.GitHubApp.Enabled {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_APP_ENABLED requires AO_GITHUB_APP_ENABLED=on")
+		}
+		if !cfg.GitHubApp.WorkerBrokerEnabled {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_APP_ENABLED requires AO_GITHUB_APP_WORKER_BROKER_ENABLED=on")
+		}
+		appIDRaw := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_APP_ID"))
+		appID, err := strconv.ParseInt(appIDRaw, 10, 64)
+		if err != nil || appID <= 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_WORKER_APP_ID %q: must be a positive integer when the Worker App is enabled", appIDRaw)
+		}
+		cfg.GitHubApp.WorkerAppID = appID
+		installIDRaw := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_INSTALLATION_ID"))
+		installID, err := strconv.ParseInt(installIDRaw, 10, 64)
+		if err != nil || installID <= 0 {
+			return Config{}, fmt.Errorf("invalid AO_GITHUB_APP_WORKER_INSTALLATION_ID %q: must be a positive integer when the Worker App is enabled", installIDRaw)
+		}
+		cfg.GitHubApp.WorkerInstallationID = installID
+		keyPath := strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_PRIVATE_KEY_PATH"))
+		if keyPath == "" {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_PRIVATE_KEY_PATH is required when AO_GITHUB_APP_WORKER_APP_ENABLED is on")
+		}
+		absKeyPath, err := filepath.Abs(keyPath)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve AO_GITHUB_APP_WORKER_PRIVATE_KEY_PATH: %w", err)
+		}
+		cfg.GitHubApp.WorkerPrivateKeyPath = absKeyPath
+		cfg.GitHubApp.WorkerAPIBaseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("AO_GITHUB_APP_WORKER_API_BASE_URL")), "/")
+		reviewerAPIBase := strings.TrimRight(strings.TrimSpace(cfg.GitHubApp.APIBaseURL), "/")
+		if reviewerAPIBase == "" {
+			reviewerAPIBase = "https://api.github.com"
+		}
+		if cfg.GitHubApp.WorkerAPIBaseURL == "" {
+			cfg.GitHubApp.WorkerAPIBaseURL = reviewerAPIBase
+		}
+		if cfg.GitHubApp.WorkerAPIBaseURL != reviewerAPIBase {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_API_BASE_URL must match AO_GITHUB_APP_API_BASE_URL so worker and reviewer identities use the same GitHub host")
+		}
+		if cfg.GitHubApp.AppID == appID {
+			return Config{}, fmt.Errorf("AO_GITHUB_APP_WORKER_APP_ID must identify a different App than AO_GITHUB_APP_ID; separate installation IDs do not create separate actors")
+		}
+	}
 
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
 		hosts := make([]string, 0, 4)
@@ -757,6 +815,11 @@ var githubAppEnvKeys = []string{
 	"AO_GITHUB_APP_OPERATOR_LOGIN",
 	"AO_GITHUB_APP_WORKER_BROKER_ENABLED",
 	"AO_GITHUB_APP_WORKER_ISOLATION",
+	"AO_GITHUB_APP_WORKER_APP_ENABLED",
+	"AO_GITHUB_APP_WORKER_APP_ID",
+	"AO_GITHUB_APP_WORKER_INSTALLATION_ID",
+	"AO_GITHUB_APP_WORKER_PRIVATE_KEY_PATH",
+	"AO_GITHUB_APP_WORKER_API_BASE_URL",
 }
 
 // ScrubGitHubAppEnv removes GitHub App configuration variables from the daemon

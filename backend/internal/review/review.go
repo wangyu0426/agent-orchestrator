@@ -107,6 +107,9 @@ type Deps struct {
 	// ReviewerQuotaPrimary, when set by daemon-wide reviewer quota failover,
 	// takes precedence over per-project and global reviewer defaults.
 	ReviewerQuotaPrimary domain.ReviewerHarness
+	// NativeReviewSubmissions switches launched reviewers to the daemon-only
+	// structured submit route when a scoped GitHub App reviewer is configured.
+	NativeReviewSubmissions bool
 
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
@@ -115,16 +118,17 @@ type Deps struct {
 
 // Engine is the core code-review engine.
 type Engine struct {
-	harnessUse           HarnessUseGate
-	store                Store
-	sessions             Sessions
-	prs                  PRs
-	projects             Projects
-	launcher             Launcher
-	clock                func() time.Time
-	newID                func() string
-	projectDefaults      domain.ProjectDefaults
-	reviewerQuotaPrimary domain.ReviewerHarness
+	harnessUse             HarnessUseGate
+	store                  Store
+	sessions               Sessions
+	prs                    PRs
+	projects               Projects
+	launcher               Launcher
+	clock                  func() time.Time
+	newID                  func() string
+	projectDefaults        domain.ProjectDefaults
+	reviewerQuotaPrimary   domain.ReviewerHarness
+	nativeReviewSubmission bool
 
 	chatRecoveryDone <-chan struct{}
 
@@ -156,9 +160,10 @@ func New(d Deps) *Engine {
 		newID:        newID,
 		triggerLocks: make(map[domain.SessionID]*sync.Mutex),
 
-		chatRecoveryDone:     d.ChatRecoveryDone,
-		projectDefaults:      d.ProjectDefaults,
-		reviewerQuotaPrimary: d.ReviewerQuotaPrimary,
+		chatRecoveryDone:       d.ChatRecoveryDone,
+		projectDefaults:        d.ProjectDefaults,
+		reviewerQuotaPrimary:   d.ReviewerQuotaPrimary,
+		nativeReviewSubmission: d.NativeReviewSubmissions,
 	}
 }
 
@@ -683,7 +688,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		if err != nil {
 			return TriggerResult{}, rollbackReplacement(err)
 		}
-		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, launchAgentSessionID, launchID)
+		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, launchAgentSessionID, launchID, e.nativeReviewSubmission)
 		// Preserve the exact prior terminal backend identity across a new
 		// launch. A hybrid native PTY handle is not interchangeable with the
 		// bare legacy tmux name for runtime teardown.
@@ -708,7 +713,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 			persistedAgentSessionID = launch.AgentSessionID
 		}
 	} else {
-		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, reviewRow.AgentSessionID, reviewRow.ReviewerLaunchID)
+		launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, reviewRow.AgentSessionID, reviewRow.ReviewerLaunchID, e.nativeReviewSubmission)
 		launchSpec.InterfaceMode = selectedMode
 		if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 			return TriggerResult{}, failRuns(0, fmt.Errorf("notify reviewer: %w", err))
@@ -763,7 +768,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 		}
 		previousStopped = true
 		if deferInitialMessage {
-			launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, persistedAgentSessionID, reviewRow.ReviewerLaunchID)
+			launchSpec := reviewLaunchSpec(worker, harness, config, launchRun, queue, 0, persistedAgentSessionID, reviewRow.ReviewerLaunchID, e.nativeReviewSubmission)
 			launchSpec.InterfaceMode = selectedMode
 			if err := e.launcher.Notify(ctx, handleID, launchSpec); err != nil {
 				return TriggerResult{}, rollbackReplacement(fmt.Errorf("notify replacement reviewer: %w", err))
@@ -1426,23 +1431,25 @@ func reviewLaunchSpec(
 	index int,
 	agentSessionID string,
 	launchID string,
+	nativeReviewSubmission bool,
 ) LaunchSpec {
 	return LaunchSpec{
-		RunID:           run.ID,
-		BatchID:         run.BatchID,
-		ReviewSessionID: run.ReviewID,
-		LaunchID:        launchID,
-		WorkerID:        worker.ID,
-		ProjectID:       worker.ProjectID,
-		Harness:         harness,
-		AgentConfig:     config,
-		WorkspacePath:   worker.Metadata.WorkspacePath,
-		AgentSessionID:  agentSessionID,
-		PreviousRuns:    nil,
-		PRURL:           run.PRURL,
-		TargetSHA:       run.TargetSHA,
-		ReviewQueue:     queue,
-		ReviewIndex:     index,
+		RunID:                  run.ID,
+		BatchID:                run.BatchID,
+		ReviewSessionID:        run.ReviewID,
+		LaunchID:               launchID,
+		WorkerID:               worker.ID,
+		ProjectID:              worker.ProjectID,
+		Harness:                harness,
+		AgentConfig:            config,
+		WorkspacePath:          worker.Metadata.WorkspacePath,
+		AgentSessionID:         agentSessionID,
+		PreviousRuns:           nil,
+		PRURL:                  run.PRURL,
+		TargetSHA:              run.TargetSHA,
+		ReviewQueue:            queue,
+		ReviewIndex:            index,
+		NativeReviewSubmission: nativeReviewSubmission,
 	}
 }
 

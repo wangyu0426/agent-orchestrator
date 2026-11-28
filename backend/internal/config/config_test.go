@@ -204,6 +204,42 @@ func TestLoadInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadDistinctGitHubWorkerApp(t *testing.T) {
+	for key, value := range map[string]string{
+		"AO_GITHUB_APP_ENABLED":                 "on",
+		"AO_GITHUB_APP_ID":                      "101",
+		"AO_GITHUB_APP_INSTALLATION_ID":         "202",
+		"AO_GITHUB_APP_PRIVATE_KEY_PATH":        filepath.Join(t.TempDir(), "reviewer.pem"),
+		"AO_GITHUB_APP_REPOSITORIES":            "repo",
+		"AO_GITHUB_APP_WORKER_BROKER_ENABLED":   "on",
+		"AO_GITHUB_APP_INSTALLATION_OWNER":      "org",
+		"AO_GITHUB_APP_WORKER_ISOLATION":        "unsafe-same-uid",
+		"AO_GITHUB_APP_WORKER_APP_ENABLED":      "on",
+		"AO_GITHUB_APP_WORKER_APP_ID":           "303",
+		"AO_GITHUB_APP_WORKER_INSTALLATION_ID":  "404",
+		"AO_GITHUB_APP_WORKER_PRIVATE_KEY_PATH": filepath.Join(t.TempDir(), "worker.pem"),
+		"AO_GITHUB_APP_WORKER_API_BASE_URL":     "",
+		"AO_GITHUB_APP_API_BASE_URL":            "",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load distinct Worker App config: %v", err)
+	}
+	if !cfg.GitHubApp.WorkerAppEnabled || cfg.GitHubApp.WorkerAppID != 303 || cfg.GitHubApp.WorkerInstallationID != 404 {
+		t.Fatalf("Worker App config = %+v, want enabled App 303 installation 404", cfg.GitHubApp)
+	}
+	if !filepath.IsAbs(cfg.GitHubApp.WorkerPrivateKeyPath) {
+		t.Fatalf("Worker private key path %q is not absolute", cfg.GitHubApp.WorkerPrivateKeyPath)
+	}
+
+	t.Setenv("AO_GITHUB_APP_WORKER_APP_ID", "101")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "different App") {
+		t.Fatalf("same App identity error = %v, want actionable rejection", err)
+	}
+}
+
 func TestLoadAllowedOrigins(t *testing.T) {
 	t.Run("default includes the packaged renderer origin", func(t *testing.T) {
 		t.Setenv("AO_ALLOWED_ORIGINS", "")

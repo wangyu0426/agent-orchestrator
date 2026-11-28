@@ -458,13 +458,16 @@ func TestReviewsSubmitAcceptsBatchedReviews(t *testing.T) {
 	svc := &fakeReviewService{}
 	srv := newReviewTestServer(t, svc)
 
-	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"reviews":[{"runId":"run-1","verdict":"changes_requested","body":"fix auth","githubReviewId":"101"},{"runId":"run-2","verdict":"approved"}]}`)
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/sessions/mer-1/reviews/submit", `{"reviews":[{"runId":"run-1","verdict":"changes_requested","event":"REQUEST_CHANGES","body":"fix auth","comments":[{"path":"auth.go","line":12,"side":"RIGHT","body":"Check this value."}]},{"runId":"run-2","verdict":"approved"}]}`)
 	assertJSON(t, headers)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d body=%s", status, body)
 	}
 	if len(svc.submitted) != 2 || svc.submitted[0].RunID != "run-1" || svc.submitted[1].Verdict != domain.VerdictApproved {
 		t.Fatalf("submitted = %+v", svc.submitted)
+	}
+	if svc.submitted[0].Event != "REQUEST_CHANGES" || len(svc.submitted[0].Comments) != 1 || svc.submitted[0].Comments[0].Side != "RIGHT" {
+		t.Fatalf("native review fields were not forwarded: %+v", svc.submitted[0])
 	}
 	for _, want := range []string{`"reviews"`, `"run-1"`, `"run-2"`} {
 		if !strings.Contains(string(body), want) {

@@ -190,3 +190,50 @@ func TestApplyPRObservation_StructuredReview_DeliveryFailureRetries(t *testing.T
 		t.Fatalf("expected durable seen nudge signature after successful delivery, got %q", store.signatures[prURL])
 	}
 }
+
+func TestApplyPRObservation_NativeAppChangesRequestedReachesWorkerOnce(t *testing.T) {
+	const (
+		prURL = "https://github.com/org/repo/pull/68"
+		head  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	store := newFakeStore()
+	sid := domain.SessionID("worker-68")
+	store.sessions[sid] = domain.SessionRecord{ID: sid, Activity: domain.Activity{State: domain.ActivityIdle}}
+	store.prs[sid] = []domain.PullRequest{{URL: prURL, Number: 68, Author: "worker-app[bot]", HeadSHA: head}}
+	store.reviews[prURL] = []domain.PullRequestReview{{
+		ID: "PRR_native_68", Author: "reviewer-app[bot]", IsBot: true,
+		State: domain.ReviewChangesRequest, URL: prURL + "#pullrequestreview-68",
+		Body: "Please fix the nil guard.", TargetSHA: head,
+		SubmittedAt: time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC), AutoInjectReview: true,
+	}}
+	msg := &fakeMessenger{}
+	m := New(store, msg)
+	obs := ports.PRObservation{
+		Fetched: true, URL: prURL, Number: 68, Review: domain.ReviewChangesRequest,
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.ApplyPRObservation(context.Background(), sid, obs); err != nil {
+				t.Errorf("ApplyPRObservation: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(msg.msgs) != 1 {
+		t.Fatalf("native bot review should reach worker once; got %d messages: %v", len(msg.msgs), msg.msgs)
+	}
+	for _, want := range []string{"reviewer-app[bot]", "Please fix the nil guard.", "PRR_native_68", prURL} {
+		if !strings.Contains(msg.msgs[0], want) {
+			t.Fatalf("worker feedback missing %q: %s", want, msg.msgs[0])
+		}
+	}
+	if err := m.ApplyPRObservation(context.Background(), sid, obs); err != nil {
+		t.Fatalf("repeat observation: %v", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("repeated native bot review delivered %d times, want once", len(msg.msgs))
+	}
+}

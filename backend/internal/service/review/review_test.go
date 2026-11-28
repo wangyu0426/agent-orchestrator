@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubreview"
 )
 
 type fakeStore struct {
@@ -125,6 +126,112 @@ func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status d
 	f.run.GithubReviewID = githubReviewID
 	f.run.AutoInjectReview = autoInjectReview
 	return true, nil
+}
+
+func (f *fakeStore) UpdateReviewRunOutcome(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID, githubReviewState, githubReviewAuthor, githubReviewCommitSHA, githubReviewError string, autoInjectReview bool) (bool, error) {
+	updated, err := f.UpdateReviewRunResult(ctx, id, status, verdict, body, githubReviewID, autoInjectReview)
+	if !updated || err != nil {
+		return updated, err
+	}
+	apply := func(run *domain.ReviewRun) {
+		run.GithubReviewState = githubReviewState
+		run.GithubReviewAuthor = githubReviewAuthor
+		run.GithubReviewCommitSHA = githubReviewCommitSHA
+		run.GithubReviewError = githubReviewError
+	}
+	for i := range f.batchRuns {
+		if f.batchRuns[i].ID == id {
+			apply(&f.batchRuns[i])
+		}
+	}
+	if f.run.ID == id {
+		apply(&f.run)
+	}
+	return true, nil
+}
+
+type capturingNativeReviewer struct {
+	request githubreview.Request
+	result  githubreview.Result
+	err     error
+	calls   int
+}
+
+func (f *capturingNativeReviewer) Submit(_ context.Context, request githubreview.Request) (githubreview.Result, error) {
+	f.calls++
+	f.request = request
+	return f.result, f.err
+}
+
+func TestSubmitNativeReviewBindsStoredRunAndPersistsVerifiedProviderOutcome(t *testing.T) {
+	const targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	prURL := "https://github.com/org/repo/pull/7"
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{result: githubreview.Result{
+		ID: "456", Author: "reviewer-app[bot]", State: "CHANGES_REQUESTED", CommitSHA: targetSHA,
+	}}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	runs, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventRequestChanges,
+		Body: "Please fix the nil guard.", Comments: []githubreview.Comment{{Path: "main.go", Line: 14, Side: "RIGHT", Body: "Guard this dereference."}},
+	}})
+	if err != nil {
+		t.Fatalf("SubmitMany: %v", err)
+	}
+	if native.calls != 1 || native.request.RunID != "run-native" || native.request.PRURL != prURL || native.request.ExpectedHeadSHA != targetSHA || native.request.PRAuthor != "worker-app[bot]" || native.request.Event != githubreview.EventRequestChanges {
+		t.Fatalf("native request calls=%d request=%+v", native.calls, native.request)
+	}
+	if len(runs) != 1 || runs[0].Verdict != domain.VerdictChangesRequested || runs[0].GithubReviewID != "456" || runs[0].GithubReviewState != domain.GithubReviewStateChangesRequested || runs[0].GithubReviewAuthor != "reviewer-app[bot]" || runs[0].GithubReviewCommitSHA != targetSHA {
+		t.Fatalf("submitted review outcome = %+v, want independent AO verdict and verified provider state", runs)
+	}
+}
+
+func TestSubmitNativeReviewRejectsUnauthorizedRunAndRecordsStaleAsDegraded(t *testing.T) {
+	const targetSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	prURL := "https://github.com/org/repo/pull/7"
+	t.Run("wrong worker cannot submit assigned run", func(t *testing.T) {
+		store := &fakeStore{ok: true, run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning}}
+		native := &capturingNativeReviewer{}
+		svc := New(nil, store, WithNativeReviewSubmitter(native))
+		if _, err := svc.Submit(context.Background(), "worker-2", "run-native", domain.VerdictApproved, "", ""); !errors.Is(err, ErrInvalid) || native.calls != 0 {
+			t.Fatalf("Submit err=%v native calls=%d; want unauthorized run rejection before provider", err, native.calls)
+		}
+	})
+	t.Run("stale head is explicit degraded provider state", func(t *testing.T) {
+		store := &fakeStore{
+			ok:  true,
+			run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: prURL, TargetSHA: targetSHA, Status: domain.ReviewRunRunning},
+			prs: []domain.PullRequest{{URL: prURL, Author: "worker-app[bot]"}},
+		}
+		native := &capturingNativeReviewer{err: githubreview.ErrStaleHead}
+		svc := New(nil, store, WithNativeReviewSubmitter(native))
+		run, err := svc.Submit(context.Background(), "worker-1", "run-native", domain.VerdictChangesRequested, "Fix it.", "")
+		if err != nil {
+			t.Fatalf("Submit stale head: %v", err)
+		}
+		if run.Status != domain.ReviewRunComplete || run.Verdict != domain.VerdictChangesRequested || run.GithubReviewState != domain.GithubReviewStateDegraded || run.GithubReviewID != "" || run.GithubReviewError == "" {
+			t.Fatalf("stale submission outcome = %+v; want local verdict retained and provider explicitly degraded", run)
+		}
+	})
+}
+
+func TestSubmitNativeReviewRejectsContradictoryProviderEvent(t *testing.T) {
+	store := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-native", SessionID: "worker-1", PRURL: "https://github.com/org/repo/pull/7", TargetSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: domain.ReviewRunRunning},
+		prs: []domain.PullRequest{{URL: "https://github.com/org/repo/pull/7", Author: "worker-app[bot]"}},
+	}
+	native := &capturingNativeReviewer{}
+	svc := New(nil, store, WithNativeReviewSubmitter(native))
+	if _, err := svc.SubmitMany(context.Background(), "worker-1", []SubmittedReview{{
+		RunID: "run-native", Verdict: domain.VerdictChangesRequested, Event: githubreview.EventApprove, Body: "Please fix this.",
+	}}); !errors.Is(err, ErrInvalid) || native.calls != 0 {
+		t.Fatalf("contradictory event err=%v provider calls=%d; want rejection before submission", err, native.calls)
+	}
 }
 
 func (f *fakeStore) ListReviewRunsByBatch(context.Context, domain.SessionID, string) ([]domain.ReviewRun, error) {
